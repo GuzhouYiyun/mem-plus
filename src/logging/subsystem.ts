@@ -1,0 +1,603 @@
+import { expectDefined } from "@openclaw/normalization-core";
+// Subsystem logger helpers create scoped loggers with subsystem-specific filters.
+import { normalizeLowercaseStringOrEmpty } from "@openclaw/normalization-core/string-coerce";
+import { Chalk } from "chalk";
+import type { Logger as TsLogger } from "tslog";
+import { clearActiveProgressLine } from "../../packages/terminal-core/src/progress-line.js";
+import { isVerbose } from "../global-state.js";
+import { hasInternalDiagnosticEventInterest } from "../infra/diagnostic-event-listener-presence.js";
+import { areDiagnosticsEnabledForProcess } from "../infra/diagnostic-events.js";
+import { defaultRuntime, type OutputRuntimeEnv, type RuntimeEnv } from "../runtime.js";
+import {
+  formatConsoleTimestamp,
+  formatJsonConsoleLine,
+  getConsoleSettings,
+  shouldLogSubsystemToConsole,
+} from "./console.js";
+import { type LogLevel, levelToMinLevel } from "./levels.js";
+import { getChildLogger, isFileLogLevelEnabled } from "./logger.js";
+import { redactLogRecordForTransport, redactSensitiveText } from "./redact.js";
+import { loggingState } from "./state.js";
+
+type LogObj = { date?: Date } & Record<string, unknown>;
+
+export type SubsystemLogger = {
+  subsystem: string;
+  isEnabled: (level: LogLevel, target?: "any" | "console" | "file") => boolean;
+  trace: (message: string, meta?: Record<string, unknown>) => void;
+  debug: (message: string, meta?: Record<string, unknown>) => void;
+  info: (message: string, meta?: Record<string, unknown>) => void;
+  warn: (message: string, meta?: Record<string, unknown>) => void;
+  error: (message: string, meta?: Record<string, unknown>) => void;
+  fatal: (message: string, meta?: Record<string, unknown>) => void;
+  raw: (message: string) => void;
+  child: (name: string) => SubsystemLogger;
+};
+
+function normalizeSubsystemLabel(subsystem?: string | null): string {
+  if (typeof subsystem !== "string") {
+    return "unknown";
+  }
+  const normalized = subsystem.trim();
+  return normalized.length > 0 ? normalized : "unknown";
+}
+
+function shouldLogToConsole(level: LogLevel, settings: { level: LogLevel }): boolean {
+  if (level === "silent") {
+    return false;
+  }
+  if (settings.level === "silent") {
+    return false;
+  }
+  const current = levelToMinLevel(level);
+  const min = levelToMinLevel(settings.level);
+  return current >= min;
+}
+
+type ChalkInstance = InstanceType<typeof Chalk>;
+
+const inspectValue: ((value: unknown) => string) | null = (() => {
+  const getBuiltinModule = (
+    process as NodeJS.Process & {
+      getBuiltinModule?: (id: string) => unknown;
+    }
+  ).getBuiltinModule;
+  if (typeof getBuiltinModule !== "function") {
+    return null;
+  }
+  try {
+    const utilNamespace = getBuiltinModule("util") as {
+      inspect?: (value: unknown) => string;
+    };
+    return typeof utilNamespace.inspect === "function" ? utilNamespace.inspect : null;
+  } catch {
+    return null;
+  }
+})();
+
+function formatRuntimeArg(arg: unknown): string {
+  if (typeof arg === "string") {
+    return arg;
+  }
+  if (inspectValue) {
+    return inspectValue(arg);
+  }
+  try {
+    return JSON.stringify(arg);
+  } catch {
+    return String(arg);
+  }
+}
+
+function isRichConsoleEnv(): boolean {
+  const term = normalizeLowercaseStringOrEmpty(process.env.TERM);
+  if (process.env.COLORTERM || process.env.TERM_PROGRAM) {
+    return true;
+  }
+  return term.length > 0 && term !== "dumb";
+}
+
+// Chalk caches style builders per instance; select between fixed levels on each message.
+const consoleColors: [ChalkInstance?, ChalkInstance?] = [];
+
+function getColorForConsole(): ChalkInstance {
+  const hasForceColor =
+    typeof process.env.FORCE_COLOR === "string" &&
+    process.env.FORCE_COLOR.trim().length > 0 &&
+    process.env.FORCE_COLOR.trim() !== "0";
+  const level =
+    hasForceColor ||
+    (!process.env.NO_COLOR && (process.stdout.isTTY || process.stderr.isTTY || isRichConsoleEnv()))
+      ? 1
+      : 0;
+  return (consoleColors[level] ??= new Chalk({ level }));
+}
+
+const SUBSYSTEM_COLORS = ["cyan", "green", "yellow", "blue", "magenta", "red"] as const;
+const SUBSYSTEM_COLOR_OVERRIDES = new Map<string, (typeof SUBSYSTEM_COLORS)[number]>([
+  ["gmail-watcher", "blue"],
+]);
+const SUBSYSTEM_PREFIXES_TO_DROP = ["gateway", "channels", "providers"] as const;
+const SUBSYSTEM_MAX_SEGMENTS = 2;
+const CHANNEL_SUBSYSTEM_PREFIXES = new Set([
+  "clickclack",
+  "discord",
+  "feishu",
+  "googlechat",
+  "imessage",
+  "irc",
+  "line",
+  "matrix",
+  "mattermost",
+  "msteams",
+  "nextcloud-talk",
+  "nostr",
+  "openclaw-weixin",
+  "qqbot",
+  "signal",
+  "slack",
+  "synology-chat",
+  "telegram",
+  "tlon",
+  "twitch",
+  "webchat",
+  "wecom",
+  "whatsapp",
+  "yuanbao",
+  "zalo",
+  "zalouser",
+]);
+
+function isChannelSubsystemPrefix(value: string): boolean {
+  const normalized = normalizeLowercaseStringOrEmpty(value);
+  if (!normalized) {
+    return false;
+  }
+  return CHANNEL_SUBSYSTEM_PREFIXES.has(normalized);
+}
+
+function pickSubsystemColor(subsystem: string): (typeof SUBSYSTEM_COLORS)[number] {
+  const override = SUBSYSTEM_COLOR_OVERRIDES.get(subsystem);
+  if (override) {
+    return override;
+  }
+  let hash = 0;
+  for (let i = 0; i < subsystem.length; i += 1) {
+    hash = (hash * 31 + subsystem.charCodeAt(i)) | 0;
+  }
+  const idx = Math.abs(hash) % SUBSYSTEM_COLORS.length;
+  return expectDefined(SUBSYSTEM_COLORS[idx], "subsystem colors entry at idx");
+}
+
+function formatSubsystemForConsole(subsystem: string): string {
+  const parts = subsystem.split("/").filter(Boolean);
+  const original = parts.join("/") || subsystem;
+  while (parts.length > 0) {
+    const first = parts.at(0);
+    if (
+      first === undefined ||
+      !SUBSYSTEM_PREFIXES_TO_DROP.includes(first as (typeof SUBSYSTEM_PREFIXES_TO_DROP)[number])
+    ) {
+      break;
+    }
+    parts.shift();
+  }
+  const first = parts.at(0);
+  if (first === undefined) {
+    return original;
+  }
+  if (isChannelSubsystemPrefix(first)) {
+    return first;
+  }
+  if (parts.length > SUBSYSTEM_MAX_SEGMENTS) {
+    return parts.slice(-SUBSYSTEM_MAX_SEGMENTS).join("/");
+  }
+  return parts.join("/");
+}
+
+export function stripRedundantSubsystemPrefixForConsole(
+  message: string,
+  displaySubsystem: string,
+): string {
+  if (!displaySubsystem) {
+    return message;
+  }
+
+  // Common duplication when a message manually includes the subsystem tag.
+  if (message.startsWith("[")) {
+    const closeIdx = message.indexOf("]");
+    if (closeIdx > 1) {
+      const bracketTag = message.slice(1, closeIdx);
+      if (
+        normalizeLowercaseStringOrEmpty(bracketTag) ===
+        normalizeLowercaseStringOrEmpty(displaySubsystem)
+      ) {
+        let i = closeIdx + 1;
+        while (message[i] === " ") {
+          i += 1;
+        }
+        return message.slice(i);
+      }
+    }
+  }
+
+  const prefix = message.slice(0, displaySubsystem.length);
+  if (
+    normalizeLowercaseStringOrEmpty(prefix) !== normalizeLowercaseStringOrEmpty(displaySubsystem)
+  ) {
+    return message;
+  }
+
+  const next = message.slice(displaySubsystem.length, displaySubsystem.length + 1);
+  if (next !== ":" && next !== " ") {
+    return message;
+  }
+
+  let i = displaySubsystem.length;
+  while (message[i] === " ") {
+    i += 1;
+  }
+  if (message[i] === ":") {
+    i += 1;
+  }
+  while (message[i] === " ") {
+    i += 1;
+  }
+  return message.slice(i);
+}
+
+function createConsoleLineFormatter(subsystem: string) {
+  const displaySubsystem = formatSubsystemForConsole(subsystem);
+  const prefix = `[${displaySubsystem}]`;
+  const prefixColor = pickSubsystemColor(displaySubsystem);
+  return (level: LogLevel, message: string, style: "pretty" | "compact"): string => {
+    const color = getColorForConsole();
+    const levelColor =
+      level === "error" || level === "fatal"
+        ? color.red
+        : level === "warn"
+          ? color.yellow
+          : level === "debug" || level === "trace"
+            ? color.gray
+            : color.cyan;
+    const redactedMessage = redactSensitiveText(message);
+    const displayMessage = stripRedundantSubsystemPrefixForConsole(
+      redactedMessage,
+      displaySubsystem,
+    );
+    const time =
+      style === "pretty" || loggingState.consoleTimestampPrefix
+        ? color.gray(formatConsoleTimestamp(style))
+        : "";
+    const prefixToken = color[prefixColor](prefix);
+    const head = time ? `${time} ${prefixToken}` : prefixToken;
+    return `${head} ${levelColor(displayMessage)}`;
+  };
+}
+
+function writeConsoleLine(level: LogLevel, line: string, opts: { redacted?: boolean } = {}) {
+  clearActiveProgressLine();
+  const sanitized =
+    process.platform === "win32" && process.env.GITHUB_ACTIONS === "true"
+      ? line.replace(/[\uD800-\uDBFF][\uDC00-\uDFFF]/g, "?").replace(/[\uD800-\uDFFF]/g, "?")
+      : line;
+  // Subsystem console output bypasses the patched console.* capture handler in
+  // ./console.ts to avoid recursion. Normal formatted messages are redacted
+  // before colorization; keep this exit guard for raw writes and structured
+  // lines that reach the sink already serialized (#73284).
+  const redacted = opts.redacted ? sanitized : redactSensitiveText(sanitized);
+  const sink = loggingState.rawConsole ?? console;
+  if (loggingState.forceConsoleToStderr || level === "error" || level === "fatal") {
+    (sink.error ?? console.error)(redacted);
+  } else if (level === "warn") {
+    (sink.warn ?? console.warn)(redacted);
+  } else {
+    (sink.log ?? console.log)(redacted);
+  }
+}
+
+function shouldSuppressProbeConsoleLine(params: {
+  level: LogLevel;
+  suppressProbeMessages: boolean;
+  message?: string | null;
+  meta?: Record<string, unknown>;
+}): boolean {
+  if (isVerbose()) {
+    return false;
+  }
+  if (params.level === "error" || params.level === "fatal") {
+    return false;
+  }
+  const message = typeof params.message === "string" ? params.message : "";
+  if (!params.suppressProbeMessages) {
+    return false;
+  }
+  const runLikeId =
+    typeof params.meta?.runId === "string"
+      ? params.meta.runId
+      : typeof params.meta?.sessionId === "string"
+        ? params.meta.sessionId
+        : undefined;
+  if (runLikeId?.startsWith("probe-")) {
+    return true;
+  }
+  return /(sessionId|runId)=probe-/.test(message);
+}
+
+const CONSOLE_META_LEVELS = new Set<LogLevel>(["warn", "error", "fatal"]);
+const CONSOLE_META_MAX_CHARS = 2048;
+
+function formatConsoleMetaValue(value: unknown): string | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (typeof value === "string") {
+    return /\s|=/.test(value) || value.length === 0 ? JSON.stringify(value) : value;
+  }
+  if (value === null || typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+  // Redaction returned parsed JSON, so anything left is a plain array or object.
+  return JSON.stringify(value);
+}
+
+/** Keeps an Error's message, which a JSON round-trip would otherwise reduce to `{}`. */
+function prepareConsoleMetaRecord(meta: Record<string, unknown>): Record<string, unknown> {
+  let prepared: Record<string, unknown> | undefined;
+  for (const [key, value] of Object.entries(meta)) {
+    if (value instanceof Error) {
+      prepared ??= { ...meta };
+      prepared[key] = value.message;
+    }
+  }
+  return prepared ?? meta;
+}
+
+/**
+ * Renders structured fields as one compact `key=value` tail so warn/error/fatal
+ * records keep their diagnostics in plain-text sinks such as journald, which only
+ * see the console line. The JSON console style and the file sink carry the same
+ * fields natively, so only plain styles call this.
+ *
+ * Fields pass through the shared console transport redactor before flattening, so
+ * key-aware protection such as `apiToken` survives the loss of structure and the
+ * length cap can only clip text that is already masked. That redactor also owns
+ * circular references, bigints, and values with no JSON form, and returns parsed
+ * data, so rendering a value here cannot re-enter a stateful `toJSON`.
+ */
+function formatConsoleMeta(meta: Record<string, unknown>): string {
+  let redacted: Record<string, unknown>;
+  try {
+    redacted = redactLogRecordForTransport(prepareConsoleMetaRecord(meta), { format: "console" });
+  } catch {
+    // A record this sink cannot serialize must not cost the console its message.
+    // The file log and `openclaw logs --json` remain the full-fidelity record.
+    return "";
+  }
+  const parts: string[] = [];
+  for (const [key, value] of Object.entries(redacted)) {
+    const rendered = formatConsoleMetaValue(value);
+    if (rendered !== undefined) {
+      parts.push(`${key}=${rendered}`);
+    }
+  }
+  const joined = parts.join(" ");
+  return joined.length > CONSOLE_META_MAX_CHARS
+    ? `${joined.slice(0, CONSOLE_META_MAX_CHARS)}...(truncated)`
+    : joined;
+}
+
+function logToFile(
+  fileLogger: TsLogger<LogObj>,
+  level: LogLevel,
+  message: string,
+  meta?: Record<string, unknown>,
+) {
+  if (level === "silent") {
+    return;
+  }
+  if (meta && Object.keys(meta).length > 0) {
+    fileLogger[level](meta, message);
+  } else {
+    fileLogger[level](message);
+  }
+}
+
+export function createSubsystemLogger(subsystem: string): SubsystemLogger {
+  const resolvedSubsystem = normalizeSubsystemLabel(subsystem);
+  // Namespace membership is fixed; verbosity and sink settings remain per-message.
+  const suppressProbeMessages =
+    resolvedSubsystem === "agent/embedded" ||
+    resolvedSubsystem.startsWith("agent/embedded/") ||
+    resolvedSubsystem === "model-fallback" ||
+    resolvedSubsystem.startsWith("model-fallback/");
+  let fileChild: TsLogger<LogObj> | undefined;
+  let fileChildWithoutStack: TsLogger<LogObj> | undefined;
+  let formatConsoleLine: ReturnType<typeof createConsoleLineFormatter> | undefined;
+
+  const getFileLogger = (level: LogLevel) => {
+    fileChild ??= getChildLogger({ subsystem: resolvedSubsystem });
+    if (
+      level === "error" ||
+      level === "fatal" ||
+      (areDiagnosticsEnabledForProcess() && hasInternalDiagnosticEventInterest("log.record"))
+    ) {
+      return fileChild;
+    }
+    if (!fileChildWithoutStack) {
+      fileChildWithoutStack = fileChild.getSubLogger({ stack: { capture: "off" } });
+      // Preserve the subsystem's logger ancestry across capture variants.
+      fileChildWithoutStack.settings.parentNames = fileChild.settings.parentNames;
+    }
+    return fileChildWithoutStack;
+  };
+
+  const emitLog = (level: LogLevel, message: string, meta?: Record<string, unknown>) => {
+    const consoleSettings = getConsoleSettings();
+    const consoleEnabled =
+      shouldLogToConsole(level, { level: consoleSettings.level }) &&
+      shouldLogSubsystemToConsole(resolvedSubsystem);
+    const fileEnabled = isFileLogLevelEnabled(level);
+    if (!consoleEnabled && !fileEnabled) {
+      return;
+    }
+    let consoleMessageOverride: string | undefined;
+    let fileMeta = meta;
+    if (meta && Object.keys(meta).length > 0) {
+      const { consoleMessage, ...rest } = meta as Record<string, unknown> & {
+        consoleMessage?: unknown;
+      };
+      if (typeof consoleMessage === "string") {
+        consoleMessageOverride = consoleMessage;
+      }
+      fileMeta = Object.keys(rest).length > 0 ? rest : undefined;
+    }
+    if (fileEnabled) {
+      logToFile(getFileLogger(level), level, message, fileMeta);
+    }
+    if (!consoleEnabled) {
+      return;
+    }
+    // An explicit consoleMessage is the owner's chosen console text; only default
+    // warn/error/fatal console lines carry the structured fields. The JSON style
+    // serializes the same fields itself, so it must not also flatten them here.
+    const consoleMeta =
+      consoleSettings.style !== "json" &&
+      consoleMessageOverride === undefined &&
+      fileMeta &&
+      CONSOLE_META_LEVELS.has(level)
+        ? formatConsoleMeta(fileMeta)
+        : "";
+    const consoleMessage =
+      consoleMessageOverride ?? (consoleMeta ? `${message} ${consoleMeta}` : message);
+    if (
+      shouldSuppressProbeConsoleLine({
+        level,
+        suppressProbeMessages,
+        message: consoleMessage,
+        meta: fileMeta,
+      })
+    ) {
+      return;
+    }
+    writeConsoleLine(
+      level,
+      consoleSettings.style === "json"
+        ? formatJsonConsoleLine({ level, subsystem: resolvedSubsystem, message, meta: fileMeta })
+        : (formatConsoleLine ??= createConsoleLineFormatter(resolvedSubsystem))(
+            level,
+            consoleMessage,
+            consoleSettings.style,
+          ),
+      { redacted: true },
+    );
+  };
+
+  const logger: SubsystemLogger = {
+    subsystem: resolvedSubsystem,
+    isEnabled(level, target = "any") {
+      const isConsoleEnabled =
+        shouldLogToConsole(level, { level: getConsoleSettings().level }) &&
+        shouldLogSubsystemToConsole(resolvedSubsystem);
+      const isFileEnabled = isFileLogLevelEnabled(level);
+      if (target === "console") {
+        return isConsoleEnabled;
+      }
+      if (target === "file") {
+        return isFileEnabled;
+      }
+      return isConsoleEnabled || isFileEnabled;
+    },
+    trace(message, meta) {
+      emitLog("trace", message, meta);
+    },
+    debug(message, meta) {
+      emitLog("debug", message, meta);
+    },
+    info(message, meta) {
+      emitLog("info", message, meta);
+    },
+    warn(message, meta) {
+      emitLog("warn", message, meta);
+    },
+    error(message, meta) {
+      emitLog("error", message, meta);
+    },
+    fatal(message, meta) {
+      emitLog("fatal", message, meta);
+    },
+    raw(message) {
+      if (isFileLogLevelEnabled("info")) {
+        logToFile(getFileLogger("info"), "info", message, { raw: true });
+      }
+      const consoleSettings = getConsoleSettings();
+      if (
+        shouldLogToConsole("info", { level: consoleSettings.level }) &&
+        shouldLogSubsystemToConsole(resolvedSubsystem)
+      ) {
+        if (
+          shouldSuppressProbeConsoleLine({
+            level: "info",
+            suppressProbeMessages,
+            message,
+          })
+        ) {
+          return;
+        }
+        writeConsoleLine(
+          "info",
+          consoleSettings.style === "json"
+            ? formatJsonConsoleLine({
+                level: "info",
+                subsystem: resolvedSubsystem,
+                message,
+              })
+            : message,
+          { redacted: consoleSettings.style === "json" },
+        );
+      }
+    },
+    child(name) {
+      return createSubsystemLogger(`${resolvedSubsystem}/${name}`);
+    },
+  };
+  return logger;
+}
+
+export function runtimeForLogger(
+  logger: SubsystemLogger,
+  exit: RuntimeEnv["exit"] = defaultRuntime.exit,
+): OutputRuntimeEnv {
+  return {
+    log(...args) {
+      logger.info(
+        args
+          .map((arg) => formatRuntimeArg(arg))
+          .join(" ")
+          .trim(),
+      );
+    },
+    error(...args) {
+      logger.error(
+        args
+          .map((arg) => formatRuntimeArg(arg))
+          .join(" ")
+          .trim(),
+      );
+    },
+    writeStdout(value) {
+      logger.info(value);
+    },
+    writeJson(value: unknown, space = 2) {
+      logger.info(JSON.stringify(value, undefined, space > 0 ? space : undefined));
+    },
+    exit,
+  };
+}
+
+export function createSubsystemRuntime(
+  subsystem: string,
+  exit: RuntimeEnv["exit"] = defaultRuntime.exit,
+): OutputRuntimeEnv {
+  return runtimeForLogger(createSubsystemLogger(subsystem), exit);
+}

@@ -1,0 +1,85 @@
+// Defines shared legacy config rule contracts for detection and migration.
+import {
+  asNullableRecord as getRecord,
+  isRecord,
+} from "@openclaw/normalization-core/record-coerce";
+import { isSafeExecutableValue } from "../infra/exec-safety.js";
+
+export { getRecord };
+export type LegacyConfigRule = {
+  path: string[];
+  message: string;
+  match?: (value: unknown, root: Record<string, unknown>) => boolean;
+  // If true, only report when the legacy value is present in the original parsed
+  // source (not only after include/env resolution).
+  requireSourceLiteral?: boolean;
+};
+
+export type LegacyConfigMigrationContext = {
+  /** Parsed configuration exactly as authored in the root config file. */
+  authoredRaw: unknown;
+  /** Configuration after include and environment resolution. */
+  resolvedRaw: unknown;
+};
+
+type LegacyConfigMigration = {
+  id: string;
+  describe: string;
+  apply: (
+    raw: Record<string, unknown>,
+    changes: string[],
+    context?: LegacyConfigMigrationContext,
+  ) => void;
+};
+
+export type LegacyConfigMigrationSpec = LegacyConfigMigration & {
+  legacyRules?: LegacyConfigRule[];
+};
+
+export const ensureRecord = (
+  root: Record<string, unknown>,
+  key: string,
+): Record<string, unknown> => {
+  const existing = root[key];
+  if (isRecord(existing)) {
+    return existing;
+  }
+  const next: Record<string, unknown> = {};
+  root[key] = next;
+  return next;
+};
+
+export const mapLegacyAudioTranscription = (value: unknown): Record<string, unknown> | null => {
+  const transcriber = getRecord(value);
+  const command = Array.isArray(transcriber?.command) ? transcriber?.command : null;
+  if (!command || command.length === 0) {
+    return null;
+  }
+  if (typeof command[0] !== "string") {
+    return null;
+  }
+  if (!command.every((part) => typeof part === "string")) {
+    return null;
+  }
+  const rawExecutable = command[0].trim();
+  if (!isSafeExecutableValue(rawExecutable)) {
+    return null;
+  }
+
+  const args = command.slice(1).map((part) => part.replace(/\{input\}/g, "{{AttachmentPath}}"));
+  const timeoutSeconds =
+    typeof transcriber?.timeoutSeconds === "number" ? transcriber?.timeoutSeconds : undefined;
+
+  const result: Record<string, unknown> = { command: rawExecutable, type: "cli" };
+  if (args.length > 0) {
+    result.args = args;
+  }
+  if (timeoutSeconds !== undefined) {
+    result.timeoutSeconds = timeoutSeconds;
+  }
+  return result;
+};
+
+export const defineLegacyConfigMigration = (
+  migration: LegacyConfigMigrationSpec,
+): LegacyConfigMigrationSpec => migration;
