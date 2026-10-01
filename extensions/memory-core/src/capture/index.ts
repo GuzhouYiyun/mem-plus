@@ -52,6 +52,7 @@ export {
   getCaptureLanguageName,
 } from "./language.js";
 export { captureUtf8ByteLength, truncateCaptureToMaxBytes } from "./context-limit.js";
+export { formatMemoryDreamingDay, isSameMemoryDreamingDay } from "./day.js";
 export {
   claimCapturePrompt,
   deleteCapturePrompt,

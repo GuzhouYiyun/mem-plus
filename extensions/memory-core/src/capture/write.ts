@@ -8,8 +8,8 @@
 // real daily file and lets openclaw own the embedding and the index.
 import fs from "node:fs/promises";
 import path from "node:path";
-import { appendRegularFile } from "openclaw/plugin-sdk/security-runtime";
-import { formatMemoryDreamingDay } from "openclaw/plugin-sdk/memory-core-host-status";
+import { appendRegularFile } from "@openclaw/fs-safe/advanced";
+import { formatMemoryDreamingDay } from "./day.js";
 import { captureEntryMarker } from "./render.js";
 
 export type CaptureWriteTarget = {
