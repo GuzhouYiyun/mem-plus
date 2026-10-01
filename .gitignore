@@ -13,6 +13,10 @@ node_modules/
 memory/
 MEMORY.md
 
+# Real conversation data used as a retrieval test set. Personal, and specific to
+# this machine's history rather than to the project.
+training/
+
 # Scratch output from local model / service experiments
 serve-test.log
 serve-test.err
