@@ -1,11 +1,22 @@
-// Configuration for the local GGUF inference the plugin runs in-process.
+// Configuration for the local GGUF inference the plugin drives.
 //
 // WHY LOCAL INFERENCE
 //   openclaw does not ship a GGUF runtime: it reaches one through either the
 //   `@openclaw/llama-cpp-provider` plugin (a managed llama-server) or an Ollama
-//   endpoint. mem-plus deliberately does neither -- the models are loaded from
-//   disk by `node-llama-cpp` inside this process, so memory extraction and
-//   embedding never leave the machine and need no sidecar service.
+//   endpoint. mem-plus does neither -- the models are loaded from disk by
+//   `node-llama-cpp` in a separate Node process (see `serve/server.mjs` for why
+//   the plugin process cannot host them), so extraction and embedding never
+//   leave the machine.
+//
+// COST OF FAILURE IS THE POINT OF `allowHostedFallback`
+//   When local inference is unavailable, the alternative transport is
+//   `ctx.generate.text` -- the user's own paid OpenCode model. Defaulting to it
+//   means a missing GGUF, an uninstalled dependency or a busy port quietly
+//   converts a free local pipeline into metered API calls, with nothing but a
+//   log line to show for it. That is the opposite of what this plugin promises,
+//   so the fallback is opt-in (`model.allowHostedFallback`). The default is to
+//   skip extraction, keep the snapshot, and let the landing zone retry when the
+//   service is back -- a lost summary is recoverable, silent billing is not.
 //
 // BACKEND PRIORITY
 //   discrete GPU > integrated GPU > CPU, resolved explicitly rather than handed
@@ -21,12 +32,23 @@ import { fileURLToPath } from "node:url";
 
 export type GpuPreference = "auto" | "cuda" | "vulkan" | "cpu";
 
-/** Which model produces capture summaries. `opencode` falls back to `ctx.generate.text`. */
+/** Which model produces capture summaries. `opencode` routes to `ctx.generate.text`. */
 export type ContentBackend = "local" | "opencode";
 
 export type ModelConfig = {
-  /** `false` disables local inference entirely (extract goes to `ctx.generate.text`). */
+  /**
+   * `"opencode"` sends extraction to `ctx.generate.text` on purpose, by explicit
+   * configuration. This is an opt-in, not a failure mode.
+   */
   readonly contentBackend: ContentBackend;
+  /**
+   * Whether an *unavailable local service* may be covered by the user's paid
+   * OpenCode model. Defaults to `false`: with it off, a local failure skips the
+   * extraction for that turn and leaves the record pending for retry, which
+   * costs nothing, whereas falling back spends money on every turn for as long
+   * as the problem lasts.
+   */
+  readonly allowHostedFallback: boolean;
   readonly gpu: GpuPreference;
   readonly modelDir: string;
   readonly contentModelPath: string;
@@ -110,6 +132,10 @@ function readNumber(value: unknown, fallback: number, min: number, max: number):
   return Math.min(max, Math.max(min, Math.trunc(value)));
 }
 
+function readBoolean(value: unknown): boolean | undefined {
+  return typeof value === "boolean" ? value : undefined;
+}
+
 function readGpu(value: unknown): GpuPreference {
   if (value === "auto" || value === "cuda" || value === "vulkan" || value === "cpu") return value;
   return "auto";
@@ -152,6 +178,7 @@ export function readModelConfig(options: unknown): ModelConfig {
 
   return {
     contentBackend,
+    allowHostedFallback: readBoolean(nested["allowHostedFallback"]) ?? false,
     gpu: readGpu(nested["gpu"] ?? root["gpu"]),
     modelDir,
     contentModelPath:

@@ -14,9 +14,15 @@
 
       "options": {
         "model": {
-          // "local" = 本地 GGUF（默认）；"opencode" = 用 OpenCode 自己的模型
-          // 本地模型文件缺失、依赖没装、服务起不来时会自动回落，无需手动改这里
+          // "local" = 本地 GGUF（默认）；"opencode" = 主动要求用 OpenCode 计费模型
+          //
+          // 本地推理不可用时（模型没放对、依赖没装、端口被占、服务崩了），
+          // 默认**不会**改用计费模型：快照照写，抽取推迟到服务恢复。
           "content": "local",
+
+          // 若你确实愿意在本地不可用时用计费模型顶替，改成 true。
+          // 保持 false 的话，长期服务故障不会变成计费账单。
+          "allowHostedFallback": false,
 
           // GGUF 所在目录。默认是 <仓库>/models，也可以指向别处：
           // "dir": "C:/Users/你的用户名/models",
@@ -30,7 +36,7 @@
           "gpu": "auto",
 
           // 抽取太慢时先试 "gpuLayers": "auto"（默认值），
-          // 仍然不行就临时切 "content": "opencode"
+          // 仍然不行就临时把上面的 "content" 改成 "opencode"（会计费）
           // "logLevel": "info"
         },
 

@@ -24,7 +24,11 @@ import {
   listPendingCapturePrompts,
 } from "../../extensions/memory-core/src/capture/index.js";
 import { configureMemoryCoreDreamingState } from "../../extensions/memory-core/src/dreaming-state.js";
-import { createCaptureDependencies } from "./capture-deps.js";
+import {
+  createCaptureDependencies,
+  disabledComplete,
+  hostedComplete,
+} from "./capture-deps.js";
 import { createStorageOpenKeyedStore } from "./kv.js";
 import { missingModelPaths, readModelConfig, readServiceConfig } from "./model/config.js";
 import { createServiceClient, type MemPlusService } from "./model/client.js";
@@ -79,17 +83,30 @@ export default Plugin.define({
     // for why it cannot run inside OpenCode's own process). The service is
     // contacted lazily: probing it during setup would stall plugin loading behind
     // a ~3 s model load in every window, whether or not anything needs extracting.
-    // A failure at extraction time falls back to the OpenCode-hosted model, so a
-    // broken or absent service costs summary quality instead of losing memories.
+    //
+    // If local inference is unusable, extraction is skipped rather than rerouted
+    // to the user's paid model -- see `allowHostedFallback` in model/config.ts.
+    // Snapshots keep working either way, and openclaw's landing zone leaves the
+    // record pending so it is retried once the service is back.
     const modelConfig = readModelConfig(ctx.options);
     const serviceConfig = readServiceConfig(ctx.options);
     const missing = missingModelPaths(modelConfig);
+    const allowHosted = modelConfig.allowHostedFallback;
     let service: MemPlusService | null = null;
     if (modelConfig.contentBackend === "opencode") {
-      log('extraction model = opencode (options.model.content = "opencode")');
+      // Explicit configuration, not a failure mode.
+      log('extraction model = opencode (options.model.content = "opencode") -- metered, by request');
     } else if (missing.length > 0) {
-      log("extraction model = opencode (fallback: GGUF not found)");
       for (const file of missing) log(`  missing ${file} -- see README "本地模型"`);
+      if (allowHosted) {
+        log("extraction model = opencode (fallback: GGUF not found, model.allowHostedFallback = true)");
+      } else {
+        log(
+          "extraction DISABLED (GGUF not found; snapshots still written). " +
+            'Fix the paths, or set options.model.allowHostedFallback = true to ' +
+            "accept metered extraction via the OpenCode model.",
+        );
+      }
     } else {
       service = createServiceClient(serviceConfig, modelConfig, log);
       log(
@@ -103,20 +120,38 @@ export default Plugin.define({
       createCaptureDependencies(
         ctx,
         localService
-          ? {
-              complete: async ({ systemPrompt, prompt }) => {
-                try {
-                  return await localService.extract({ systemPrompt, prompt });
-                } catch (error) {
-                  // One failed call must not poison every later sweep, and a
-                  // summary from another model beats no summary: degrade this turn.
-                  log("local service unavailable, using the OpenCode model for this turn", error);
-                  const result = await ctx.generate.text({ prompt: `${systemPrompt}\n\n${prompt}` });
-                  return result.text;
+          ? async ({ systemPrompt, prompt }) => {
+              try {
+                return await localService.extract({ systemPrompt, prompt });
+              } catch (error) {
+                if (!allowHosted) {
+                  // Throw rather than degrade. The sweep records the failure and
+                  // the record stays pending, so the memory is written later for
+                  // free instead of now at the user's expense.
+                  log(
+                    "local service unavailable; skipping extraction and leaving the " +
+                      "record pending (no metered fallback -- " +
+                      'set options.model.allowHostedFallback = true to change this)',
+                    error,
+                  );
+                  throw error;
                 }
-              },
+                log(
+                  "local service unavailable, using the OpenCode model for this turn " +
+                    "(model.allowHostedFallback = true -- metered)",
+                  error,
+                );
+                return await hostedComplete(ctx)({ systemPrompt, prompt });
+              }
             }
-          : {},
+          : modelConfig.contentBackend === "opencode"
+            // Explicit opt-in, so this one is not a fallback.
+            ? hostedComplete(ctx)
+            : disabledComplete(
+                missing.length > 0
+                  ? `GGUF not found: ${missing.join(", ")}`
+                  : "no local service and no hosted opt-in",
+              ),
       ),
     );
 
@@ -137,6 +172,27 @@ export default Plugin.define({
         log("snapshot failed", error);
       }
       if (closed) return;
+
+      // Gate the sweep on local inference being reachable.
+      //
+      // This has to happen *before* the sweep claims anything. openclaw's
+      // pipeline retries a failing extraction three times with a 2 s base delay
+      // and then parks the record permanently, so an unreachable service that is
+      // allowed to fail inside the pipeline destroys a memory per outage instead
+      // of deferring it. Checking here leaves every prompt pending and its retry
+      // count untouched, which is the same thing `loadTurn` returning no turn
+      // does. The snapshot above still lands either way.
+      //
+      // Nothing to check when extraction is not routed to the local service.
+      if (localService && !(await localService.ready())) {
+        log(
+          "local service unavailable; deferring the sweep. Snapshots keep working " +
+            "and pending captures are retried once the service is back" +
+            (allowHosted ? " -- or set model.allowHostedFallback = false to fail fast" : ""),
+        );
+        return;
+      }
+
       try {
         const outcomes = await capture.runSweep({ sessionId: sessionID });
         for (const outcome of outcomes) {

@@ -22,7 +22,7 @@ OpenCode does not remember: what a session figured out, which files it touched, 
 | LLM extraction | openclaw's original pipeline; emits `## Request` / `## Outcome` plus `Tags`, filters `type="skip"`, keeps openclaw's idempotency marker |
 | Global archive | Every project's sessions mirrored to `~/.config/opencode/mem-plus/archive/<project>/` |
 | Local models | Measured on a Vulkan iGPU: ~14 s from cold start to written, 4–12 s per extraction |
-| Graceful fallback | Missing model files, uninstalled deps, or a service that will not start → falls back to OpenCode's own model, capture keeps working |
+| **Never bills you** | When local inference is unavailable the plugin does **not** silently switch to your paid OpenCode model. Snapshots keep landing; extraction is deferred until the service is back |
 
 **Not built yet**
 
@@ -112,7 +112,8 @@ Full example: [`opencode.example.jsonc`](./opencode.example.jsonc).
 
 | Option | Default | Meaning |
 |---|---|---|
-| `model.content` | `"local"` | `"local"` uses local GGUF; `"opencode"` forces OpenCode's own model |
+| `model.content` | `"local"` | `"local"` uses local GGUF; `"opencode"` **actively asks** for your metered OpenCode model |
+| `model.allowHostedFallback` | `false` | Whether an *unavailable local service* may be covered by the metered model. Default `false` — see [You are never silently billed](#you-are-never-silently-billed) |
 | `model.dir` | `<repo>/models` | Directory holding the GGUF files |
 | `model.contentPath` | `<model.dir>/qwen3.5-4b-q4_k_m.gguf` | Extraction model |
 | `model.embedPath` | `<model.dir>/bge-m3-f16.gguf` | Embedding model |
@@ -122,6 +123,56 @@ Full example: [`opencode.example.jsonc`](./opencode.example.jsonc).
 | `model.maxNewTokens` | `512` | Cap on tokens generated per extraction |
 | `model.threads` | `0` | CPU threads, `0` = unlimited (CPU fallback only) |
 | `model.logLevel` | `"warn"` | `"silent"` / `"warn"` / `"info"` / `"debug"` |
+
+### You are never silently billed
+
+The entire point of this plugin is that inference stays local. So when local inference is **unavailable** — GGUF in the wrong directory, dependencies not installed, port taken, service crashed — the plugin does **not** route extraction to your metered OpenCode model. The default is:
+
+1. Snapshots keep landing (this part is free)
+2. **Extraction is skipped**; the pending record stays in the landing zone with its retry count untouched
+3. When the service is back, the next sweep extracts normally
+
+The log says so:
+
+```
+[mem-plus] local service unavailable; deferring the sweep. Snapshots keep working
+           and pending captures are retried once the service is back
+```
+
+**Why not "fall back on failure"?** Two reasons, both measured rather than argued.
+
+**One: falling back burns money quietly.** An earlier version did fall back by default, so the one extraction that ran while the local service was down went through your paid model — visible nowhere but a log line. A plugin that advertises free local inference has no business turning a configuration mistake into an API bill.
+
+**Two: throwing is worse than billing.** openclaw's pipeline retries a failed extraction 3 times with a 2 s base delay, then parks the record permanently. Running the real pipeline against a transport that always throws:
+
+```
+complete() called 3 times → outcome = exhausted → still pending = 0
+```
+
+A ten-second outage and the memory is gone. So the plugin probes the service *before* the sweep claims anything:
+
+```
+service down → sweep skipped, complete() never called, attempts still 0, record kept
+service back → captured on the first attempt, complete() called once
+```
+
+To opt into metered extraction, either way:
+
+```jsonc
+{
+  "model": {
+    "allowHostedFallback": true   // cover an unavailable local service
+  }
+}
+```
+
+```jsonc
+{
+  "model": {
+    "content": "opencode"        // always use the metered model
+  }
+}
+```
 
 ### Inference service
 
@@ -342,9 +393,13 @@ cd plugin
 node serve/server.mjs --port 4748
 ```
 
-**`extraction model = opencode (fallback: GGUF not found)`** — the model files are not where the config says. The log names the exact missing path.
+**`extraction DISABLED (GGUF not found)`** — the model files are not where the config says; the log names the exact missing path. Snapshots still land, there is just no extraction.
 
-**Extraction is very slow** — hardware-dependent. Keep `model.gpu: "auto"` and read the backend and per-call timings from the log. To route back to OpenCode's hosted model for now: `"model": { "content": "opencode" }`.
+**`local service unavailable; deferring the sweep`** — the service is temporarily unavailable. Records are kept pending until it returns. Not an error.
+
+**`using the OpenCode model ... (metered)`** — you enabled `model.allowHostedFallback`, so that extraction cost money.
+
+**Extraction is very slow** — hardware-dependent. Keep `model.gpu: "auto"` and read the backend and per-call timings from the log. To route to OpenCode's hosted model for now: `"model": { "content": "opencode" }` (**metered**).
 
 **`memory/` never appears** — a session needs at least one *completed* turn. Then allow the 2 s debounce plus the extraction run. Search the log for the `snapshot` and `captured` lines to confirm.
 

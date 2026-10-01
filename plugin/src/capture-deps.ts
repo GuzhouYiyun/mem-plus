@@ -89,19 +89,54 @@ async function readTail(filePath: string, maxChars: number): Promise<string | nu
 }
 
 /**
- * Replacement extraction transport. Normally the local GGUF runtime; the default
- * below is the OpenCode-hosted fallback, used when local inference is switched
- * off or its model files are absent.
+ * Extraction transport: one prompt in, one completion out.
+ *
+ * There is deliberately no default. The only implementation that costs money is
+ * `ctx.generate.text`, so an implicit default of "use the OpenCode model" turns
+ * every configuration mistake -- GGUF in the wrong directory, dependencies not
+ * installed, port busy -- into metered API calls that the user never asked for
+ * and cannot see. The caller must name the transport it wants.
  */
 export type CaptureCompleteOverride = (params: {
   systemPrompt: string;
   prompt: string;
 }) => Promise<string>;
 
+/** Raised by `disabledComplete`; carries no paid request behind it. */
+export class ExtractionDisabledError extends Error {
+  constructor(reason: string) {
+    super(`extraction disabled: ${reason}`);
+    this.name = "ExtractionDisabledError";
+  }
+}
+
+/**
+ * The transport used when local inference is not available and the user has not
+ * opted into hosted extraction. Throwing keeps openclaw's landing zone semantics
+ * intact: the record stays pending and is retried, so the memory is written later
+ * and for free instead of never.
+ */
+export function disabledComplete(reason: string): CaptureCompleteOverride {
+  return async () => {
+    throw new ExtractionDisabledError(reason);
+  };
+}
+
+/**
+ * Metered transport via the user's own OpenCode model. Only reachable through an
+ * explicit `model.content: "opencode"` or `model.allowHostedFallback: true`.
+ */
+export function hostedComplete(ctx: PluginContext): CaptureCompleteOverride {
+  return async ({ systemPrompt, prompt }) => {
+    const result = await ctx.generate.text({ prompt: `${systemPrompt}\n\n${prompt}` });
+    return result.text;
+  };
+}
+
 /**
  * Build the host half of the capture pipeline.
  *
- * `complete` folds the system prompt into a single user prompt on the fallback
+ * `complete` folds the system prompt into a single user prompt on the hosted
  * path, because `ctx.generate.text` has no system parameter:
  * `buildBoundedSummaryPrompt` emits the conversation body only, and
  * `extractCaptureSummary` hands the system prompt back out separately for the
@@ -109,15 +144,8 @@ export type CaptureCompleteOverride = (params: {
  */
 export function createCaptureDependencies(
   ctx: PluginContext,
-  overrides: { complete?: CaptureCompleteOverride } = {},
+  complete: CaptureCompleteOverride,
 ): CaptureDependencies {
-  const complete: CaptureCompleteOverride =
-    overrides.complete ??
-    (async ({ systemPrompt, prompt }) => {
-      const result = await ctx.generate.text({ prompt: `${systemPrompt}\n\n${prompt}` });
-      return result.text;
-    });
-
   return {
     workspaceDir: ctx.location.directory,
 

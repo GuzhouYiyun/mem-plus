@@ -37,7 +37,7 @@ OpenCode 本身不记事：这个会话查清了什么、改了哪些文件、�
 | LLM 抽取 | 走 openclaw 原管线，产出 `## Request` / `## Outcome` 摘要 + `Tags`，`type="skip"` 自动过滤，带幂等来源标记 |
 | 全局档案 | 每个项目的会话镜像到 `~/.config/opencode/mem-plus/archive/<项目>/` |
 | 本地模型 | 本机 Vulkan 核显实测：从冷启动到写入完成约 14 秒，单次抽取 4–12 秒 |
-| 自动回落 | 模型文件缺失、依赖没装、服务起不来 → 退回 OpenCode 自己的模型，捕获照常工作 |
+| **绝不计费** | 本地推理不可用时**不会**偷偷改用你的 OpenCode 付费模型。快照照写，抽取推迟到服务恢复 |
 
 **还没实现**
 
@@ -136,7 +136,8 @@ mem-plus/models/bge-m3-f16.gguf
 
 | 选项 | 默认值 | 说明 |
 |---|---|---|
-| `model.content` | `"local"` | `"local"` 用本地 GGUF；`"opencode"` 强制用 OpenCode 自己的模型 |
+| `model.content` | `"local"` | `"local"` 用本地 GGUF；`"opencode"` **主动要求**改用 OpenCode 自己的计费模型 |
+| `model.allowHostedFallback` | `false` | 本地推理**不可用时**是否改用计费模型。默认 `false`，见 [不会偷偷扣费](#不会偷偷扣费) |
 | `model.dir` | `<仓库>/models` | GGUF 所在目录 |
 | `model.contentPath` | `<model.dir>/qwen3.5-4b-q4_k_m.gguf` | 抽取模型完整路径 |
 | `model.embedPath` | `<model.dir>/bge-m3-f16.gguf` | 向量模型完整路径 |
@@ -146,6 +147,56 @@ mem-plus/models/bge-m3-f16.gguf
 | `model.maxNewTokens` | `512` | 单次抽取最多生成多少 token |
 | `model.threads` | `0` | CPU 线程数，`0` = 不限制（仅 CPU 回退时生效） |
 | `model.logLevel` | `"warn"` | `"silent"` / `"warn"` / `"info"` / `"debug"` |
+
+### 不会偷偷扣费
+
+这个项目的全部意义就是"推理跑在本地"。所以当本地推理**不可用**时（GGUF 放错目录、依赖没装、端口被占、服务崩了），插件**不会**改用你的 OpenCode 计费模型 —— 默认行为是：
+
+1. 快照照常写入（这部分完全不花钱）
+2. **跳过抽取**，待处理记录原样留在 landing zone，重试次数不变
+3. 服务恢复后，下一次 sweep 正常抽取
+
+日志里会写明：
+
+```
+[mem-plus] local service unavailable; deferring the sweep. Snapshots keep working
+           and pending captures are retried once the service is back
+```
+
+**为什么不是"失败就回落"？** 两个原因，都是实测出来的：
+
+**一，回落会静默烧钱。** 早期版本默认回落，于是本地服务起不来的那一次，抽取悄悄走了你的付费模型 —— 日志之外你不会知道。一个"免费本地"的插件，不能把配置错误变成计费账单。
+
+**二，直接抛错比扣钱更糟。** openclaw 的抽取管线对失败重试 3 次、基准延迟 2 秒，耗尽后该记录被**永久搁置**。用真实管线实测：
+
+```
+complete() 被调用 3 次 → outcome = exhausted → 仍在 pending = 0
+```
+
+也就是说服务停 10 秒，那条记忆就没了。所以插件在 sweep **认领任何记录之前**先探一次服务：
+
+```
+服务挂 → 跳过 sweep，complete() 一次没调，attempts 仍为 0，记录保留
+服务回 → 第一次尝试就 captured，只调 1 次 complete
+```
+
+要主动接受计费，两种方式：
+
+```jsonc
+{
+  "model": {
+    "allowHostedFallback": true   // 本地不可用时用计费模型顶替
+  }
+}
+```
+
+```jsonc
+{
+  "model": {
+    "content": "opencode"        // 全程都用计费模型
+  }
+}
+```
 
 ### 推理服务
 
@@ -382,11 +433,13 @@ cd plugin
 node serve/server.mjs --port 4748
 ```
 
-**`extraction model = opencode (fallback: GGUF not found)`** —— 模型文件不在。日志会打印具体缺哪个路径。
+**`extraction DISABLED (GGUF not found)`** —— 模型文件不在，日志里会打印缺哪个路径。快照照写，只是没有抽取。
 
-**`extraction model = opencode (fallback: ...)`** —— `model.content` 被设成了 `"opencode"`，或者 GGUF 缺失。
+**`local service unavailable; deferring the sweep`** —— 服务暂时不可用。记录原样保留等服务回来，不是错误。
 
-**抽取特别慢** —— 取决于硬件。保持 `model.gpu: "auto"`，日志里看最终选中的后端和每次耗时。嫌慢就临时切回 OpenCode 托管的模型：`"model": { "content": "opencode" }`。
+**`using the OpenCode model ... (metered)`** —— 你开了 `model.allowHostedFallback`，这次抽取花了你的钱。
+
+**抽取特别慢** —— 取决于硬件。保持 `model.gpu: "auto"`，日志里看最终选中的后端和每次耗时。嫌慢就临时切回 OpenCode 托管的模型：`"model": { "content": "opencode" }`（**会计费**）。
 
 **`memory/` 目录一直不出现** —— 会话得至少有一个**完成的回合**才会触发写入。落地之后还要等 2 秒防抖 + 抽取跑完。日志里搜 `snapshot` 和 `captured` 两行确认。
 

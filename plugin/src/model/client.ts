@@ -37,6 +37,16 @@ export type MemPlusService = {
   readonly url: string | null;
   /** What `/health` said the last time we asked; `null` if never reachable. */
   readonly health: ServiceHealth | null;
+  /**
+   * Whether extraction is possible right now, starting the service if needed.
+   *
+   * Called *before* a sweep claims any work. `maxRetries` is 3 with a 2 s base
+   * delay, so letting an unreachable service fail inside the pipeline burns the
+   * whole retry budget in about six seconds and then parks the record for good --
+   * a ten-second outage would cost a memory permanently. Gating here means an
+   * outage leaves every prompt untouched and pending instead.
+   */
+  ready(): Promise<boolean>;
   extract(params: { systemPrompt: string; prompt: string }): Promise<string>;
   embed(input: string): Promise<readonly number[]>;
   /** Stops the service, but only if this plugin was the one that started it. */
@@ -299,6 +309,16 @@ export function createServiceClient(
     },
     get health(): ServiceHealth | null {
       return lastHealth;
+    },
+
+    ready: async () => {
+      try {
+        await ensureConnected();
+        return true;
+      } catch (error) {
+        log(`service not ready: ${describeError(error)}`);
+        return false;
+      }
     },
 
     extract: ({ systemPrompt, prompt }) =>
