@@ -168,8 +168,28 @@ async function embedQuery(
   }
 }
 
-/** Fill in vectors for units that do not have one. Returns how many were added. */
-async function embedMissing(
+/**
+ * Whether the embedding service refused this one input, rather than being unable
+ * to serve any request.
+ *
+ * The service reports an over-long input as a 400/500 whose body says the input is
+ * longer than the usable context; that is a property of the payload. Anything else
+ * -- a refused connection, a model that failed to load, a timeout -- is a property
+ * of the service, and no payload will fix it.
+ */
+export function isUnitInputRejected(error: unknown): boolean {
+  const text = error instanceof Error ? `${error.message}` : String(error);
+  return /longer than the usable context|input.{0,20}(?:too|exceed)/i.test(text);
+}
+
+/**
+ * Fill in vectors for units that do not have one. Returns how many were added.
+ *
+ * Exported so an index can be repaired without going through `memory_reindex`:
+ * reindexing prunes whatever it did not scan, so it cannot rebuild one root while
+ * leaving the others alone, whereas embedding is purely additive and always safe.
+ */
+export async function embedMissing(
   deps: RetrievalDeps,
   budget: number,
   signal: AbortSignal | undefined,
@@ -177,6 +197,7 @@ async function embedMissing(
   const db = deps.db;
   if (!db || !deps.service || budget <= 0) return 0;
   let written = 0;
+  const rejected: { id: number; chars: number }[] = [];
   for (const unit of unitsMissingVectors(db, budget)) {
     // Checked before each unit, not just once: this loop is the longest-running
     // thing a tool call can do here, so a stop request that arrives halfway
@@ -188,11 +209,33 @@ async function embedMissing(
       written += 1;
     } catch (error) {
       if (signal?.aborted) break;
-      deps.log(`embedding unit ${unit.id} failed`, error);
-      // One failure usually means the model is gone; stop rather than burning
-      // the rest of the budget on the same error.
-      break;
+      // Whether to keep going depends on why it failed, and the two cases need
+      // opposite handling.
+      //
+      // A service that is gone fails every unit identically, so continuing would
+      // spend the whole budget rediscovering that. Stop.
+      //
+      // One input the model cannot accept -- it overflows the context, or it is
+      // rejected outright -- fails alone and would fail identically on every later
+      // pass, because the queue is `ORDER BY id` and the offending unit keeps
+      // coming back first. Breaking here therefore strands it permanently: it blocks
+      // every unit behind it and no future call can get past it. Skipping and
+      // reporting is the only way the rest of the index ever gets embedded.
+      if (!isUnitInputRejected(error)) {
+        deps.log(`embedding unit ${unit.id} failed`, error);
+        break;
+      }
+      const chars = unit.text.length;
+      rejected.push({ id: unit.id, chars });
+      deps.log(`embedding unit ${unit.id} skipped: ${chars} characters exceeds the model's input limit`);
     }
+  }
+  if (rejected.length > 0) {
+    deps.log(
+      `${written} embedded, ${rejected.length} skipped for exceeding the model input limit ` +
+        `(unit ids ${rejected.map((r) => r.id).join(", ")}). These are not searchable by ` +
+        "meaning; they remain findable by keyword.",
+    );
   }
   return written;
 }

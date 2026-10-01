@@ -63,6 +63,28 @@ export function logFile(): string {
   return path.join(stateRoot(), "mem-plus.log");
 }
 
+/**
+ * The project an archived snapshot belongs to, read back out of its path.
+ *
+ * `archiveRoot()/<project-slug>/memory/<file>` puts the owning project in the
+ * directory name, so the archive copy already knows which project it is a copy of.
+ * Deriving identity from that, rather than from whichever window happened to write
+ * it, is what keeps one document from carrying a different `project` in every
+ * project that touched it.
+ *
+ * Returns undefined for a path that is not under the archive root, so a caller can
+ * fall back rather than record a bogus identity.
+ */
+export function archiveProjectSlug(file: string): string | undefined {
+  const relative = path.relative(archiveRoot(), path.resolve(file));
+  // Outside the archive, or escaping it via `..`.
+  if (relative.length === 0 || relative.startsWith("..") || path.isAbsolute(relative)) return undefined;
+  const [slug] = relative.split(/[\\/]/);
+  // The slug always ends in `--<6 hex>`; requiring that keeps `memory` and any other
+  // stray directory from being mistaken for a project identity.
+  return slug && /--[0-9a-f]{6}$/.test(slug) ? slug : undefined;
+}
+
 /** `C:\work\repos\mem-plus` -> `mem-plus--4f2a1c` (stable, filesystem-safe). */
 export function projectSlug(workspaceDir: string): string {
   const resolved = path.resolve(workspaceDir).replace(/\\/g, "/");

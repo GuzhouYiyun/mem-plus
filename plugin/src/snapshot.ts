@@ -68,12 +68,42 @@ function renderToolPart(part: SessionContentPart, indent: string): string[] {
   return lines;
 }
 
+/**
+ * Inline `data:` URLs -- base64 payloads, above all -- are elided before an
+ * attachment is written.
+ *
+ * A single screenshot is tens of thousands of base64 characters, and none of it is
+ * text: it cannot be read, searched or embedded. Left in place, one attached image
+ * turns a one-line turn into an ~80k-character unit that overflows the embedding
+ * model's context, and any search result quoting it returns an unreadable wall of
+ * base64. The image itself is untouched in OpenCode's own storage; only the inline
+ * copy inside this snapshot is replaced.
+ *
+ * The pattern matches on the media type and a payload long enough to be real data,
+ * so it covers PNG, JPEG, WebP, PDF and plain text alike rather than one encoding.
+ */
+const INLINE_DATA_URL = /"data:([^";,\s]+)((?:;[^"]*?)*);base64,([A-Za-z0-9+/=\s]{32,}?)"/g;
+
+/** Replaces an elided payload, naming what was dropped so the loss is visible. */
+function elideInlineData(text: string): string {
+  return text.replace(INLINE_DATA_URL, (_match, mediaType: string, params: string, payload: string) => {
+    const bytes = Math.round((payload.replace(/\s+/g, "").length * 3) / 4);
+    const kind = mediaType.split("/")[0] || "binary";
+    return `"data:${mediaType}${params};base64,[elided ${kind}, ~${bytes} bytes]"`;
+  });
+}
+
 function safeJson(value: unknown): string {
-  try {
-    return JSON.stringify(value, null, 2) ?? String(value);
-  } catch {
-    return String(value);
-  }
+  const text = (() => {
+    try {
+      return JSON.stringify(value, null, 2) ?? String(value);
+    } catch {
+      return String(value);
+    }
+  })();
+  // Applied to the serialised form rather than the object: the payload is an
+  // ordinary string once encoded, so this catches it whichever field held it.
+  return elideInlineData(text);
 }
 
 /** Render one session into the markdown that lands in `memory/<day>-<slug>.md`. */

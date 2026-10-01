@@ -113,15 +113,56 @@ function parseIso(value: string): { ts: number; day: string } | null {
  * `*` and backtick carry the emphasis and go; `>` is blockquote and, once comments
  * are gone, has nothing left to mark.
  */
+/**
+ * Inline base64 image payloads, wherever they appear in a snapshot.
+ *
+ * A session with a screenshot attached writes the whole image into the markdown --
+ * tens of thousands of characters of PNG per image. That is not searchable text
+ * and it is not embeddable: kept as a unit it overflows the embedding model's
+ * context (2k tokens) and any excerpt quoting it is unreadable.
+ *
+ * Keyed on the JSON field rather than on a `data:` URI, because that is how it
+ * actually appears. The attachment is written with `JSON.stringify(value, null, 2)`,
+ * which breaks a long string across lines, so the literal text is
+ * `"data": "<base64"` -- the `data:` and the payload are separated by a newline and
+ * any scheme that followed it is gone. A pattern written for a complete data URL
+ * matches nothing here. The sibling `"mime"` field supplies the media type.
+ *
+ * The write path elides these too (see snapshot.ts); this is the second line of
+ * defence for snapshots captured before that, and for files moved in from outside.
+ */
+const INLINE_IMAGE_DATA =
+  /"data":\s*"([A-Za-z0-9+/\n\r=]{200,}?)(?="\s*,?\s*\n\s*(?:"mime"|"[^"]+"\s*:))/g;
+
+/**
+ * Base64 for a single image is long. The floor keeps ordinary data in memory -- a
+ * snippet of code, a hash, a small blob -- from being mistaken for an embedded
+ * image and deleted.
+ */
+const MIN_INLINE_IMAGE_CHARS = 1_000;
+
+function elideInlineData(text: string): string {
+  return text.replace(INLINE_IMAGE_DATA, (match, payload: string) => {
+    const compact = payload.replace(/\s+/g, "");
+    if (compact.length < MIN_INLINE_IMAGE_CHARS) return match;
+    const bytes = Math.round((compact.length * 3) / 4);
+    // The type is whatever the sibling field says; it is only a label, so it is
+    // worth reporting and not worth parsing precisely.
+    return `"data": "[elided image, ~${bytes} bytes]"`;
+  });
+}
+
 function flatten(body: string): string {
-  return body
-    .replace(/<!--[\s\S]*?-->/g, " ")
-    .replace(/```[\w+-]*\r?\n?/g, "\n")
-    .replace(/^\s{0,3}#{1,6}\s+/gm, "")
-    .replace(/[*`>]/g, "")
-    .replace(/\r\n/g, "\n")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
+  return elideInlineData(
+    body
+      .replace(/<!--[\s\S]*?-->/g, " ")
+      .replace(/```[\w+-]*\r?\n?/g, "\n")
+      .replace(/^\s{0,3}#{1,6}\s+/gm, "")
+      .replace(/[*`>]/g, "")
+      .replace(/\r\n/g, "\n")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim(),
+  );
 }
 
 /** A short display title: the first non-empty line, trimmed to something sane. */

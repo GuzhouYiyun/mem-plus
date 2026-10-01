@@ -172,8 +172,13 @@ async function getEmbedModel() {
   const gpuLayers = llama.gpu === false ? 0 : config.gpuLayers;
   const model = await llama.loadModel({ modelPath: config.embedPath, gpuLayers });
   // 记忆块就几 KB，2048 token 足够，不必占 bge-m3 的完整 8192 窗口。
-  const context = await model.createEmbeddingContext({ contextSize: 2048 });
-  state.embed = { model, context };
+  const contextSize = 2048;
+  const context = await model.createEmbeddingContext({ contextSize });
+  // Reported so the caller can reject an over-long input instead of letting the
+  // model throw. bge-m3 tokenises roughly one token per CJK character and per four
+  // latin characters, so the conservative bound is CJK characters: a text of which
+  // this many are CJK cannot exceed the context.
+  state.embed = { model, context, maxChars: contextSize };
   log(`embedding model loaded: ${config.embedPath}`);
   return state.embed;
 }
@@ -407,6 +412,23 @@ const server = createServer((req, res) => {
       const body = await readBody(req, 1024 * 1024);
       if (typeof body.input !== "string" || body.input.length === 0) {
         return sendJson(res, 400, { error: "input is required" });
+      }
+      // Reject an input the context cannot hold, as a 400 naming the limit.
+      //
+      // Left to the model this surfaces as a 500, which reads as "the service is
+      // broken" and makes a caller stop embedding anything at all. A 400 is a
+      // statement about this one request, so the caller can skip that unit and
+      // continue. Checked against a conservative bound -- bge-m3 costs about a token
+      // per CJK character and per four latin ones, so the CJK count is the limit that
+      // cannot be exceeded.
+      const { maxChars } = state.embed ?? {};
+      if (maxChars !== undefined) {
+        const cjk = (body.input.match(/[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff]/g) ?? []).length;
+        if (cjk > maxChars) {
+          return sendJson(res, 400, {
+            error: `input is longer than the usable context size (${cjk} CJK characters > ${maxChars} tokens)`,
+          });
+        }
       }
       const vector = await embed(body.input);
       return sendJson(res, 200, { vector });

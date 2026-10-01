@@ -42,7 +42,7 @@ import { createLogger } from "./log.js";
 import { indexPath, openIndex } from "./memory-index.js";
 import { indexWrittenFile, indexTail } from "./memory-scan.js";
 import { buildMemoryTools } from "./memory-tools.js";
-import { logFile, projectSlug } from "./paths.js";
+import { archiveProjectSlug, logFile, projectSlug } from "./paths.js";
 import type { EventView, PluginContext } from "./opencode.js";
 import { writeSessionSnapshot } from "./snapshot.js";
 
@@ -213,11 +213,22 @@ export default Plugin.define({
     ): Promise<void> => {
       if (!index) return;
       for (const file of files) {
+        // Project identity comes from the file's own location, not from this
+        // window's `slug`. The index is shared by every project on the machine, so
+        // labelling an archive copy with whichever project happened to capture it
+        // made one document carry a different identity in every window that touched
+        // it, and a `project` filter then silently dropped it. The archive layout
+        // already encodes the owning project as a directory name; the project copy
+        // sits under this workspace, which is the one case where they agree.
+        //
+        // Two documents of one snapshot -- the project copy and its archive mirror --
+        // now carry the same identity and the same content hash, which is what lets
+        // the mirror suppression in indexDocument treat the second as a copy.
         const written = await indexWrittenFile({
           db: index,
           file,
           root,
-          project: slug,
+          project: root === "archive" ? archiveProjectSlug(file) ?? slug : slug,
           log,
         });
         if (written > 0) log(`indexed ${written} unit(s) from ${file}`);
