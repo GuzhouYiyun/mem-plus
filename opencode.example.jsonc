@@ -1,0 +1,38 @@
+// mem-plus —— 可直接抄进 opencode.jsonc 的最小配置
+//
+// 用法：把下面 plugins 数组里的内容合并进你的 opencode.jsonc，
+//       把 package 的路径改成你 clone mem-plus 的实际位置。
+//
+// 想省事的话，只保留 "package" 一行就够 —— 所有选项都有默认值。
+
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugins": [
+    {
+      // 必须指向仓库里的 plugin/ 子目录，不是仓库根目录
+      "package": "C:/Users/你的用户名/repos/mem-plus/plugin",
+
+      "options": {
+        "model": {
+          // "local" = 本地 GGUF（默认）；"opencode" = 用 OpenCode 自己的模型
+          // 本地模型文件缺失或依赖没装时会自动回落，无需手动改这里
+          "content": "local",
+
+          // GGUF 所在目录。默认是 <仓库>/models，也可以指向别处：
+          // "dir": "C:/Users/你的用户名/models",
+
+          // 需要分别指定时再打开这两行
+          // "contentPath": "C:/Users/你的用户名/models/qwen3.5-4b-q4_k_m.gguf",
+          // "embedPath":   "C:/Users/你的用户名/models/bge-m3-f16.gguf",
+
+          // 独显 > 核显 > CPU。默认 "auto" 就是按这个顺序试
+          // 可选：cuda / vulkan / cpu
+          "gpu": "auto",
+
+          // 抽取太慢时先试 "gpuLayers": "auto"（默认值），仍不行再换 "content": "opencode"
+          // "logLevel": "info"
+        }
+      }
+    }
+  ]
+}

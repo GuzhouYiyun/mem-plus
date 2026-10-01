@@ -6,3 +6,27 @@ models/
 
 # Installed dependencies (type-check toolchain only; see ANALYSIS.txt §7)
 node_modules/
+
+# Plugin runtime artifacts. The plugin writes these into whatever workspace it
+# is loaded into -- including this repository, when testing the plugin here --
+# so they must not be committed.
+memory/
+MEMORY.md
+
+# Scratch output from local model / service experiments
+serve-test.log
+serve-test.err
+*.log
+
+# Transient probe scripts written next to the code being probed
+probe-binding.mjs
+diag.mjs
+meta.mjs
+raw.mjs
+fewshot.mjs
+t.mjs
+t2.mjs
+t3.mjs
+m2.mjs
+m3.mjs
+*.txt

@@ -89,25 +89,41 @@ async function readTail(filePath: string, maxChars: number): Promise<string | nu
 }
 
 /**
+ * Replacement extraction transport. Normally the local GGUF runtime; the default
+ * below is the OpenCode-hosted fallback, used when local inference is switched
+ * off or its model files are absent.
+ */
+export type CaptureCompleteOverride = (params: {
+  systemPrompt: string;
+  prompt: string;
+}) => Promise<string>;
+
+/**
  * Build the host half of the capture pipeline.
  *
- * `complete` folds the system prompt into a single user prompt because
- * `ctx.generate.text` has no system parameter: `buildBoundedSummaryPrompt` emits the
- * conversation body only, and `extractCaptureSummary` hands the system prompt back
- * out separately for the host to place.
+ * `complete` folds the system prompt into a single user prompt on the fallback
+ * path, because `ctx.generate.text` has no system parameter:
+ * `buildBoundedSummaryPrompt` emits the conversation body only, and
+ * `extractCaptureSummary` hands the system prompt back out separately for the
+ * host to place. A local runtime gets both separately and templates them itself.
  */
-export function createCaptureDependencies(ctx: PluginContext): CaptureDependencies {
+export function createCaptureDependencies(
+  ctx: PluginContext,
+  overrides: { complete?: CaptureCompleteOverride } = {},
+): CaptureDependencies {
+  const complete: CaptureCompleteOverride =
+    overrides.complete ??
+    (async ({ systemPrompt, prompt }) => {
+      const result = await ctx.generate.text({ prompt: `${systemPrompt}\n\n${prompt}` });
+      return result.text;
+    });
+
   return {
     workspaceDir: ctx.location.directory,
 
     loadTurn: (record) => loadAssistantTurn(ctx, record),
 
-    complete: async ({ systemPrompt, prompt }) => {
-      const result = await ctx.generate.text({
-        prompt: `${systemPrompt}\n\n${prompt}`,
-      });
-      return result.text;
-    },
+    complete,
 
     loadLatestMemory: async (record) => {
       const daily = await readTail(dailyMemoryFile(ctx.location.directory, record.createdAt), CAPTURE_LATEST_MEMORY_CHARS);

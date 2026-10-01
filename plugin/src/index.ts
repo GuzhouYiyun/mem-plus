@@ -26,6 +26,10 @@ import {
 import { configureMemoryCoreDreamingState } from "../../extensions/memory-core/src/dreaming-state.js";
 import { createCaptureDependencies } from "./capture-deps.js";
 import { createStorageOpenKeyedStore } from "./kv.js";
+import { missingModelPaths, readModelConfig, readServiceConfig } from "./model/config.js";
+import { createServiceClient, type MemPlusService } from "./model/client.js";
+import { createLogger } from "./log.js";
+import { logFile } from "./paths.js";
 import type { EventView, PluginContext } from "./opencode.js";
 import { writeSessionSnapshot } from "./snapshot.js";
 
@@ -37,19 +41,6 @@ const PROMPT_MAX_AGE_MS = 7 * 24 * 60 * 60_000;
 
 /** `listPendingCapturePrompts` filters by attempts; pass a huge ceiling to see them all. */
 const NO_RETRY_LIMIT = Number.MAX_SAFE_INTEGER;
-
-type Logger = (message: string, detail?: unknown) => void;
-
-function createLogger(prefix: string): Logger {
-  return (message: string, detail?: unknown) => {
-    if (detail === undefined) {
-      console.log(prefix + " " + message);
-      return;
-    }
-    const text = detail instanceof Error ? detail.message : String(detail);
-    console.log(prefix + " " + message + " :: " + text);
-  };
-}
 
 /**
  * Drop landing records nobody will ever complete. Without this the namespace grows
@@ -77,10 +68,57 @@ export default Plugin.define({
   async setup(ctx) {
     const log = createLogger("[mem-plus]");
     const workspaceDir = ctx.location.directory;
+    // First line in the log file, so an empty or stale log is unambiguous.
+    log(`plugin loaded, workspace ${workspaceDir}`);
+    log(`log file ${logFile()}`);
 
     // Landing zone storage: the pipeline's only remaining host dependency.
     configureMemoryCoreDreamingState(createStorageOpenKeyedStore(ctx));
-    const capture = createMemoryCapture(createCaptureDependencies(ctx));
+
+    // Extraction goes through the local inference service (see serve/server.mjs
+    // for why it cannot run inside OpenCode's own process). The service is
+    // contacted lazily: probing it during setup would stall plugin loading behind
+    // a ~3 s model load in every window, whether or not anything needs extracting.
+    // A failure at extraction time falls back to the OpenCode-hosted model, so a
+    // broken or absent service costs summary quality instead of losing memories.
+    const modelConfig = readModelConfig(ctx.options);
+    const serviceConfig = readServiceConfig(ctx.options);
+    const missing = missingModelPaths(modelConfig);
+    let service: MemPlusService | null = null;
+    if (modelConfig.contentBackend === "opencode") {
+      log('extraction model = opencode (options.model.content = "opencode")');
+    } else if (missing.length > 0) {
+      log("extraction model = opencode (fallback: GGUF not found)");
+      for (const file of missing) log(`  missing ${file} -- see README "本地模型"`);
+    } else {
+      service = createServiceClient(serviceConfig, modelConfig, log);
+      log(
+        `extraction model = local gguf via ${serviceConfig.host}:${serviceConfig.port} ` +
+          `(gpu priority ${modelConfig.gpu}, idle ${serviceConfig.idleMinutes} min)`,
+      );
+    }
+
+    const localService = service;
+    const capture = createMemoryCapture(
+      createCaptureDependencies(
+        ctx,
+        localService
+          ? {
+              complete: async ({ systemPrompt, prompt }) => {
+                try {
+                  return await localService.extract({ systemPrompt, prompt });
+                } catch (error) {
+                  // One failed call must not poison every later sweep, and a
+                  // summary from another model beats no summary: degrade this turn.
+                  log("local service unavailable, using the OpenCode model for this turn", error);
+                  const result = await ctx.generate.text({ prompt: `${systemPrompt}\n\n${prompt}` });
+                  return result.text;
+                }
+              },
+            }
+          : {},
+      ),
+    );
 
     const controller = new AbortController();
     const settleTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -106,8 +144,13 @@ export default Plugin.define({
             log(`captured ${outcome.promptId} -> ${outcome.relativePath ?? "?"}`);
           } else if (outcome.kind === "failed" || outcome.kind === "exhausted") {
             log(`${outcome.kind} ${outcome.promptId}`, outcome.error);
+          } else {
+            log(`${outcome.kind} ${outcome.promptId}`);
           }
         }
+        // Distinguish "nothing was pending" from "everything was pending but
+        // silently dropped" -- both look identical without this line.
+        if (outcomes.length === 0) log("sweep: nothing pending");
       } catch (error) {
         log("sweep failed", error);
       }
@@ -179,6 +222,7 @@ export default Plugin.define({
       controller.abort();
       for (const timer of settleTimers.values()) clearTimeout(timer);
       settleTimers.clear();
+      void localService?.dispose();
     };
   },
 });

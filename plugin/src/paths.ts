@@ -39,10 +39,28 @@ export function archiveProjectDir(workspaceDir: string): string {
 }
 
 export function archiveRoot(): string {
+  return path.join(stateRoot(), "archive");
+}
+
+/** `~/.config/opencode/mem-plus` -- the archive plus the plugin's own log. */
+export function stateRoot(): string {
+  return path.join(configHome(), "opencode", "mem-plus");
+}
+
+/** `$XDG_CONFIG_HOME`, else `~/.config`. On Windows that is `C:\Users\<you>\.config`. */
+export function configHome(): string {
   const xdg = process.env["XDG_CONFIG_HOME"];
-  const configHome =
-    xdg && xdg.length > 0 ? xdg : path.join(os.homedir(), ".config");
-  return path.join(configHome, "opencode", "mem-plus", "archive");
+  return xdg && xdg.length > 0 ? xdg : path.join(os.homedir(), ".config");
+}
+
+/**
+ * OpenCode's plugin API exposes no logger -- `Context` has no `log`, and
+ * `console.log` from a plugin reaches neither `--print-logs` nor
+ * `~/.local/share/opencode/log/opencode.log`. Without a file of its own,
+ * "why was nothing remembered" has no evidence to work from.
+ */
+export function logFile(): string {
+  return path.join(stateRoot(), "mem-plus.log");
 }
 
 /** `C:\work\repos\mem-plus` -> `mem-plus--4f2a1c` (stable, filesystem-safe). */
