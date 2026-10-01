@@ -86,6 +86,42 @@ const SCOPE_ALL = "all";
 const SCOPE_PROJECT = "project";
 const SCOPE_ARCHIVE = "archive";
 
+/**
+ * Warn-once latch for the degraded-vector notice, per mode.
+ *
+ * Module-level rather than per-call, mirroring openclaw's `warningShown`: the
+ * condition is a property of the index, not of one query, so repeating it on every
+ * search would bury the results. Keyed by mode because `vector` and `hybrid` fail
+ * differently -- `vector` has no keyword lane and answers "No memory matched", which
+ * is strictly worse -- so a user who searched `hybrid` first has still never been
+ * told what `vector` is doing.
+ */
+const degradedVectorWarnedFor = new Set<SearchMode>();
+
+const VECTOR_DEGRADED_NOTICE =
+  "\n**Semantic search is not active:** this index has no embeddings, so this " +
+  "result came from the keyword lane only and will miss anything without shared " +
+  "words. Run memory_reindex with {\"embed\": true} once to enable it.";
+
+/** The vector-only variant: there is no keyword lane to have produced the result. */
+const VECTOR_ONLY_NOTICE =
+  "\n**Semantic search is not active:** this index has no embeddings, so there is " +
+  "nothing for a vector search to match -- which is why this looks empty rather " +
+  'than wrong. Run memory_reindex with {"embed": true} once, or use mode "text".';
+
+/**
+ * Whether the index has searchable units but no vectors for them.
+ *
+ * Both halves matter: an empty index has nothing to degrade, and a fully embedded one
+ * has nothing to report.
+ */
+function describeMissingVectors(db: DatabaseSync): boolean {
+  const units = db.prepare("SELECT count(*) AS n FROM units").get() as { n: number };
+  if (units.n === 0) return false;
+  const vectors = db.prepare("SELECT count(*) AS n FROM vectors").get() as { n: number };
+  return vectors.n === 0;
+}
+
 type RawInput = Record<string, unknown>;
 
 function str(input: RawInput, key: string): string | undefined {
@@ -342,12 +378,38 @@ async function runSearch(
     onError: (message: string) => errors.push(message),
   });
 
+  // Semantic recall is only actually available when the corpus has vectors. The
+  // conditions and the warn-once behaviour follow openclaw's
+  // logMemoryVectorDegradedWrite: enabled, not ready, content present, and not
+  // already reported. Its trigger differs -- openclaw warns when a write of a vector
+  // fails, this warns when nothing ever wrote one -- but a hybrid search over an
+  // unembedded index is the same class of silent degradation.
+  //
+  // Both vector modes are covered, and `vector` especially needs it: with no keyword
+  // lane to fall back on, an unembedded index answers "No memory matched." That is the
+  // single most misleading thing this tool can say -- it teaches the model that no
+  // memories exist, when in fact none of them were ever embedded.
+  const degradedNote =
+    mode !== "text" &&
+    !degradedVectorWarnedFor.has(mode) &&
+    describeMissingVectors(db)
+      ? (degradedVectorWarnedFor.add(mode),
+        mode === "vector" ? VECTOR_ONLY_NOTICE : VECTOR_DEGRADED_NOTICE)
+      : "";
+
   const projects = new Set(hits.map((hit) => hit.project)).size;
   const content = [
     renderHits(hits, mode, projects),
     // Stated explicitly, because a silently degraded search teaches the model
     // that memories do not exist.
     errors.length > 0 ? `\n**Search degraded:** ${errors.join("; ")}` : "",
+    // A vector search over a corpus with no vectors still returns hits -- the
+    // keyword lane fills them -- so nothing else reports that semantic recall is
+    // simply absent. Without this, a user who has not run `memory_reindex {"embed": true}`
+    // sees plausible-looking results from `mode: "hybrid"` and concludes semantic
+    // search works. Measured: hybrid 26/203 against text 179/203 on the same
+    // queries, with only the first 26 units embedded.
+    degradedNote,
   ]
     .filter((part) => part.length > 0)
     .join("\n");
