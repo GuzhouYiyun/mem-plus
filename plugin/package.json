@@ -1,0 +1,14 @@
+{
+  "name": "mem-plus-opencode",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "OpenCode memory plugin built from openclaw's memory subsystem (mem-plus).",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@opencode/plugin": "2.0.20",
+    "@openclaw/fs-safe": "0.18.2"
+  }
+}

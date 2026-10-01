@@ -1,0 +1,14 @@
+{
+  // Focused gate for the OpenCode plugin (plugin/src).
+  //
+  // `src/**/*.d.ts` must stay included for the same reason as in
+  // tsconfig.capture.json: openclaw's ambient shims are never imported, so they do
+  // not arrive through the import closure. `capture/` and `dreaming-state.ts` are
+  // reached transitively from `plugin/src/index.ts` and need no entry here.
+  //
+  // `@opencode/plugin` resolves from plugin/node_modules through normal NodeNext
+  // walking -- deliberately NOT through the openclaw `paths` aliases, because those
+  // aliases are what the plugin must be able to live without.
+  "extends": "./tsconfig.json",
+  "include": ["plugin/src/**/*", "src/**/*.d.ts"]
+}
