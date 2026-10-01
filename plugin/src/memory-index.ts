@@ -22,7 +22,13 @@
 import type { SQLInputValue } from "node:sqlite";
 import { DatabaseSync } from "node:sqlite";
 import { mkdirSync, statSync } from "node:fs";
+import { createHash } from "node:crypto";
 import path from "node:path";
+import { bm25RankToScore } from "../../extensions/memory-core/src/memory/keyword-query.js";
+import {
+  mergeHybridResults,
+  selectHybridSearchResults,
+} from "../../extensions/memory-core/src/memory/hybrid.js";
 import { stateRoot } from "./paths.js";
 import { parseMemoryDocument, type MemoryUnit, type ParsedDocument } from "./memory-parse.js";
 
@@ -59,6 +65,10 @@ export type SearchHit = {
   readonly heading: string;
   readonly text: string;
   readonly ts: number | null;
+  readonly startLine: number;
+  readonly endLine: number;
+  readonly source: string;
+  readonly snippet: string;
 };
 
 export type IndexStats = {
@@ -77,6 +87,7 @@ CREATE TABLE IF NOT EXISTS documents (
   kind        TEXT    NOT NULL,
   title       TEXT    NOT NULL DEFAULT '',
   day         TEXT,
+  content     TEXT,
   bytes       INTEGER NOT NULL DEFAULT 0,
   mtime       INTEGER NOT NULL DEFAULT 0,
   indexed_at  INTEGER NOT NULL DEFAULT 0
@@ -131,14 +142,73 @@ export function openIndex(): DatabaseSync | null {
     // ON DELETE CASCADE below is what keeps orphans out; SQLite ignores it
     // unless asked.
     db.exec("PRAGMA foreign_keys = ON");
+    // Schema first, then additive column migrations: CREATE TABLE IF NOT EXISTS is
+    // a no-op against an index that already exists, so an existing database would
+    // otherwise be left without columns the current code reads. The order matters
+    // in the other direction too -- ALTER TABLE on a table that does not exist yet
+    // throws, which would make openIndex() return null on a first run.
     db.exec(SCHEMA);
+    for (const [table, column, ddl] of MIGRATIONS) {
+      if (hasColumn(db, table, column)) continue;
+      db.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
+    }
     return db;
   } catch {
     return null;
   }
 }
 
-/** Insert or replace one document and its units. Returns units written. */
+/**
+ * Columns added after the first released schema. Each entry is applied at most
+ * once, guarded by a column probe.
+ *
+ * `documents.content` is the sha256 of the file text. It is the mirror key: the
+ * write path copies every snapshot to both the project and the archive, so the
+ * same bytes land in two files and used to be indexed twice. Hashing the
+ * document rather than the unit is what makes suppression safe -- two sessions
+ * that both contain the word "ok" are not duplicates, but two files with
+ * identical bytes are the same document by definition.
+ */
+const MIGRATIONS: readonly (readonly [string, string, string])[] = [
+  ["documents", "content", "content TEXT"],
+];
+
+function hasColumn(db: DatabaseSync, table: string, column: string): boolean {
+  try {
+    const rows = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
+    return rows.some((row) => row.name === column);
+  } catch {
+    return false;
+  }
+}
+
+/** What indexing one file did. */
+export type DocumentIndex = {
+  /** Units actually inserted. */
+  readonly written: number;
+  /**
+   * True when this file is a byte-identical copy of another indexed document
+   * and its units were skipped. The document row is still recorded, so pruning
+   * still knows the file exists.
+   */
+  readonly mirrored: boolean;
+};
+
+/** The sha256 of a document's text, as lowercase hex. */
+function contentHash(text: string): string {
+  return createHash("sha256").update(text, "utf8").digest("hex");
+}
+
+/**
+ * Which root owns a given content when two files hold identical bytes.
+ *
+ * The project copy wins because it is the one the user's tooling and the model
+ * see; the archive is the backup. Ranking `root` as a number keeps the decision
+ * a single comparison rather than a special case per caller.
+ */
+const ROOT_PRECEDENCE: Record<IndexRoot, number> = { project: 0, archive: 1 };
+
+/** Insert or replace one document and its units. */
 export function indexDocument(params: {
   db: DatabaseSync;
   file: string;
@@ -147,12 +217,40 @@ export function indexDocument(params: {
   text: string;
   bytes: number;
   mtime: number;
-}): number {
+}): DocumentIndex {
   const { db, file, root, project, text, bytes, mtime } = params;
   const parsed: ParsedDocument = parseMemoryDocument(file, text);
+  const hash = contentHash(text);
+
+  // Which document, if any, already holds these exact bytes. Excluding this
+  // path is what lets an unchanged file re-index itself instead of shadowing.
+  const holder = db
+    .prepare(
+      "SELECT id, root FROM documents WHERE content = ? AND path <> ? ORDER BY id LIMIT 1",
+    )
+    .get(hash, file) as { id: number; root: IndexRoot } | undefined;
+
+  // This file is a mirror when something else with equal or better standing
+  // already holds the content. Recorded, but with no units: the units live
+  // under the holder, and a second copy is exactly the duplicate this removes.
+  const mirrored =
+    holder !== undefined && ROOT_PRECEDENCE[holder.root] <= ROOT_PRECEDENCE[root];
 
   const drop = db.prepare("SELECT id FROM documents WHERE path = ?");
   const existing = drop.get(file) as { id: number } | undefined;
+  // Vectors are dropped by the delete below (units cascade, vectors cascade after
+  // them), and computing them again costs a model load. Carry them across a
+  // re-index by `ord`, which is stable for a given file layout.
+  const carriedVectors =
+    existing === undefined
+      ? []
+      : (db
+          .prepare(
+            `SELECT u.ord AS ord, v.dim AS dim, v.vec AS vec
+             FROM units u JOIN vectors v ON v.unit_id = u.id
+             WHERE u.document_id = ?`,
+          )
+          .all(existing.id) as { ord: number; dim: number; vec: Uint8Array }[]);
   if (existing) {
     // FTS rows are not covered by the foreign key (FTS5 virtual tables cannot
     // participate in cascades), so they are removed explicitly.
@@ -162,9 +260,20 @@ export function indexDocument(params: {
     db.prepare("DELETE FROM documents WHERE id = ?").run(existing.id);
   }
 
+  // The holder lost its claim: this file is the better copy, so the mirror's
+  // stale units have to go before they start competing with it.
+  if (holder !== undefined && holder.id !== existing?.id && !mirrored) {
+    const holderUnits = db
+      .prepare("SELECT id FROM units WHERE document_id = ?")
+      .all(holder.id) as { id: number }[];
+    const delHolderFts = db.prepare("DELETE FROM units_fts WHERE rowid = ?");
+    for (const row of holderUnits) delHolderFts.run(row.id);
+    db.prepare("DELETE FROM documents WHERE id = ?").run(holder.id);
+  }
+
   const insertDoc = db.prepare(
-    `INSERT INTO documents (path, root, project, kind, title, day, bytes, mtime, indexed_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO documents (path, root, project, kind, title, day, content, bytes, mtime, indexed_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
   const docResult = insertDoc.run(
     file,
@@ -173,11 +282,16 @@ export function indexDocument(params: {
     parsed.kind,
     parsed.title,
     unitsDay(parsed.units),
+    hash,
     bytes,
     mtime,
     Date.now(),
   );
   const documentId = Number(docResult.lastInsertRowid);
+
+  if (mirrored) {
+    return { written: 0, mirrored: true };
+  }
 
   const insertUnit = db.prepare(
     `INSERT INTO units (document_id, ord, kind, ts, day, entry_type, tags, marker, heading, text)
@@ -186,6 +300,8 @@ export function indexDocument(params: {
   const insertFts = db.prepare(
     "INSERT INTO units_fts (rowid, text, heading, tags) VALUES (?, ?, ?, ?)",
   );
+  const insertVector = db.prepare("INSERT INTO vectors (unit_id, dim, vec) VALUES (?, ?, ?)");
+  const vectorsByOrd = new Map(carriedVectors.map((v) => [v.ord, v]));
 
   let written = 0;
   parsed.units.forEach((unit, ord) => {
@@ -202,18 +318,19 @@ export function indexDocument(params: {
       unit.text,
     );
     const unitId = Number(result.lastInsertRowid);
-    // A duplicate provenance marker means the same capture reached two files
-    // (project copy plus archive mirror). The unique index on `marker` rejects
-    // it, so the project copy wins by being indexed first.
+    // A duplicate provenance marker means the same capture reached two files.
+    // The unique index on `marker` rejects it, so the first copy wins.
     try {
       insertFts.run(unitId, unit.text, unit.heading, unit.tags.join(" "));
     } catch {
       /* duplicate marker: the unit row stands, its FTS row does not */
     }
+    const vector = vectorsByOrd.get(ord);
+    if (vector) insertVector.run(unitId, vector.dim, vector.vec);
     written += 1;
   });
 
-  return written;
+  return { written, mirrored: false };
 }
 
 /** The date a document's units share, when they agree on one. */
@@ -265,37 +382,40 @@ export function indexAppendedTail(params: {
 }): number {
   const { db, file, root, project, text, bytes, mtime } = params;
   const parsed = parseMemoryDocument(file, text);
+  const hash = contentHash(text);
   const doc = db.prepare("SELECT id FROM documents WHERE path = ?").get(file) as
     | { id: number }
     | undefined;
 
-  const documentId = doc?.id ?? Number(
-    db
-      .prepare(
-        `INSERT INTO documents (path, root, project, kind, title, day, bytes, mtime, indexed_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(
-        file,
-        root,
-        project,
-        parsed.kind,
-        parsed.title,
-        unitsDay(parsed.units),
-        bytes,
-        mtime,
-        Date.now(),
-      ).lastInsertRowid,
-  );
+  const documentId =
+    doc?.id ??
+    Number(
+      db
+        .prepare(
+          `INSERT INTO documents (path, root, project, kind, title, day, content, bytes, mtime, indexed_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          file,
+          root,
+          project,
+          parsed.kind,
+          parsed.title,
+          unitsDay(parsed.units),
+          // The tail path only ever sees a daily entry, which is written once and
+          // appended to. The hash covers the text as read now, so a mirror of it
+          // is still recognised while it is being appended.
+          hash,
+          bytes,
+          mtime,
+          Date.now(),
+        ).lastInsertRowid,
+    );
 
   if (doc) {
-    db.prepare("UPDATE documents SET bytes = ?, mtime = ?, indexed_at = ?, title = ? WHERE id = ?").run(
-      bytes,
-      mtime,
-      Date.now(),
-      parsed.title,
-      documentId,
-    );
+    db.prepare(
+      "UPDATE documents SET bytes = ?, mtime = ?, indexed_at = ?, title = ?, content = ? WHERE id = ?",
+    ).run(bytes, mtime, Date.now(), parsed.title, hash, documentId);
   }
 
   const known = new Set(
@@ -438,12 +558,13 @@ export function searchText(params: {
   const filter = filtersSql(params.filters, params.currentProject);
   const sql = `
     SELECT ${HIT_COLUMNS},
-           bm25(units_fts, 0.0, 4.0, 3.0) AS rank
+           units_fts.rank AS rank
     FROM units_fts
     JOIN units u      ON u.id = units_fts.rowid
     JOIN documents d  ON d.id = u.document_id
-    WHERE units_fts MATCH ?${filter.clause}
-    ORDER BY rank
+    WHERE units_fts MATCH ?
+      AND units_fts.rank MATCH 'bm25()'${filter.clause}
+    ORDER BY units_fts.rank
     LIMIT ?
   `;
   try {
@@ -453,8 +574,18 @@ export function searchText(params: {
     >[];
     return rows
       .map(rowToHit)
-      // bm25() returns a negative number where more negative is better.
-      .map((hit) => ({ ...hit, score: -hit.score }));
+      // bm25() returns a negative number where more negative is better, and
+      // openclaw's bm25RankToScore saturates it into [0, 1): r / (1 + r) where
+      // r = -rank. That absolute, monotone map is what lets the 0.7 / 0.3 lane
+      // weights mean anything -- an earlier version of this file fused by rank
+      // (RRF) instead, which threw the magnitudes away and is not what openclaw
+      // does.
+      //
+      // No column weights, deliberately: `bm25(units_fts, 0.0, 4.0, 3.0)` gave the
+      // body a weight of zero, so only headings and tags scored and a body-only
+      // match came back as rank 0 -- which bm25RankToScore maps to 1.0, the best
+      // possible score. Equal weighting is also what openclaw does.
+      .map((hit) => ({ ...hit, score: bm25RankToScore(hit.score) }));
   } catch (error) {
     // Never swallowed. A broken query that reports "no matches" is the worst
     // possible failure mode for a search tool: the model concludes the memory
@@ -470,6 +601,7 @@ function describe(error: unknown): string {
 
 function rowToHit(row: Record<string, unknown>): SearchHit {
   const tags = typeof row["tags"] === "string" ? (row["tags"] as string) : "";
+  const text = String(row["text"] ?? "");
   return {
     unitId: Number(row["unitId"]),
     score: Number(row["rank"] ?? 0),
@@ -482,7 +614,11 @@ function rowToHit(row: Record<string, unknown>): SearchHit {
     tags: tags.length > 0 ? tags.split(" ").filter(Boolean) : [],
     marker: (row["marker"] as string | null) ?? null,
     heading: String(row["heading"] ?? ""),
-    text: String(row["text"] ?? ""),
+    text,
+    startLine: 0,
+    endLine: 0,
+    source: "memory",
+    snippet: text,
   };
 }
 
@@ -580,39 +716,128 @@ export function searchVector(params: {
 }
 
 /**
- * Fuse several rankings with reciprocal rank fusion.
+ * Ranking constants.
  *
- * RRF is what openclaw's own hybrid search uses, and the reason is scale: the
- * two rankings have no common unit. bm25 is unbounded and negative, cosine is
- * bounded in [-1, 1], so averaging or normalising them lets whichever channel
- * happens to emit larger numbers decide the winner. Fusing on *rank* makes each
- * list contribute on its own terms.
- *
- * Takes the lists separately rather than a pre-merged array on purpose: a merged
- * array has already lost which channel found what, and ranking the concatenation
- * is just a re-sort -- the thing RRF exists to avoid.
+ * These are transcribed, not tuned. `recall-verify.mjs` (the harness in
+ * `~/Desktop/training`) pins each one and cites the PLAN.md line it came from --
+ * TOP_K_PER_LANE=200 is PLAN:112, the 0.7/0.3 weights are the openclaw hybrid
+ * split, HALF_LIFE_DAYS=30 is PLAN:114, MIN_SCORE=0.35 is PLAN:118 and
+ * MMR_LAMBDA=0.7 is PLAN:122. Changing a number here means the spec moved.
  */
-export function fuseRankings(lists: readonly (readonly SearchHit[])[], limit: number): SearchHit[] {
-  const k = 60;
-  const scores = new Map<number, number>();
-  const best = new Map<number, SearchHit>();
-  for (const list of lists) {
-    // FTS5 scores are negative (more negative is better) and get negated on the
-    // way out, but a zero or negative bm25 can survive that. Rank only what
-    // actually matched.
-    const ranked = list.filter((hit) => Number.isFinite(hit.score));
-    ranked.forEach((hit, rank) => {
-      scores.set(hit.unitId, (scores.get(hit.unitId) ?? 0) + 1 / (k + rank + 1));
-      const held = best.get(hit.unitId);
-      // Same unit from two channels: keep whichever copy has more text
-      // available, since both carry the same body but may differ in truncation.
-      if (!held || held.text.length < hit.text.length) best.set(hit.unitId, hit);
+export const RANKING = {
+  /** openclaw hybrid weights. Must sum to 1. */
+  vectorWeight: 0.7,
+  textWeight: 0.3,
+  /** Candidates fetched per lane before fusion. */
+  topKPerLane: 200,
+  /**
+   * Strict-recall floor. A keyword-only hit scores 0.3 * textScore, so a decent
+   * one lands near 0.27 and falls under this. That is deliberate and is why
+   * `selectHybridSearchResults` has the fallback below -- without it, plain text
+   * search would return nothing at all.
+   */
+  minScore: 0.35,
+  /** Temporal decay half-life, in days. */
+  halfLifeDays: 30,
+  /** Carbonell & Goldstein: 1 = pure relevance, 0 = pure diversity. */
+  mmrLambda: 0.7,
+} as const;
+
+/**
+ * Lane shapes for `mergeHybridResults`, inferred from its own signature.
+ *
+ * `hybrid.ts` does not export `HybridKeywordResult` / `HybridVectorResult`, and
+ * re-declaring them here would be a second copy of openclaw's contract that can
+ * drift. Deriving them from the function keeps one source of truth.
+ */
+type MergeParams = Parameters<typeof mergeHybridResults>[0];
+type KeywordLane = NonNullable<MergeParams["keyword"]>[number];
+type VectorLane = NonNullable<MergeParams["vector"]>[number];
+
+/**
+ * Fuse the text and vector lanes into a single ranking.
+ *
+ * This delegates to openclaw's `mergeHybridResults` + `selectHybridSearchResults`
+ * rather than reimplementing fusion, because that pair encodes the whole tuned
+ * pipeline in order: weighted hybrid score (0.7 vector / 0.3 text), temporal
+ * decay, importance, project ranking, MMR re-ranking, then the strict-recall
+ * floor with a keyword-only fallback for spare capacity.
+ *
+ * Identity: openclaw keys a hit by `source:path:startLine:endLine`, and
+ * `mergeHybridResults` emits only its own field set, so the incoming `id` does
+ * not survive. This index has no line granularity, so the unit id rides in
+ * `startLine`/`endLine`. It is a carrier, not a line number -- and it also gives
+ * the tie-break a stable order.
+ *
+ * An earlier version of this file fused by reciprocal rank instead. That was
+ * wrong twice over: RRF is not what openclaw does, and by weighting ranks rather
+ * than scores it discards exactly the magnitudes the 0.7/0.3 split exists to
+ * weigh.
+ */
+export async function fuseRankings(params: {
+  text: readonly SearchHit[];
+  vector: readonly SearchHit[];
+  limit: number;
+  currentProject?: string;
+  /** Test hook for the time-dependent decay. */
+  nowMs?: number;
+}): Promise<SearchHit[]> {
+  const byId = new Map<number, SearchHit>();
+  const keyword: KeywordLane[] = [];
+  const vector: VectorLane[] = [];
+
+  for (const hit of params.text) {
+    byId.set(hit.unitId, hit);
+    keyword.push({
+      id: String(hit.unitId),
+      path: hit.path,
+      startLine: hit.unitId,
+      endLine: hit.unitId,
+      source: hit.source,
+      snippet: hit.text,
+      projectKey: hit.project,
+      textScore: hit.score,
     });
   }
-  return [...best.values()]
-    .map((hit) => ({ ...hit, score: scores.get(hit.unitId) ?? 0 }))
-    .sort((a, b) => b.score - a.score)
-    .slice(0, limit);
+  for (const hit of params.vector) {
+    byId.set(hit.unitId, hit);
+    vector.push({
+      id: String(hit.unitId),
+      path: hit.path,
+      startLine: hit.unitId,
+      endLine: hit.unitId,
+      source: hit.source,
+      snippet: hit.text,
+      projectKey: hit.project,
+      vectorScore: hit.score,
+    });
+  }
+  if (byId.size === 0) return [];
+
+  const merged = await mergeHybridResults({
+    vector,
+    keyword,
+    vectorWeight: RANKING.vectorWeight,
+    textWeight: RANKING.textWeight,
+    temporalDecay: { enabled: true, halfLifeDays: RANKING.halfLifeDays },
+    mmr: { enabled: true, lambda: RANKING.mmrLambda },
+    // The current project ranks above other projects (x1.15) and below nothing
+    // (x0.9). Cross-project search stays the default because the index is shared.
+    activeProjectKeys: params.currentProject ? [params.currentProject] : undefined,
+    nowMs: params.nowMs,
+  });
+  const selected = selectHybridSearchResults({
+    merged,
+    keyword,
+    maxResults: params.limit,
+    minScore: RANKING.minScore,
+  });
+
+  return selected.flatMap((entry) => {
+    const hit = byId.get(entry.startLine);
+    if (!hit) return [];
+    return [{ ...hit, score: entry.score }];
+  });
 }
 
 export function search(params: {
@@ -625,18 +850,37 @@ export function search(params: {
   /** Required for `vector` and `hybrid`; omitted for `text`. */
   queryVector?: readonly number[];
   onError?: (message: string) => void;
-}): SearchHit[] {
+  /** Test hook for the time-dependent decay. */
+  nowMs?: number;
+}): Promise<SearchHit[]> {
   if (params.mode === "text") {
-    return searchText({ ...params, db: params.db });
+    // Plain text search is already a single lane, so it keeps the caller's limit
+    // and is not subject to the hybrid floor: the user asked for text matches,
+    // not "the best text match".
+    return Promise.resolve(searchText({ ...params, db: params.db }));
   }
-  if (!params.queryVector) return [];
+  if (!params.queryVector) return Promise.resolve([]);
   if (params.mode === "vector") {
-    return searchVector({ ...params, db: params.db, query: params.queryVector });
+    return Promise.resolve(
+      searchVector({ ...params, db: params.db, query: params.queryVector }),
+    );
   }
-  const pool = Math.max(params.limit * 4, 20);
-  const text = searchText({ ...params, db: params.db, limit: pool });
-  const vector = searchVector({ ...params, db: params.db, query: params.queryVector, limit: pool });
-  return fuseRankings([text, vector], params.limit);
+  // TOP_K_PER_LANE: both lanes are fetched wide, because the fusion weights
+  // reward depth -- a hit ranked 150th by text can still win on the vector lane.
+  const text = searchText({ ...params, db: params.db, limit: RANKING.topKPerLane });
+  const vector = searchVector({
+    ...params,
+    db: params.db,
+    query: params.queryVector,
+    limit: RANKING.topKPerLane,
+  });
+  return fuseRankings({
+    text,
+    vector,
+    limit: params.limit,
+    currentProject: params.currentProject,
+    nowMs: params.nowMs,
+  });
 }
 
 /** One unit with its full text, for `memory_get`. */

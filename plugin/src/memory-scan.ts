@@ -138,14 +138,31 @@ export type ReindexReport = {
   readonly skipped: number;
   readonly pruned: number;
   readonly units: number;
+  /**
+   * Files skipped because an indexed document already holds their exact bytes.
+   * Non-zero is normal and correct: every capture writes the project copy and
+   * the archive mirror, and only one of them should be searchable.
+   */
+  readonly mirrored: number;
 };
 
-/** Documents whose size and mtime match what was indexed last time. */
+/**
+ * Documents whose size and mtime match what was indexed last time.
+ *
+ * A NULL `content` means the row predates the mirror-hash migration, so it is
+ * reported as changed even when size and mtime agree. That costs one extra read
+ * per legacy document, once, and it is what lets a single `memory_reindex`
+ * repair an index that already holds duplicates.
+ */
 function unchangedDocuments(db: DatabaseSync, root: IndexRoot): Map<string, { bytes: number; mtime: number }> {
   const rows = db
-    .prepare("SELECT path, bytes, mtime FROM documents WHERE root = ?")
-    .all(root) as { path: string; bytes: number; mtime: number }[];
-  return new Map(rows.map((row) => [row.path, { bytes: row.bytes, mtime: row.mtime }]));
+    .prepare("SELECT path, bytes, mtime, content FROM documents WHERE root = ?")
+    .all(root) as { path: string; bytes: number; mtime: number; content: string | null }[];
+  return new Map(
+    rows
+      .filter((row) => row.content !== null)
+      .map((row) => [row.path, { bytes: row.bytes, mtime: row.mtime }]),
+  );
 }
 
 /**
@@ -165,6 +182,7 @@ export async function reindexFiles(params: {
   let indexed = 0;
   let skipped = 0;
   let units = 0;
+  let mirrored = 0;
 
   for (const entry of params.files) {
     seen.add(entry.file);
@@ -175,7 +193,7 @@ export async function reindexFiles(params: {
     }
     try {
       const text = await readFile(entry.file, "utf-8");
-      units += indexDocument({
+      const result = indexDocument({
         db: params.db,
         file: entry.file,
         root: entry.root,
@@ -184,6 +202,8 @@ export async function reindexFiles(params: {
         bytes: entry.bytes,
         mtime: entry.mtime,
       });
+      units += result.written;
+      if (result.mirrored) mirrored += 1;
       indexed += 1;
     } catch {
       // Unreadable file: leave whatever was indexed before alone.
@@ -191,7 +211,14 @@ export async function reindexFiles(params: {
   }
 
   const pruned = pruneMissing({ db: params.db, root: params.root, present: seen });
-  return { scanned: params.files.length, indexed, skipped, pruned: pruned.length, units };
+  return {
+    scanned: params.files.length,
+    indexed,
+    skipped,
+    pruned: pruned.length,
+    units,
+    mirrored,
+  };
 }
 
 /**
@@ -253,7 +280,7 @@ export async function indexWrittenFile(params: {
       text,
       bytes: info.size,
       mtime: Math.trunc(info.mtimeMs),
-    });
+    }).written;
   } catch (error) {
     params.log(`index update skipped for ${params.file}`, error);
     return 0;

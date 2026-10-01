@@ -288,7 +288,7 @@ async function runSearch(
   };
 
   const errors: string[] = [];
-  const hits = search({
+  const hits = await search({
     db,
     query,
     mode,
@@ -410,7 +410,7 @@ async function runReindex(
   const archiveReport =
     files.archive.length > 0
       ? await reindexFiles({ db, files: files.archive, root: "archive" })
-      : { scanned: 0, indexed: 0, skipped: 0, pruned: 0, units: 0 };
+      : { scanned: 0, indexed: 0, skipped: 0, pruned: 0, units: 0, mirrored: 0 };
 
   // A first reindex has nothing embedded yet, so vector mode would return
   // nothing at all. Filling the budget here means one tool call is enough to
@@ -426,12 +426,18 @@ async function runReindex(
     skipped: projectReport.skipped + archiveReport.skipped,
     pruned: projectReport.pruned + archiveReport.pruned,
     units: projectReport.units + archiveReport.units,
+    mirrored: projectReport.mirrored + archiveReport.mirrored,
   };
 
   return {
     content: [
       `Reindexed ${totals.indexed} of ${totals.scanned} file(s) (${totals.skipped} unchanged).`,
       totals.pruned > 0 ? `Removed ${totals.pruned} document(s) deleted from disk.` : "",
+      // Stated rather than hidden: a non-zero count means the archive mirror was
+      // recognised and skipped, which is the intended behaviour, not lost data.
+      totals.mirrored > 0
+        ? `${totals.mirrored} file(s) were byte-identical copies of an indexed document and were indexed once.`
+        : "",
       embedded > 0 ? `Embedded ${embedded} unit(s).` : "",
       "",
       `Index: ${stats.documents} documents, ${stats.units} searchable units, ${stats.vectors} vectors.`,
