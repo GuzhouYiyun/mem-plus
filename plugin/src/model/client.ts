@@ -48,16 +48,30 @@ export type MemPlusService = {
    */
   ready(): Promise<boolean>;
   extract(params: { systemPrompt: string; prompt: string }): Promise<string>;
-  embed(input: string): Promise<readonly number[]>;
+  /**
+   * `signal` comes from the tool call's context, so stopping a session also stops
+   * the embed request it started. On this hardware an embed takes seconds, so
+   * that is the difference between an interrupt and a visible stall.
+   */
+  embed(input: string, signal?: AbortSignal): Promise<readonly number[]>;
   /** Stops the service, but only if this plugin was the one that started it. */
   dispose(): Promise<void>;
 };
 
-/** Minimal JSON POST. Bun's `fetch` works here, but `node:http` avoids a 100 ms DNS hop per call. */
+/**
+ * Minimal JSON POST. Bun's `fetch` works here, but `node:http` avoids a 100 ms DNS
+ * hop per call.
+ *
+ * `signal` is honoured because a tool call made on behalf of a session must stop
+ * when that session is stopped. Without it, interrupting a `memory_search` that
+ * is waiting on the embed model would leave the request running to completion --
+ * and an embed on this hardware is seconds, not milliseconds.
+ */
 function postJson(
   url: string,
   body: unknown,
   timeoutMs: number,
+  signal?: AbortSignal,
 ): Promise<{ status: number; json: unknown }> {
   return new Promise((resolve, reject) => {
     const target = new URL(url);
@@ -90,6 +104,20 @@ function postJson(
       req.destroy(new Error(`request timed out after ${timeoutMs} ms`));
     });
     req.on("error", reject);
+    // Aborting must also unhook, or a later abort on an already-settled request
+    // would try to touch a destroyed socket and surface as an unhandled error.
+    const onAbort = (): void => {
+      req.destroy(new Error("aborted"));
+    };
+    if (signal) {
+      if (signal.aborted) {
+        onAbort();
+        reject(new Error("aborted"));
+        return;
+      }
+      signal.addEventListener("abort", onAbort, { once: true });
+      req.on("close", () => signal.removeEventListener("abort", onAbort));
+    }
     req.end(payload);
   });
 }
@@ -294,9 +322,10 @@ export function createServiceClient(
     path: string,
     body: unknown,
     timeoutMs: number,
+    signal?: AbortSignal,
   ): Promise<unknown> {
     const { url } = await ensureConnected();
-    const response = await postJson(`${url}${path}`, body, timeoutMs);
+    const response = await postJson(`${url}${path}`, body, timeoutMs, signal);
     if (response.status < 200 || response.status >= 300) {
       throw new Error(`${path} failed (${response.status}): ${describeError(response.json)}`);
     }
@@ -328,8 +357,8 @@ export function createServiceClient(
         return text;
       }),
 
-    embed: (input) =>
-      call("/embed", { input }, 60_000).then((json) => {
+    embed: (input, signal) =>
+      call("/embed", { input }, 60_000, signal).then((json) => {
         const vector = (json as { vector?: unknown }).vector;
         if (!Array.isArray(vector)) throw new Error("/embed returned no vector");
         return vector as number[];
