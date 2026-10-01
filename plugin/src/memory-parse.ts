@@ -26,6 +26,14 @@
 // on, and it is `renderCaptureEntry`'s `·`.
 const MIDDLE_DOT = "\\u00b7";
 
+// openclaw's own chunking and embedding-limit functions. The plugin imports them
+// rather than reimplementing the arithmetic: CHARS_PER_TOKEN_ESTIMATE is a CJK-weighted
+// heuristic (4 for latin, weighted per range for ideographs), and getting that estimate
+// wrong in either direction either wastes context or overflows it.
+import { chunkMarkdown } from "openclaw/plugin-sdk/memory-core-host-engine-indexing";
+import { enforceEmbeddingMaxInputTokens } from "openclaw/plugin-sdk/memory-core-host-engine-indexing";
+import { estimateStringChars } from "../../packages/normalization-core/src/cjk-chars.js";
+
 // THE `m` FLAG IS LOAD-BEARING
 //   These patterns are used two ways: against a single line by `splitOn`, and
 //   against a whole file by `parseMemoryDocument` to decide which reader to use.
@@ -347,14 +355,89 @@ function parseLongTerm(text: string, fallbackTitle: string): ParsedDocument {
 export function parseMemoryDocument(file: string, text: string): ParsedDocument {
   const base = file.replace(/\\/g, "/").split("/").pop() ?? file;
 
-  if (SESSION_MARKER.test(text)) return parseSnapshot(text, base);
-  if (ENTRY_HEADING.test(text)) return parseEntryDay(text, base);
+  if (SESSION_MARKER.test(text)) return withChunking(parseSnapshot(text, base));
+  if (ENTRY_HEADING.test(text)) return withChunking(parseEntryDay(text, base));
   if (base === "MEMORY.md" || base.toUpperCase() === "MEMORY.MD") {
-    return parseLongTerm(text, base);
+    return withChunking(parseLongTerm(text, base));
   }
   // A snapshot whose session marker was stripped still has turn headings; an
   // entry file still has its entry headings. Checking the whole text rather
   // than only the first line matters, because a day file can be empty on top.
-  if (TURN_HEADING.test(text)) return parseSnapshot(text, base);
-  return parseLongTerm(text, base);
+  if (TURN_HEADING.test(text)) return withChunking(parseSnapshot(text, base));
+  return withChunking(parseLongTerm(text, base));
+}
+
+/** Chunking applies to every reader: any of them can hold a pasted file. */
+function withChunking(parsed: ParsedDocument): ParsedDocument {
+  return { ...parsed, units: applyChunking(parsed.units) };
+}
+
+/**
+ * Split a unit whose body is too large for the embedding model into several units.
+ *
+ * WHY THIS EXISTS
+ *   A turn carrying a pasted file or a long log becomes one enormous unit -- measured
+ *   at 98k characters on real data. The embedding context is 2048 tokens, so such a
+ *   unit can never be embedded: it is skipped at embedding time, stays invisible to
+ *   semantic search, and remains findable only by keyword. The details that make it
+ *   worth remembering (a path, a port, an error string) are usually in the part that
+ *   got cut off.
+ *
+ * WHY openclaw's FUNCTIONS AND NOT LOCAL CODE
+ *   `chunkMarkdown` and `enforceEmbeddingMaxInputTokens` are openclaw's own, used by its
+ *   manager, and they solve this in two layers that are not redundant:
+ *
+ *     1. chunkMarkdown splits by a *token* budget (`tokens x CHARS_PER_TOKEN_ESTIMATE`,
+ *        CJK-weighted) on line boundaries, carrying `overlap` characters so a fact on a
+ *        boundary is not lost. It also splits a single over-long line by code point,
+ *        keeping surrogate pairs and supplementary ideographs intact.
+ *     2. enforceEmbeddingMaxInputTokens then re-splits whatever still exceeds the
+ *        provider's real byte limit. openclaw runs with chunkTokens 4000 against a
+ *        2048-token local provider, so layer 2 is the one that actually binds.
+ *
+ *   The parameters are openclaw's defaults: 4000 tokens for layer 1, and `local` for
+ *   layer 2, which resolves to DEFAULT_LOCAL_EMBEDDING_MAX_INPUT_TOKENS = 2048.
+ *
+ * Text and metadata are carried onto every fragment, so a fragment still reports the
+ * right turn type, day and marker -- a fragment is the same turn, not a new one.
+ */
+const CHUNK_TOKENS = 4000;
+const CHUNK_OVERLAP = 0;
+/** `local` resolves to openclaw's DEFAULT_LOCAL_EMBEDDING_MAX_INPUT_TOKENS (2048). */
+const EMBED_PROVIDER_ID = "local";
+
+function splitOversizedUnit(unit: MemoryUnit): MemoryUnit[] {
+  // Gated on openclaw's own weighted estimator, not on character count. The two differ
+  // by up to 4x for CJK: a 7700-character Chinese turn is roughly 7700 weighted units
+  // and cannot be embedded in a 2048-token context, while a 7700-character English one
+  // is about 1900 and fits comfortably. A character-count gate therefore either skips
+  // Chinese turns that need splitting or splits English ones that do not.
+  if (estimateStringChars(unit.text) <= EMBED_CONTEXT_TOKENS) return [unit];
+
+  const fragments = enforceEmbeddingMaxInputTokens(
+    { id: EMBED_PROVIDER_ID, maxInputTokens: undefined },
+    chunkMarkdown(unit.text, { tokens: CHUNK_TOKENS, overlap: CHUNK_OVERLAP }),
+  ).filter((fragment) => fragment.text.trim().length > 0);
+
+  if (fragments.length <= 1) return [unit];
+
+  return fragments.map((fragment, index) => ({
+    ...unit,
+    heading: fragments.length > 1 ? `${unit.heading} (${index + 1}/${fragments.length})` : unit.heading,
+    text: fragment.text,
+  }));
+}
+
+/**
+ * The embedding context this plugin runs against.
+ *
+ * `DEFAULT_LOCAL_EMBEDDING_MAX_INPUT_TOKENS` from openclaw, for the `local` provider
+ * the plugin actually uses. Compared in the estimator's own units, so the gate and the
+ * limit cannot disagree about what fits.
+ */
+const EMBED_CONTEXT_TOKENS = 2048;
+
+/** Split every oversized unit in a parsed document. */
+function applyChunking(units: readonly MemoryUnit[]): MemoryUnit[] {
+  return units.flatMap(splitOversizedUnit);
 }
