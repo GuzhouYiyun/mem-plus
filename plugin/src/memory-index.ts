@@ -134,9 +134,22 @@ CREATE TABLE IF NOT EXISTS vectors (
  * feature, not a prerequisite for the plugin loading at all.
  */
 export function openIndex(): DatabaseSync | null {
+  return openIndexAt(indexPath());
+}
+
+/**
+ * Open (creating if needed) an index at an explicit path, applying the same schema
+ * and migrations as the shared one.
+ *
+ * Exists so an evaluation or a repair can run against a scratch database without
+ * touching the user's real index. Duplicating the schema here instead would let the
+ * two drift, and a test that indexes through a different schema than production is
+ * testing the wrong thing.
+ */
+export function openIndexAt(file: string): DatabaseSync | null {
   try {
-    mkdirSync(stateRoot(), { recursive: true });
-    const db = new DatabaseSync(indexPath());
+    mkdirSync(path.dirname(file), { recursive: true });
+    const db = new DatabaseSync(file);
     // WAL keeps a long search from blocking the writes that follow a capture.
     db.exec("PRAGMA journal_mode = WAL");
     // ON DELETE CASCADE below is what keeps orphans out; SQLite ignores it
