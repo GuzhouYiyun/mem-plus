@@ -14,22 +14,22 @@ OpenCode does not remember: what a session figured out, which files it touched, 
 
 ## Status — read this first
 
-**Working**
+**Working, verified end to end**
 
 | Capability | Notes |
 |---|---|
 | Session snapshots | Every turn re-renders the whole session to `memory/<date>-<title>.md`, tool calls and outputs included |
-| LLM extraction | openclaw's original pipeline; emits `{summary, type, tags}` and filters `type="skip"` |
+| LLM extraction | openclaw's original pipeline; emits `## Request` / `## Outcome` plus `Tags`, filters `type="skip"`, keeps openclaw's idempotency marker |
 | Global archive | Every project's sessions mirrored to `~/.config/opencode/mem-plus/archive/<project>/` |
-| Local models | `node-llama-cpp` loads GGUF directly; discrete GPU > integrated GPU > CPU |
-| Graceful fallback | Missing model files or uninstalled deps → falls back to OpenCode's own model, capture keeps working |
+| Local models | Measured on a Vulkan iGPU: ~14 s from cold start to written, 4–12 s per extraction |
+| Graceful fallback | Missing model files, uninstalled deps, or a service that will not start → falls back to OpenCode's own model, capture keeps working |
 
 **Not built yet**
 
-- ❌ **Retrieval tools**: `memory_search` / `memory_get` are not wired up. **This version can write memory but cannot search it.**
-- ❌ SQLite + FTS5 index, the vector channel (`bge-m3` embeddings + hybrid search), and cross-project archive search
+- ❌ **Retrieval**: `memory_search` / `memory_get` are not wired up. **This version can write memory but cannot search it.**
+- ❌ SQLite + FTS5 index, the vector channel (`bge-m3` embeddings + hybrid search), cross-project archive search
 
-Writes land as plain markdown first; the index is meant to be a rebuildable projection of those files — the same layering openclaw uses, where a file watcher owns it. An index is derived data, never the source of truth.
+Writes land as plain markdown first; the index is meant to be a rebuildable projection of those files — the same layering openclaw uses. An index is derived data, never the source of truth.
 
 ---
 
@@ -42,7 +42,7 @@ git clone <this-repo> mem-plus
 cd mem-plus
 ```
 
-**2. Install plugin dependencies**
+**2. Install dependencies**
 
 ```bash
 cd plugin
@@ -76,17 +76,20 @@ Three forms are accepted. On Windows, **prefer forward slashes** to dodge escapi
 
 > Point at the **`plugin/` directory inside the repo**, not the repo root — the plugin reads its memory engine from `../extensions/memory-core/`, so copying `plugin/` out on its own will not work.
 
-On startup you should see:
+**4. (Optional) Models**
 
+```bash
+mem-plus/models/qwen3.5-4b-q4_k_m.gguf
+mem-plus/models/bge-m3-f16.gguf
 ```
-[mem-plus] extraction model = local gguf, gpu priority auto
-```
+
+`models/` is gitignored. See [Local models](#local-models).
 
 ---
 
 ## Configuration
 
-All options go in the `plugins` array of `opencode.jsonc`, using the object form:
+All options go in the `plugins` array of `opencode.jsonc`, using the object form. **Every option is optional.**
 
 ```jsonc
 {
@@ -95,17 +98,17 @@ All options go in the `plugins` array of `opencode.jsonc`, using the object form
     {
       "package": "C:/Users/you/repos/mem-plus/plugin",
       "options": {
-        "model": {
-          "dir": "C:/Users/you/models",
-          "gpu": "auto"
-        }
+        "model": { "gpu": "auto" },
+        "service": { "port": 4748 }
       }
     }
   ]
 }
 ```
 
-**Every option is optional** — the defaults work with an empty config:
+Full example: [`opencode.example.jsonc`](./opencode.example.jsonc).
+
+### Model
 
 | Option | Default | Meaning |
 |---|---|---|
@@ -115,10 +118,31 @@ All options go in the `plugins` array of `opencode.jsonc`, using the object form
 | `model.embedPath` | `<model.dir>/bge-m3-f16.gguf` | Embedding model |
 | `model.gpu` | `"auto"` | `"auto"` / `"cuda"` / `"vulkan"` / `"cpu"` |
 | `model.gpuLayers` | `"auto"` | Layers to offload; `"auto"` sizes to current VRAM |
-| `model.contextSize` | `16384` | Extraction session context length |
+| `model.contextSize` | `16384` | Extraction context length |
 | `model.maxNewTokens` | `512` | Cap on tokens generated per extraction |
 | `model.threads` | `0` | CPU threads, `0` = unlimited (CPU fallback only) |
 | `model.logLevel` | `"warn"` | `"silent"` / `"warn"` / `"info"` / `"debug"` |
+
+### Inference service
+
+| Option | Default | Meaning |
+|---|---|---|
+| `service.port` | `4748` | Base port; walks forward when busy, up to `4758` |
+| `service.host` | `"127.0.0.1"` | Loopback only |
+| `service.autostart` | `true` | Let the plugin start it; `false` connects only |
+| `service.idleMinutes` | `10` | Self-exit after this long idle; `0` disables the reaper |
+| `service.startTimeoutMs` | `30000` | How long to wait for a fresh spawn |
+| `service.url` | — | Point at a full address to bypass discovery and autostart |
+
+Run one yourself if you want it warm:
+
+```bash
+cd plugin
+node serve/server.mjs --port 4748 --idle-minutes 0
+curl http://127.0.0.1:4748/health
+```
+
+A service you started is yours to stop — `dispose` only reclaims one the plugin spawned.
 
 ### GPU priority
 
@@ -127,31 +151,107 @@ Backends are tried **discrete GPU > integrated GPU > CPU**, explicitly rather th
 | Order | Value | Hardware |
 |---|---|---|
 | 1 | `cuda` | NVIDIA discrete |
-| 2 | `vulkan` | AMD / Intel discrete, every iGPU (llama.cpp then picks the strongest Vulkan device) |
-| 3 | `false` | CPU only |
+| 2 | `metal` | Apple discrete / unified memory |
+| 3 | `vulkan` | AMD / Intel discrete, every iGPU (llama.cpp then picks the strongest Vulkan device) |
+| 4 | `false` | CPU only |
 
-A backend that fails to load (a broken Vulkan driver, say) degrades to the next one instead of taking the plugin down. The log states which one won:
+A backend that fails to load degrades to the next one instead of taking the plugin down. The log names the winner:
 
 ```
-[mem-plus] llama backend = vulkan (gpu) build=prebuilt
+[mem-plus] [mem-plus:serve] llama backend = vulkan (gpu) build=prebuilt
 ```
 
 ---
 
-## Local models
+## Architecture: why there is a 4748 service
 
-`models/` is gitignored (several GB doesn't belong in a repo). Put two files there:
+```
+OpenCode plugin (bun process)
+   │  events, files, HTTP calls; autostarts and reaps the service
+   ▼
+127.0.0.1:4748  ← separate Node process
+   ├─ node-llama-cpp (native binding loads normally here)
+   ├─ qwen extraction + bge-m3 embeddings, both held warm
+   └─ /health  /extract  /embed
+```
+
+**Why it cannot run inside the plugin process**
+
+node-llama-cpp self-tests its native binding by forking a child process (`testBindingBinary.js`). OpenCode plugins run under bun, where `process.execPath` is the opencode binary rather than node — so the fork always fails, the binding never loads, and there is no compiler to fall back to. Measured: standalone `node` and standalone `bun` both load it fine (`build=prebuilt`); only the plugin host fails. No environment variable skips the test.
+
+**What the split buys**
+
+- **One model instance shared by every project** — four OpenCode windows cost one 4 GB load, not four
+- The 4 GB stays in its own process; a llama.cpp crash cannot take down the OpenCode server
+- Models stay warm between extractions
+- When something breaks you `curl` it instead of reading plugin internals
+
+**4748 rather than 4747**: opencode-mem already owns 4747 for its memory management web UI, and two things must not collide on one machine.
+
+**Idle reaping**: the models hold ~4 GB. The service exits by default after 10 idle minutes so it is not still sitting on CPU and memory after you close OpenCode.
+
+---
+
+## Local models
 
 | Purpose | Default filename | Size | Role |
 |---|---|---|---|
 | Extraction | `qwen3.5-4b-q4_k_m.gguf` | ~2.6 GB | Summarizes one assistant turn into a structured entry |
 | Embedding | `bge-m3-f16.gguf` | ~1.1 GB | Embeds memory chunks (**for the retrieval layer, not wired yet**) |
 
-Dropping them into `models/` is enough. Otherwise point `model.dir` / `model.contentPath` / `model.embedPath` wherever they live.
-
-Models load lazily — a project that never triggers extraction never pays the ~4 GB.
+Elsewhere is fine — point `model.dir` / `model.contentPath` / `model.embedPath` wherever they live. Models load lazily, so a project that never extracts never pays the ~4 GB.
 
 > **Windows note**: Defender real-time scanning slows GGUF inference down badly. If extraction crawls, exclude the `models/` directory from Defender (needs administrator).
+
+### The extraction model must be a completion model
+
+This is worth its own section, because it fails silently: no error, just an empty string.
+
+`Qwen3.5 4b **Src**` — Src means source, i.e. **pretrained weights, not Instruct**. It ships a `chat_template`, but the weights were never instruction-tuned. Hand it `LlamaChatSession`'s chat template and it emits EOS immediately:
+
+```
+extract done in 12946 ms (0 chars)
+```
+
+The streaming callback never fires either — it looks like a crash, but the model is correctly saying nothing.
+
+So extraction uses **`LlamaCompletion` + few-shot + a GBNF grammar**, each layer doing one job:
+
+| Layer | Job |
+|---|---|
+| openclaw's original system prompt | Owns the language choice and the `## Request` / `## Outcome` format |
+| 5 few-shot examples | Teaches a base model the shape — 2 skips, 3 technical, covering several `type` values |
+| GBNF grammar | Generated from openclaw's `CAPTURE_SUMMARY_JSON_SCHEMA`; a malformed reply becomes structurally impossible |
+
+The skip examples must keep `tags: []`, so the grammar layer **cannot** add `minItems` — that would make "skip" itself an illegal output.
+
+`type` is additionally reconciled in both directions against summary presence: a source checkpoint will write a real summary and then label it `skip`, and will skip content that deserved a memory. **The summary is the signal** — an empty summary is always `skip`, and a non-empty summary is never discarded over one mislabelled token.
+
+**If you swap in an Instruct model**: `LlamaChatSession` will be more accurate, but few-shot + grammar keeps working, so no config change is needed.
+
+---
+
+## Logs
+
+OpenCode's plugin API **has no logging interface**, and a plugin's `console.log` reaches neither `--print-logs` nor `~/.local/share/opencode/log/opencode.log` (verified 2026-10-01). So the plugin writes its own:
+
+```
+~/.config/opencode/mem-plus/mem-plus.log
+```
+
+Rotates past 2 MB, keeping one `.1`. A healthy run:
+
+```
+2026-10-01T09:27:40.333Z [mem-plus] snapshot 904 B -> ...\memory\2026-10-01-creating-and-verifying-hello-txt-with-memplus.md
+2026-10-01T09:27:40.671Z [mem-plus] starting service: node ...\serve\server.mjs --port 4748
+2026-10-01T09:27:40.756Z [mem-plus] [mem-plus:serve] listening on http://127.0.0.1:4748
+2026-10-01T09:27:41.683Z [mem-plus] [mem-plus:serve] llama backend = vulkan (gpu) build=prebuilt
+2026-10-01T09:27:46.111Z [mem-plus] [mem-plus:serve] content model loaded: ...\qwen3.5-4b-q4_k_m.gguf
+2026-10-01T09:27:54.079Z [mem-plus] [mem-plus:serve] extract done in 7965 ms (type=feature, tags=2, summary=184 chars)
+2026-10-01T09:27:54.095Z [mem-plus] captured prompt_1790846851535_8df77c4 -> memory/2026-10-01.md
+```
+
+The service's own output is relayed into the same file, so anything prefixed `[mem-plus:serve]` came from port 4748.
 
 ---
 
@@ -164,25 +264,25 @@ Models load lazily — a project that never triggers extraction never pays the ~
 ├── MEMORY.md                            # promoted long-term memory
 └── memory/
     ├── 2026-10-01.md                    # extracted entries, one file per day
-    └── 2026-10-01-fix-snapshot-sync.md  # full session snapshot
+    └── 2026-10-01-create-and-verify-hello-txt.md   # full session snapshot
 ```
 
-An extracted entry looks like this:
+A real extracted entry:
 
 ```markdown
+## 2026-10-01T09:27:40.333Z · auto-capture · feature
+
 ## Request
-Create a file named feature.txt containing the word enabled
+Create a file named hello.txt containing the word memplus, then read it back to verify.
 
 ## Outcome
-Created feature.txt and verified it exists on disk.
+Created hello.txt with content 'memplus' and verified by reading it back.
 
-Tags: file-operations, verification
-<!-- openclaw-capture:{"id":"ses_...","inboxID":"...","ts":"..."}-->
+Tags: file-creation, verification
+<!-- openclaw-capture:prompt_1790846851535_8df77c4 -->
 ```
 
 That trailing comment is openclaw's original provenance marker — it is what makes re-delivery idempotent and keeps the entry traceable.
-
-Snapshot files hold the whole session: every user turn, `patch`/`shell` calls with their inputs and outputs, and the final prose answer.
 
 ### Global archive
 
@@ -192,7 +292,7 @@ Snapshot files hold the whole session: every user turn, `patch`/`shell` calls wi
 └── memory/
 ```
 
-Every project keeps a cross-project copy. The path hash keeps same-named projects from colliding. On Windows, `~/.config` is `C:\Users\<you>\.config`.
+The path hash keeps same-named projects from colliding. On Windows, `~/.config` is `C:\Users\<you>\.config`.
 
 ---
 
@@ -213,7 +313,7 @@ you type a prompt
                                      └─► extraction pipeline:
                                           claim → slice the assistant turn
                                                 → bounded markdown context
-                                                → LLM extraction {summary, type, tags}
+                                                → LLM extraction
                                                 → filter type="skip"
                                                 → render
                                                 → append memory/<date>.md
@@ -222,31 +322,33 @@ you type a prompt
 Design calls worth knowing:
 
 - **`session.inbox.enqueued` over `session.hook("prompt")`** — the former is the *durable* admission boundary and carries a stable `inboxID`; the latter fires before admission, so the text may not be final.
-- **Snapshots upsert every turn** rather than on session exit — OpenCode V2 has no session-leave hook.
-- **2 s debounce** — one turn fires several completion events; coalescing them avoids duplicate extraction.
-- **Extraction runs in the background** and never blocks you from continuing.
+- **Inference in a separate process** — see [Architecture](#architecture-why-there-is-a-4748-service)
+- **Snapshots upsert every turn** — OpenCode V2 has no session-leave hook
+- **2 s debounce** — one turn fires several completion events; coalescing them avoids duplicate extraction
+- **Extraction runs in the background** and never blocks you
 
 ---
 
 ## Troubleshooting
 
-**No `[mem-plus]` in the log** — turn on logging with `opencode --print-logs --log-level debug`.
+**Where are the logs?** `~/.config/opencode/mem-plus/mem-plus.log`. Start there — it is more useful than OpenCode's own.
 
-**`extraction model = opencode (fallback: GGUF not found)`** — check `model.dir` and that both GGUF files are present. The log names the exact missing path.
+**Extraction comes back empty / `summary=0 chars` with `type=skip`** — most likely the content model is instruction-tuned (Instruct/Chat) but is being driven like a base model, or the reverse. Read the `summary` length in parentheses after `extract done in Xms`; a persistent 0 means the model is not a fit, see [The extraction model must be a completion model](#the-extraction-model-must-be-a-completion-model).
 
-**`extraction model = opencode (fallback: node-llama-cpp unavailable)`** — run `npm install` in `plugin/`.
+**`service did not become healthy ... within 30s`** — the service did not start. Look for the `[mem-plus:serve]` lines: missing model file, every port taken, or dependencies not installed. Run it by hand to see the error:
 
-**Extraction is very slow** — hardware-dependent. Keep `model.gpu` at `"auto"`. `opencode --print-logs --log-level debug` shows the backend that won and how long each extraction took:
-
-```
-[mem-plus] llama backend = vulkan (gpu) build=prebuilt
-[mem-plus] content model loaded: .../qwen3.5-4b-q4_k_m.gguf
-[mem-plus] extract done in 1234 ms (210 chars)
+```bash
+cd plugin
+node serve/server.mjs --port 4748
 ```
 
-To route back to OpenCode's hosted model for now: `"model": { "content": "opencode" }`.
+**`extraction model = opencode (fallback: GGUF not found)`** — the model files are not where the config says. The log names the exact missing path.
 
-**`memory/` never appears** — a session needs at least one *completed* turn. Then allow the 2 s debounce plus the extraction run.
+**Extraction is very slow** — hardware-dependent. Keep `model.gpu: "auto"` and read the backend and per-call timings from the log. To route back to OpenCode's hosted model for now: `"model": { "content": "opencode" }`.
+
+**`memory/` never appears** — a session needs at least one *completed* turn. Then allow the 2 s debounce plus the extraction run. Search the log for the `snapshot` and `captured` lines to confirm.
+
+**Log shows `sweep: nothing pending`** — snapshots are being written but extraction has nothing to do, meaning the landing zone never received the prompt (usually the event is not arriving).
 
 ---
 
@@ -258,4 +360,4 @@ This repository contains openclaw's memory subsystem under its original license.
 - **Pi / pi-mono** and other third-party portions — see [`THIRD_PARTY_NOTICES.md`](./THIRD_PARTY_NOTICES.md)
 - Sub-packages carrying their own notices keep them in-tree (`packages/ai/LICENSE`, `packages/gateway-client/LICENSE`, `packages/gateway-protocol/LICENSE`, `extensions/facetime/LICENSE`, `extensions/typesafe/LICENSE`)
 
-Everything under `plugin/` is new: the OpenCode adapter and the local model runtime.
+Everything under `plugin/` is new: the OpenCode adapter, the HTTP client, and the local inference service.

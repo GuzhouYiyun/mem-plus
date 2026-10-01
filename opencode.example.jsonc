@@ -15,7 +15,7 @@
       "options": {
         "model": {
           // "local" = 本地 GGUF（默认）；"opencode" = 用 OpenCode 自己的模型
-          // 本地模型文件缺失或依赖没装时会自动回落，无需手动改这里
+          // 本地模型文件缺失、依赖没装、服务起不来时会自动回落，无需手动改这里
           "content": "local",
 
           // GGUF 所在目录。默认是 <仓库>/models，也可以指向别处：
@@ -25,12 +25,31 @@
           // "contentPath": "C:/Users/你的用户名/models/qwen3.5-4b-q4_k_m.gguf",
           // "embedPath":   "C:/Users/你的用户名/models/bge-m3-f16.gguf",
 
-          // 独显 > 核显 > CPU。默认 "auto" 就是按这个顺序试
+          // 独显 > 核显 > CPU。默认 "auto" 就是按 cuda -> metal -> vulkan -> cpu 逐个试
           // 可选：cuda / vulkan / cpu
           "gpu": "auto",
 
-          // 抽取太慢时先试 "gpuLayers": "auto"（默认值），仍不行再换 "content": "opencode"
+          // 抽取太慢时先试 "gpuLayers": "auto"（默认值），
+          // 仍然不行就临时切 "content": "opencode"
           // "logLevel": "info"
+        },
+
+        "service": {
+          // 本地推理服务端口。不是 4747 是因为 opencode-mem 占了 4747；
+          // 端口被占用时会自动顺延，最多到 4758。
+          "port": 4748,
+
+          // 空闲多久后服务自动退出，0 = 不回收。默认 10 分钟。
+          // 不设的话，关掉 OpenCode 之后模型还会常驻约 4 GB 内存。
+          "idleMinutes": 10,
+
+          // 服务没跑时是否由插件自动拉起。
+          // 想自己常驻服务就设 false，然后手动跑：
+          //   cd plugin && node serve/server.mjs --port 4748 --idle-minutes 0
+          "autostart": true
+
+          // 已经手动起了服务的话，直接写地址，跳过发现和自动拉起：
+          // "url": "http://127.0.0.1:4748"
         }
       }
     }
