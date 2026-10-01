@@ -43,7 +43,13 @@ import { indexPath, openIndex } from "./memory-index.js";
 import { indexWrittenFile, indexTail } from "./memory-scan.js";
 import { buildMemoryTools } from "./memory-tools.js";
 import { archiveProjectSlug, logFile, projectSlug } from "./paths.js";
-import type { EventView, PluginContext } from "./opencode.js";
+import {
+  eventBelongsToWorkspace,
+  isExecutionEnded,
+  normaliseEventType,
+  unwrapEvent,
+} from "./event-compat.js";
+import type { PluginContext } from "./opencode.js";
 import { writeSessionSnapshot } from "./snapshot.js";
 
 /** Settle time after a turn completes before snapshot + sweep run. */
@@ -330,11 +336,20 @@ export default Plugin.define({
       );
     };
 
-    const onEvent = (event: EventView): void => {
+    // `ctx.event.subscribe()` is machine-wide, not this window's. Without the
+    // workspace check below, a session opened in another project is captured here:
+    // its snapshot is written under this workspace, and its memory is attributed to
+    // this project. That is how every project's memories came to be filed under one
+    // slug -- the index is shared, the stream is not per-workspace.
+    const onEvent = async (raw: unknown): Promise<void> => {
+      const event = unwrapEvent(raw);
+      const canonicalType = normaliseEventType(event?.type);
+      if (!event || !canonicalType) return;
       const sessionID = event.data?.sessionID;
       if (typeof sessionID !== "string" || sessionID.length === 0) return;
+      if (!(await eventBelongsToWorkspace(ctx, raw, event))) return;
 
-      if (event.type === "session.inbox.enqueued") {
+      if (canonicalType === "session.inbox.enqueued") {
         const inboxID = event.data?.inboxID;
         const text = event.data?.item?.payload?.text;
         if (typeof inboxID !== "string" || typeof text !== "string" || text.length === 0) return;
@@ -346,19 +361,15 @@ export default Plugin.define({
         return;
       }
 
-      if (
-        event.type === "session.execution.succeeded" ||
-        event.type === "session.execution.failed" ||
-        event.type === "session.execution.interrupted"
-      ) {
-        scheduleSettle(sessionID);
-      }
+      if (isExecutionEnded(canonicalType)) scheduleSettle(sessionID);
     };
 
     void (async () => {
       try {
         for await (const raw of ctx.event.subscribe({ signal: controller.signal })) {
-          onEvent(raw as EventView);
+          // Not awaited: the stream must keep draining while a workspace lookup is in
+          // flight, or one slow `session.get` stalls every later event.
+          void onEvent(raw);
         }
       } catch (error) {
         if (!closed) log("event stream ended", error);
