@@ -23,7 +23,7 @@ OpenCode does not remember: what a session figured out, which files it touched, 
 | Global archive | Every project's sessions mirrored to `~/.config/opencode/mem-plus/archive/<project>/` |
 | Local models | Measured on a Vulkan iGPU: ~14 s from cold start to written, 4–12 s per extraction |
 | **Never bills you** | When local inference is unavailable the plugin does **not** silently switch to your paid OpenCode model. Snapshots keep landing; extraction is deferred until the service is back |
-| **Retrieval** | `memory_search` / `memory_get` / `memory_reindex` are registered; SQLite + FTS5 full text, `bge-m3` vectors, RRF fusion |
+| **Retrieval** | `memory_search` / `memory_get` / `memory_reindex` are registered; SQLite + FTS5 full text, `bge-m3` vectors, hybrid ranking delegated to openclaw's `mergeHybridResults` (0.7 vector / 0.3 text, plus temporal decay and MMR) |
 
 Both halves work: memory is written, and it can be found again.
 
@@ -33,7 +33,7 @@ The model calls these on its own; you can also ask for them by name.
 
 | Tool | What it does |
 |---|---|
-| `memory_search` | Search. Defaults to text only (no model load, so it is instant); `mode: "hybrid"` fuses full text and vectors with RRF; `scope: "archive"` widens the range to the global archive |
+| `memory_search` | Search. Defaults to text only (no model load, so it is instant); `mode: "hybrid"` ranks by openclaw's weighted fusion — 200 candidates per lane, 0.7 vector / 0.3 text, then temporal decay, MMR for diversity, then a 0.35 floor; `scope: "archive"` widens the range to the global archive |
 | `memory_get` | Read one memory in full, by the unit id a `memory_search` result reported |
 | `memory_reindex` | Rebuild the index from the markdown. `embed: true` also embeds everything not embedded yet — **this is the only switch that turns on semantic search** |
 
@@ -63,7 +63,23 @@ npm install
 
 This pulls `node-llama-cpp` with your platform's prebuilt binaries. **Skipping it still works** — the plugin loads and extraction falls back to OpenCode's own model. You only need it for local GGUF.
 
-**3. Register the plugin**
+**3. Generate the module alias (required)**
+
+```bash
+node plugin/scripts/link-openclaw-alias.mjs
+```
+
+openclaw's sources refer to each other by the bare specifier `openclaw/plugin-sdk/<name>`. Inside openclaw that resolves through a workspace link plus `tsconfig.json`'s `paths`, which is enough for `tsc` but **not at runtime**: OpenCode loads plugins with bun, and neither bun nor node reads `tsconfig.json`. This repository is a trimmed copy of openclaw's tree with no workspace to link against, so the alias has to exist as real files under `node_modules/`.
+
+The script **generates** `node_modules/openclaw/` from `src/plugin-sdk/*.ts` (about 400 one-line re-export files) rather than vendoring it by hand. The hand-written copy was already 8 files out of date and nothing would have said so. Running it again is a no-op:
+
+```
+node plugin/scripts/link-openclaw-alias.mjs --check   # verify only, write nothing
+```
+
+The alias lives in `node_modules/`, which `.gitignore` already excludes, so this is a setup step rather than committed content. **Skipping it makes the plugin fail to load** — the symptom is the retrieval tools never appearing.
+
+**4. Register the plugin**
 
 Edit `opencode.jsonc` (project-level, or global at `~/.config/opencode/opencode.jsonc`):
 
@@ -88,7 +104,7 @@ Three forms are accepted. On Windows, **prefer forward slashes** to dodge escapi
 
 > Point at the **`plugin/` directory inside the repo**, not the repo root — the plugin reads its memory engine from `../extensions/memory-core/`, so copying `plugin/` out on its own will not work.
 
-**4. (Optional) Models**
+**5. (Optional) Models**
 
 ```bash
 mem-plus/models/qwen3.5-4b-q4_k_m.gguf
@@ -233,21 +249,28 @@ A backend that fails to load degrades to the next one instead of taking the plug
 | Mode | Needs the model | Notes |
 |---|---|---|
 | `text` | no | FTS5 full text + bm25. **Default**, and the only one that works with the service down |
-| `hybrid` | yes | Full text and vector results fused with RRF (reciprocal rank fusion). A unit that hits **both** ways ranks first |
+| `hybrid` | yes | Full text and vectors fused at 0.7 / 0.3 by openclaw's `mergeHybridResults`. A unit that hits **both** ways ranks first |
 | `vector` | yes | Pure semantics — matches with no shared keywords, but nothing literal at all |
 
 Text is the default not out of caution but because it costs **nothing**: the first `bge-m3` load takes seconds. Only once the model is warm is the vector channel worth it.
 
+Two details of hybrid ranking that are easy to be surprised by:
+
+- **The text score is mapped before anything is fused.** bm25 is a negative number with no upper bound, so it cannot be added to a cosine as-is. openclaw's `bm25RankToScore` saturates it to `r / (1 + r)`, which lands in `[0, 1)` and makes the two lanes commensurable.
+- **Text-only hits fall under the 0.35 floor, on purpose.** A hit with no vector-side evidence can score at most `0.3 x textScore`, about 0.23. That is below the floor, and `selectHybridSearchResults` fills the remaining slots from the keyword lane so a plain text query does not come back empty. So a hybrid result whose order looks wrong is usually not a bug — there was nothing to vector-search.
+
 ### First run: build the index
 
-The plugin indexes existing memory files at startup:
+The plugin does **not** index existing memory files at startup. The only two lines it logs are:
 
 ```
 [mem-plus] index C:\Users\you\.config\opencode\mem-plus\index.db
 [mem-plus] retrieval tools ready: memory_search, memory_get, memory_reindex
 ```
 
-The **vector channel starts empty**, though — on a fresh clone every unit needs embedding. That cannot happen automatically (it would occupy your CPU for seconds to minutes), so trigger it once yourself:
+(There is a startup sweep, but it processes prompts that have not been extracted yet — it is not a reindex of what is already on disk.)
+
+Trigger it once yourself:
 
 ```
 memory_reindex  {"scope": "all", "embed": true}
@@ -461,7 +484,8 @@ when you search
          ├─ split into retrieval units (entry / snapshot turn / long-term section)
          ├─ FTS5 full text, bm25 ranked
          ├─ bge-m3 vector, cosine ranked          ← hybrid and vector only
-         └─ RRF fuses the two rankings
+         └─ openclaw mergeHybridResults: 0.7/0.3 weighted fusion → temporal decay
+             → project boost → MMR → 0.35 floor
 ```
 
 Design calls worth knowing:
@@ -473,7 +497,8 @@ Design calls worth knowing:
 - **Extraction runs in the background** and never blocks you
 - **The write path never depends on the index** — markdown lands first and the index projects it. A broken search cannot cost you a memory, and a lost index is rebuilt by `memory_reindex`
 - **Append-only files parse only the new block; snapshots are re-read whole** — the former only grows, the latter is rewritten every turn. Taking the cheap path on a snapshot would leave the previous turn's turns behind as duplicate hits
-- **RRF, not score weighting** — bm25 is an unbounded negative number and cosine is 0–1; there is no common scale. Reciprocal rank fusion only looks at positions, so nothing needs calibrating
+- **Weighted fusion, not RRF** — an earlier version used reciprocal rank fusion, on the reasoning that bm25 is an unbounded negative number while cosine is 0–1 so there is no common scale. That reasoning does not hold: openclaw's `bm25RankToScore` saturates bm25 to `r / (1 + r)` in `[0, 1)`, so the scale problem is already solved. And RRF looks only at positions, which throws away exactly the magnitudes the 0.7/0.3 split exists to weigh. It now calls openclaw's `mergeHybridResults` directly
+- **Only one copy of the project/archive mirror is indexed** — every capture writes the snapshot to both the project directory and the global archive, and the two files are byte-identical. De-duplication keys on the **document content hash** and the project copy wins; the archive document row is kept but gets no units. If the project copy is deleted, the archive takes the content back. Rows indexed before this existed need one `memory_reindex` to acquire a hash and heal
 
 ---
 

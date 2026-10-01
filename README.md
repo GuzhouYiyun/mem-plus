@@ -39,7 +39,7 @@ OpenCode 本身不记事：这个会话查清了什么、改了哪些文件、�
 | 全局档案 | 每个项目的会话镜像到 `~/.config/opencode/mem-plus/archive/<项目>/` |
 | 本地模型 | 本机 Vulkan 核显实测：从冷启动到写入完成约 14 秒，单次抽取 4–12 秒 |
 | **绝不计费** | 本地推理不可用时**不会**偷偷改用你的 OpenCode 付费模型。快照照写，抽取推迟到服务恢复 |
-| **检索** | `memory_search` / `memory_get` / `memory_reindex` 三个工具已注册，SQLite + FTS5 全文 + `bge-m3` 向量 + RRF 混合排序 |
+| **检索** | `memory_search` / `memory_get` / `memory_reindex` 三个工具已注册，SQLite + FTS5 全文 + `bge-m3` 向量，混合排序直接用 openclaw 的 `mergeHybridResults`（0.7 向量 / 0.3 全文 + 时序衰减 + MMR） |
 
 写入和检索都跑通了：能记下来，也搜得回来。
 
@@ -49,7 +49,7 @@ OpenCode 本身不记事：这个会话查清了什么、改了哪些文件、�
 
 | 工具 | 作用 |
 |---|---|
-| `memory_search` | 检索。默认纯文本（不需要加载模型，最快）；`mode: "hybrid"` 走全文 + 向量 RRF 混合排序；`scope: "archive"` 把范围放到全局档案 |
+| `memory_search` | 检索。默认纯文本（不需要加载模型，最快）；`mode: "hybrid"` 走全文 + 向量混合排序（每路取前 200 条候选，0.7 向量 / 0.3 全文加权，再按时序衰减、MMR 去同质化，最后按 0.35 阈值筛选）；`scope: "archive"` 把范围放到全局档案 |
 | `memory_get` | 按 `memory_search` 结果里的 unit id 读完整条目，不截断 |
 | `memory_reindex` | 从 markdown 重建索引。`embed: true` 会顺带把还没嵌入的条目补上，这是**开启语义检索的唯一开关** |
 
@@ -81,7 +81,23 @@ npm install
 
 **不装也能用** —— 插件照常加载，抽取自动改用 OpenCode 自己的模型。只有想用本地 GGUF 才必须装。
 
-### 3. 注册插件
+### 3. 生成模块别名（必需）
+
+```bash
+node plugin/scripts/link-openclaw-alias.mjs
+```
+
+openclaw 的源码内部用 `openclaw/plugin-sdk/<名字>` 互相引用。在 openclaw 自己的仓库里，这靠 workspace 链接加 `tsconfig.json` 的 `paths` 解析 —— 足够 `tsc` 用，但**不够运行时用**：OpenCode 用 bun 加载插件，而 bun 和 node 都不读 `tsconfig.json`。这个仓库是 openclaw 树的一份裁剪版，没有 workspace 可链接，所以别名必须以真实文件形式存在于 `node_modules/`。
+
+这一步从 `src/plugin-sdk/*.ts` **生成** `node_modules/openclaw/`（约 400 个一行转发文件），而不是手写。手工版本已经和源码差了 8 个文件，而且不会有任何东西提醒你。生成之后是幂等的：
+
+```
+node plugin/scripts/link-openclaw-alias.mjs --check   # 只校验，不写入
+```
+
+别名落在 `node_modules/`（已被 `.gitignore` 排除），所以它是安装步骤而不是仓库内容。**跳过这步插件会加载失败**，日志里表现为检索工具没注册。
+
+### 4. 注册插件
 
 编辑 `opencode.jsonc`（项目级，或全局 `~/.config/opencode/opencode.jsonc`）：
 
@@ -106,7 +122,7 @@ npm install
 
 > 注意：填的是**仓库里的 `plugin/` 目录**，不是仓库根目录。插件要从 `../extensions/memory-core/` 读记忆引擎，所以不能只把 `plugin/` 复制出去。
 
-### 4.（可选）放模型
+### 5.（可选）放模型
 
 ```bash
 # 放进仓库的 models/ 就会被自动认出来
@@ -256,21 +272,28 @@ curl http://127.0.0.1:4748/health
 | 模式 | 需要模型 | 说明 |
 |---|---|---|
 | `text` | 否 | FTS5 全文 + bm25。**默认**，也是唯一在服务没跑时还能用的 |
-| `hybrid` | 是 | 全文和向量结果用 RRF（倒数排名融合）合并。**两种都命中**的条目排最前 |
+| `hybrid` | 是 | 全文和向量按 0.7 / 0.3 加权融合（openclaw 的 `mergeHybridResults`）。**两种都命中**的条目排最前 |
 | `vector` | 是 | 纯语义。没有关键词匹配也能找到，但完全不碰字面 |
 
 默认选 `text` 不是保守，是因为它**不花任何时间**：`bge-m3` 首次加载要几秒。冷启动之后向量通道才是划算的。
 
+关于混合排序，两个容易被忽略的细节：
+
+- **全文分数先过一遍饱和映射。** bm25 是负数且无上界，直接和余弦加权没有意义。openclaw 的 `bm25RankToScore` 把它压成 `r / (1 + r)`，落在 `[0, 1)`，两路才能放在同一个量纲上相加。
+- **0.35 阈值下纯文本命中会被顶掉，这是有意的。** 只有关键词路的条目最多只能拿到 `0.3 × 全文分 ≈ 0.23`，低于阈值；此时 openclaw 的 `selectHybridSearchResults` 会用剩余名额回填关键词结果，纯文本检索才不会空手而归。所以**看到"混合模式返回了排序看着不对的结果"通常不是 bug** —— 那里多半没有向量。
+
 ### 第一次用：先把索引建起来
 
-插件启动时会自动索引已有的记忆文件，日志里能看到：
+插件启动时不会自动索引磁盘上已有的记忆文件，日志里只能看到这两行：
 
 ```
 [mem-plus] index C:\Users\你\.config\opencode\mem-plus\index.db
 [mem-plus] retrieval tools ready: memory_search, memory_get, memory_reindex
 ```
 
-但**向量通道是空的** —— 新克隆的仓库里每个条目都需要嵌入。这个动作不能自动做（它会占用你的 CPU 十几秒到几分钟），所以要你主动触发一次：
+（启动清扫确实会跑，但它处理的是**还没抽取过的 prompt**，不是扫盘重建索引。）
+
+要建索引必须主动触发一次：
 
 ```
 memory_reindex  {"scope": "all", "embed": true}
@@ -502,7 +525,7 @@ Tags: file-creation, verification
          ├─ 拆成检索单元（条目 / 快照回合 / 长期记忆段落）
          ├─ FTS5 全文 + bm25 排序
          ├─ bge-m3 向量 + 余弦相似度排序      （hybrid / vector 才走）
-         └─ RRF 融合两路排名
+         └─ openclaw mergeHybridResults：0.7/0.3 加权融合 → 时序衰减 → 项目加权 → MMR → 0.35 阈值
 ```
 
 几个设计取舍：
@@ -514,7 +537,8 @@ Tags: file-creation, verification
 - **抽取在后台跑**，不阻塞你继续对话
 - **写入路径不依赖索引** —— markdown 先落盘，索引是它的投影。检索崩了不影响记忆入库，索引丢了 `memory_reindex` 重建即可
 - **每天一个文件只解析新增段，快照每次整份重读** —— 前者只增不减，后者每回合整份重写。走便宜的那条路会在快照里留下上一回合的重复命中
-- **RRF 而不是分数加权** —— bm25 是无界负分，余弦是 0–1，两种量纲没法直接加权。倒数排名融合只看名次，不需要标定
+- **加权融合而不是 RRF（倒数排名融合）** —— 早期版本用 RRF，理由是"bm25 是无界负分、余弦是 0–1，量纲不同"。这个理由不成立：openclaw 的 `bm25RankToScore` 把 bm25 压成 `r / (1 + r)`，落在 `[0, 1)`，量纲问题本来就能解决。而 RRF 只看名次、**把分数量级整个丢掉**，恰好丢掉的正是 0.7/0.3 这个权重要衡量的东西。现在直接调 openclaw 的 `mergeHybridResults`
+- **项目与归档的镜像文件只索引一份** —— 每次捕获都会把快照同时写到项目目录和全局档案，两个文件逐字节相同。索引按**文档内容哈希**去重，项目那份优先；文档行还在、单元不写。项目那份被删掉后，归档会拿回内容。已索引的旧行需要跑一次 `memory_reindex` 才会补上哈希并自愈
 
 ---
 
