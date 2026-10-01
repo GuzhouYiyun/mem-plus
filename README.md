@@ -15,6 +15,7 @@ OpenCode 本身不记事：这个会话查清了什么、改了哪些文件、�
 - [当前状态](#当前状态)
 - [安装](#安装)
 - [配置](#配置)
+- [检索怎么用](#检索怎么用)
 - [架构：为什么有个 4748 服务](#架构为什么有个-4748-服务)
 - [本地模型](#本地模型)
 - [日志](#日志)
@@ -38,15 +39,25 @@ OpenCode 本身不记事：这个会话查清了什么、改了哪些文件、�
 | 全局档案 | 每个项目的会话镜像到 `~/.config/opencode/mem-plus/archive/<项目>/` |
 | 本地模型 | 本机 Vulkan 核显实测：从冷启动到写入完成约 14 秒，单次抽取 4–12 秒 |
 | **绝不计费** | 本地推理不可用时**不会**偷偷改用你的 OpenCode 付费模型。快照照写，抽取推迟到服务恢复 |
+| **检索** | `memory_search` / `memory_get` / `memory_reindex` 三个工具已注册，SQLite + FTS5 全文 + `bge-m3` 向量 + RRF 混合排序 |
 
-**还没实现**
+写入和检索都跑通了：能记下来，也搜得回来。
 
-- ❌ **检索**：`memory_search` / `memory_get` 没接。**现在能把记忆写下来，但搜不回来。**
-- ❌ SQLite + FTS5 索引、向量通道（`bge-m3` 嵌入 + hybrid 混合检索）、跨项目档案搜索
+### 三个检索工具
 
-> 顺序是刻意的：写入层先落地成普通 markdown，索引层再从这些文件重建投影 —— 和 openclaw 本身的分层一致。索引是可丢弃的重建产物，不是数据本体。
+模型会自动调用它们，你也可以在对话里直接点名。
 
-要"能记**且**能搜"，还差检索层。
+| 工具 | 作用 |
+|---|---|
+| `memory_search` | 检索。默认纯文本（不需要加载模型，最快）；`mode: "hybrid"` 走全文 + 向量 RRF 混合排序；`scope: "archive"` 把范围放到全局档案 |
+| `memory_get` | 按 `memory_search` 结果里的 unit id 读完整条目，不截断 |
+| `memory_reindex` | 从 markdown 重建索引。`embed: true` 会顺带把还没嵌入的条目补上，这是**开启语义检索的唯一开关** |
+
+参数：`query`（必填）、`scope`（`project` 默认 / `all` / `archive`）、`mode`（`text` 默认 / `hybrid` / `vector`）、`limit`、`kind`（`entry` / `snapshot` / `memory`）、`type`、`tag`、`since`、`until`、`project`。
+
+全文检索是 **AND** 语义：多个词都要出现。所以从一个具体的词开始，找不到再放宽。
+
+索引在 `~/.config/opencode/mem-plus/index.db`，**所有项目共用一个**，所以搜一次能同时覆盖当前项目和全局档案。markdown 始终是数据本体，索引随时可以删掉重建。
 
 ---
 
@@ -238,6 +249,67 @@ curl http://127.0.0.1:4748/health
 
 ---
 
+## 检索怎么用
+
+### 三种检索模式
+
+| 模式 | 需要模型 | 说明 |
+|---|---|---|
+| `text` | 否 | FTS5 全文 + bm25。**默认**，也是唯一在服务没跑时还能用的 |
+| `hybrid` | 是 | 全文和向量结果用 RRF（倒数排名融合）合并。**两种都命中**的条目排最前 |
+| `vector` | 是 | 纯语义。没有关键词匹配也能找到，但完全不碰字面 |
+
+默认选 `text` 不是保守，是因为它**不花任何时间**：`bge-m3` 首次加载要几秒。冷启动之后向量通道才是划算的。
+
+### 第一次用：先把索引建起来
+
+插件启动时会自动索引已有的记忆文件，日志里能看到：
+
+```
+[mem-plus] index C:\Users\你\.config\opencode\mem-plus\index.db
+[mem-plus] retrieval tools ready: memory_search, memory_get, memory_reindex
+```
+
+但**向量通道是空的** —— 新克隆的仓库里每个条目都需要嵌入。这个动作不能自动做（它会占用你的 CPU 十几秒到几分钟），所以要你主动触发一次：
+
+```
+memory_reindex  {"scope": "all", "embed": true}
+```
+
+跑完之后 `mode: "hybrid"` 和 `mode: "vector"` 才有意义。`embedBudget` 控制这一次最多嵌入多少条（默认 40，上限 500）。
+
+### 手动重建索引
+
+markdown 是数据本体，索引随时可以扔掉重建。改了文件、从别的机器拷了记忆、或者搜索结果明显不对：
+
+```
+memory_reindex  {"scope": "all"}
+```
+
+- 文件按**大小 + 修改时间**判断是否变化，没动过的跳过
+- 磁盘上已经删掉的文件，对应索引会被剪掉（输出里的 `Removed N document(s) deleted from disk`）
+- 重复跑是幂等的，不会产生重复条目
+
+### 索引用的是 `node:sqlite`
+
+需要 Node 22.5+ 或 Bun。**缺了也不会崩**：快照和抽取照常工作，只是检索工具不注册，日志里写：
+
+```
+[mem-plus] index unavailable (no node:sqlite in this runtime) -- capture continues, search will not work
+```
+
+### 排错
+
+搜不到东西时，按这个顺序看：
+
+1. **`Index: 0 documents`** → 索引是空的，跑一次 `memory_reindex`
+2. **纯文本能搜到、hybrid 搜不到** → 向量通道没建，跑 `memory_reindex {"embed": true}`
+3. **输出里出现 `**Search degraded:**`** → SQL 语句本身失败了，不是"没找到"。日志里有原文
+4. **`Vector search needs the local inference service`** → 服务没跑，`text` 模式仍然可用
+5. **搜一个明明存在的词却 0 结果** → 全文检索是 AND 语义，多个词必须都出现；先只搜一个词
+
+---
+
 ## 架构：为什么有个 4748 服务
 
 ```
@@ -385,6 +457,19 @@ Tags: file-creation, verification
 
 每个项目的会话在这里留一份跨项目副本。目录名带路径哈希，所以两个同名项目不会撞。Windows 上 `~/.config` 就是 `C:\Users\<你>\.config`。
 
+### 索引
+
+```
+~/.config/opencode/mem-plus/
+├── index.db           # SQLite + FTS5，所有项目共用一个
+├── index.db-wal
+├── index.db-shm
+├── archive/           # 上面那个全局档案
+└── mem-plus.log
+```
+
+`index.db` 存三张表：条目（units）、全文索引（FTS5）、向量（1024 维 Float32 BLOB）。**它不是数据本体** —— markdown 才是。索引删了不会有任何记忆丢失，`memory_reindex` 就能重建。
+
 ---
 
 ## 工作原理
@@ -400,6 +485,7 @@ Tags: file-creation, verification
    └─ session.execution.succeeded ──► 等 2 秒让回合落定
                                      │
                                      ├─► 重新渲染整个会话 → 快照 + 档案镜像
+                                     │     └─► 整份重新索引进 SQLite
                                      │
                                      └─► 跑抽取管线：
                                           claim → 切出助手回合
@@ -408,6 +494,15 @@ Tags: file-creation, verification
                                                 → 过滤 type="skip"
                                                 → 渲染
                                                 → 追加 memory/<日期>.md
+                                                └─► 只索引新追加的那一段
+
+查询时
+   │
+   └─► memory_search
+         ├─ 拆成检索单元（条目 / 快照回合 / 长期记忆段落）
+         ├─ FTS5 全文 + bm25 排序
+         ├─ bge-m3 向量 + 余弦相似度排序      （hybrid / vector 才走）
+         └─ RRF 融合两路排名
 ```
 
 几个设计取舍：
@@ -417,6 +512,9 @@ Tags: file-creation, verification
 - **快照每次回合都 upsert** —— OpenCode V2 没有会话离开钩子
 - **2 秒防抖** —— 一个回合触发多个完成事件，聚合一下再跑，避免重复抽取
 - **抽取在后台跑**，不阻塞你继续对话
+- **写入路径不依赖索引** —— markdown 先落盘，索引是它的投影。检索崩了不影响记忆入库，索引丢了 `memory_reindex` 重建即可
+- **每天一个文件只解析新增段，快照每次整份重读** —— 前者只增不减，后者每回合整份重写。走便宜的那条路会在快照里留下上一回合的重复命中
+- **RRF 而不是分数加权** —— bm25 是无界负分，余弦是 0–1，两种量纲没法直接加权。倒数排名融合只看名次，不需要标定
 
 ---
 
@@ -444,6 +542,20 @@ node serve/server.mjs --port 4748
 **`memory/` 目录一直不出现** —— 会话得至少有一个**完成的回合**才会触发写入。落地之后还要等 2 秒防抖 + 抽取跑完。日志里搜 `snapshot` 和 `captured` 两行确认。
 
 **日志里出现 `sweep: nothing pending`** —— 快照写了但抽取没跑，说明 landing zone 里没有待处理的记录。用 `session.inbox.enqueued` 兜底抓取没生效（通常是事件没到）。
+
+### 检索相关
+
+**搜不到任何东西（`Index: 0 documents`）** —— 索引是空的。跑一次 `memory_reindex`。
+
+**只有 `memory/` 下的文件，模型却说什么都没找到** —— 检查 `scope`。默认是 `project`，只搜当前项目；跨项目搜要显式传 `scope: "all"`。
+
+**`mode: "hybrid"` 和 `"vector"` 返回 0 条，纯文本正常** —— 向量通道还没建。新克隆的仓库每个条目都需要嵌入，跑一次 `memory_reindex {"embed": true}`，要等它跑完。
+
+**输出里有 `**Search degraded:**`** —— 不是"没找到"，是 SQL 语句本身失败了（`searchText` 的 `catch` 会把原因写进结果，而不是静默返回空）。日志里有完整信息。
+
+**搜 `memory_search` 这种带下划线的标识符搜不到** —— 早期版本把下划线当 markdown 强调符剥掉了，导致 `memory_search` 变成 `memorysearch`。已修：FTS5 的 unicode61 本来就把下划线当分隔符，两边一致才对。
+
+**`node:sqlite` 不可用** —— 需要 Node 22.5+ 或 Bun。缺了的话快照和抽取照常，只有检索工具不注册，日志写 `index unavailable (no node:sqlite in this runtime)`。
 
 ---
 

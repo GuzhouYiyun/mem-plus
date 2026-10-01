@@ -23,13 +23,25 @@ OpenCode does not remember: what a session figured out, which files it touched, 
 | Global archive | Every project's sessions mirrored to `~/.config/opencode/mem-plus/archive/<project>/` |
 | Local models | Measured on a Vulkan iGPU: ~14 s from cold start to written, 4–12 s per extraction |
 | **Never bills you** | When local inference is unavailable the plugin does **not** silently switch to your paid OpenCode model. Snapshots keep landing; extraction is deferred until the service is back |
+| **Retrieval** | `memory_search` / `memory_get` / `memory_reindex` are registered; SQLite + FTS5 full text, `bge-m3` vectors, RRF fusion |
 
-**Not built yet**
+Both halves work: memory is written, and it can be found again.
 
-- ❌ **Retrieval**: `memory_search` / `memory_get` are not wired up. **This version can write memory but cannot search it.**
-- ❌ SQLite + FTS5 index, the vector channel (`bge-m3` embeddings + hybrid search), cross-project archive search
+### The three retrieval tools
 
-Writes land as plain markdown first; the index is meant to be a rebuildable projection of those files — the same layering openclaw uses. An index is derived data, never the source of truth.
+The model calls these on its own; you can also ask for them by name.
+
+| Tool | What it does |
+|---|---|
+| `memory_search` | Search. Defaults to text only (no model load, so it is instant); `mode: "hybrid"` fuses full text and vectors with RRF; `scope: "archive"` widens the range to the global archive |
+| `memory_get` | Read one memory in full, by the unit id a `memory_search` result reported |
+| `memory_reindex` | Rebuild the index from the markdown. `embed: true` also embeds everything not embedded yet — **this is the only switch that turns on semantic search** |
+
+Arguments: `query` (required), `scope` (`project` by default / `all` / `archive`), `mode` (`text` by default / `hybrid` / `vector`), `limit`, `kind` (`entry` / `snapshot` / `memory`), `type`, `tag`, `since`, `until`, `project`.
+
+Full-text search is **AND**: every term must appear. Start with the one specific word and widen if nothing comes back.
+
+The index lives at `~/.config/opencode/mem-plus/index.db` and is **shared by every project**, so one search spans both the current project and the global archive. The markdown stays the source of truth; the index can be deleted and rebuilt at any time.
 
 ---
 
@@ -214,6 +226,65 @@ A backend that fails to load degrades to the next one instead of taking the plug
 
 ---
 
+## Using retrieval
+
+### The three modes
+
+| Mode | Needs the model | Notes |
+|---|---|---|
+| `text` | no | FTS5 full text + bm25. **Default**, and the only one that works with the service down |
+| `hybrid` | yes | Full text and vector results fused with RRF (reciprocal rank fusion). A unit that hits **both** ways ranks first |
+| `vector` | yes | Pure semantics — matches with no shared keywords, but nothing literal at all |
+
+Text is the default not out of caution but because it costs **nothing**: the first `bge-m3` load takes seconds. Only once the model is warm is the vector channel worth it.
+
+### First run: build the index
+
+The plugin indexes existing memory files at startup:
+
+```
+[mem-plus] index C:\Users\you\.config\opencode\mem-plus\index.db
+[mem-plus] retrieval tools ready: memory_search, memory_get, memory_reindex
+```
+
+The **vector channel starts empty**, though — on a fresh clone every unit needs embedding. That cannot happen automatically (it would occupy your CPU for seconds to minutes), so trigger it once yourself:
+
+```
+memory_reindex  {"scope": "all", "embed": true}
+```
+
+Until that finishes, `mode: "hybrid"` and `mode: "vector"` have nothing to search. `embedBudget` caps how many units one call embeds (40 by default, 500 maximum).
+
+### Rebuilding by hand
+
+Markdown is the source of truth; the index can be thrown away and rebuilt whenever you like. After editing files by hand, after copying memories from another machine, or when results are obviously wrong:
+
+```
+memory_reindex  {"scope": "all"}
+```
+
+- Files are judged by **size + mtime**, so untouched files are skipped
+- Files deleted from disk have their index rows pruned (`Removed N document(s) deleted from disk`)
+- Running it twice is idempotent — no duplicate units
+
+### The index needs `node:sqlite`
+
+Node 22.5+ or Bun. **Its absence is not fatal**: snapshots and extraction keep working, the three tools simply are not registered, and the log says:
+
+```
+[mem-plus] index unavailable (no node:sqlite in this runtime) -- capture continues, search will not work
+```
+
+### When a search finds nothing
+
+1. **`Index: 0 documents`** → the index is empty; run `memory_reindex`
+2. **Text finds it, hybrid does not** → the vector channel was never built; run `memory_reindex {"embed": true}`
+3. **`**Search degraded:**` in the output** → the SQL itself failed, this is not "no matches". The reason is in the log
+4. **`Vector search needs the local inference service`** → the service is down; `text` still works
+5. **A word you know is there returns nothing** → full-text search is AND, so drop to a single term
+
+---
+
 ## Architecture: why there is a 4748 service
 
 ```
@@ -345,6 +416,19 @@ That trailing comment is openclaw's original provenance marker — it is what ma
 
 The path hash keeps same-named projects from colliding. On Windows, `~/.config` is `C:\Users\<you>\.config`.
 
+### The index
+
+```
+~/.config/opencode/mem-plus/
+├── index.db           # SQLite + FTS5, shared by every project
+├── index.db-wal
+├── index.db-shm
+├── archive/           # the global archive above
+└── mem-plus.log
+```
+
+`index.db` holds three tables: units, the full-text index (FTS5), and vectors (1024-dim Float32 BLOBs). **It is not the source of truth** — the markdown is. Deleting the index loses no memory; `memory_reindex` rebuilds it.
+
 ---
 
 ## How it works
@@ -360,6 +444,7 @@ you type a prompt
    └─ session.execution.succeeded ──► wait 2 s for the turn to settle
                                      │
                                      ├─► re-render the session → snapshot + archive mirror
+                                     │     └─► re-index the whole file into SQLite
                                      │
                                      └─► extraction pipeline:
                                           claim → slice the assistant turn
@@ -368,6 +453,15 @@ you type a prompt
                                                 → filter type="skip"
                                                 → render
                                                 → append memory/<date>.md
+                                                └─► index only the appended block
+
+when you search
+   │
+   └─► memory_search
+         ├─ split into retrieval units (entry / snapshot turn / long-term section)
+         ├─ FTS5 full text, bm25 ranked
+         ├─ bge-m3 vector, cosine ranked          ← hybrid and vector only
+         └─ RRF fuses the two rankings
 ```
 
 Design calls worth knowing:
@@ -377,6 +471,9 @@ Design calls worth knowing:
 - **Snapshots upsert every turn** — OpenCode V2 has no session-leave hook
 - **2 s debounce** — one turn fires several completion events; coalescing them avoids duplicate extraction
 - **Extraction runs in the background** and never blocks you
+- **The write path never depends on the index** — markdown lands first and the index projects it. A broken search cannot cost you a memory, and a lost index is rebuilt by `memory_reindex`
+- **Append-only files parse only the new block; snapshots are re-read whole** — the former only grows, the latter is rewritten every turn. Taking the cheap path on a snapshot would leave the previous turn's turns behind as duplicate hits
+- **RRF, not score weighting** — bm25 is an unbounded negative number and cosine is 0–1; there is no common scale. Reciprocal rank fusion only looks at positions, so nothing needs calibrating
 
 ---
 
@@ -404,6 +501,20 @@ node serve/server.mjs --port 4748
 **`memory/` never appears** — a session needs at least one *completed* turn. Then allow the 2 s debounce plus the extraction run. Search the log for the `snapshot` and `captured` lines to confirm.
 
 **Log shows `sweep: nothing pending`** — snapshots are being written but extraction has nothing to do, meaning the landing zone never received the prompt (usually the event is not arriving).
+
+### Retrieval
+
+**Nothing is findable (`Index: 0 documents`)** — the index is empty. Run `memory_reindex`.
+
+**Files exist under `memory/` but the model reports nothing** — check `scope`. The default is `project`, so it only covers the current project; cross-project search needs `scope: "all"` explicitly.
+
+**`mode: "hybrid"` and `"vector"` return 0 while text works** — the vector channel was never built. A fresh clone has nothing embedded; run `memory_reindex {"embed": true}` and let it finish.
+
+**`**Search degraded:**` in the output** — not "no matches": the SQL itself failed. `searchText` reports the reason in the result instead of silently returning nothing, and the log has the full error.
+
+**Searching an identifier with an underscore (`memory_search`) finds nothing** — an early version stripped `_` as a markdown emphasis marker, turning `memory_search` into `memorysearch`. Fixed: FTS5's unicode61 already treats `_` as a separator, and both sides have to agree.
+
+**`node:sqlite` is unavailable** — needs Node 22.5+ or Bun. Without it snapshots and extraction continue normally; only the three tools go unregistered, and the log reads `index unavailable (no node:sqlite in this runtime)`.
 
 ---
 
