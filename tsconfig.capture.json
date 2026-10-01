@@ -1,0 +1,9 @@
+{
+  // Focused gate for the auto-capture pipeline (extensions/memory-core/src/capture).
+  // `src/**/*.d.ts` must stay included: openclaw's ambient shims (src/types/*.d.ts)
+  // are never imported, so they do not arrive through the import closure and are not
+  // pulled in transitively. Without them `HeadersInit`/`BodyInit`/`declare module "qrcode"`
+  // are missing from the program.
+  "extends": "./tsconfig.json",
+  "include": ["extensions/memory-core/src/capture/**/*", "src/**/*.d.ts"]
+}

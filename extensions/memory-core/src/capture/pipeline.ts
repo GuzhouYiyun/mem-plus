@@ -104,11 +104,11 @@ async function capturePrompt(params: {
           return { kind: "pending", promptId };
         }
 
-        const latestMemory = deps.loadLatestMemory
-          ? ((await deps.loadLatestMemory(active).catch(() => null)) ?? null).slice(
-              0,
-              CAPTURE_LATEST_MEMORY_CHARS,
-            )
+        const loadedLatest = deps.loadLatestMemory
+          ? await deps.loadLatestMemory(active).catch(() => null)
+          : null;
+        const latestMemory = loadedLatest
+          ? loadedLatest.slice(0, CAPTURE_LATEST_MEMORY_CHARS)
           : null;
 
         const context = buildCaptureMarkdownContext({

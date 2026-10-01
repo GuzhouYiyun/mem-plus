@@ -1,2 +1,5 @@
 # Local analysis notes (not for commit)
 ANALYSIS.txt
+
+# Installed dependencies (type-check toolchain only; see ANALYSIS.txt §7)
+node_modules/

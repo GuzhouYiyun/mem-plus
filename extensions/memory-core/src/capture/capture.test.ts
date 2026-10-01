@@ -3,6 +3,11 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import type {
+  OpenKeyedStoreOptions,
+  PluginStateEntry,
+  PluginStateKeyedStore,
+} from "openclaw/plugin-sdk/plugin-state-runtime";
 import { configureMemoryCoreDreamingState, clearMemoryCoreWorkspaceNamespace } from "../dreaming-state.js";
 import {
   buildCaptureSystemPrompt,
@@ -29,7 +34,7 @@ const DAY_MS = Date.UTC(2026, 9, 1, 12, 0, 0);
 const DAY = "2026-10-01";
 
 function createFakeKeyedStore(backing: Map<string, Map<string, unknown>>) {
-  return <T,>(options: { namespace: string }) => {
+  return <T,>(options: OpenKeyedStoreOptions): PluginStateKeyedStore<T> => {
     if (!backing.has(options.namespace)) {
       backing.set(options.namespace, new Map());
     }
@@ -46,11 +51,16 @@ function createFakeKeyedStore(backing: Map<string, Map<string, unknown>>) {
       async lookup(key: string) {
         return rows.get(key) as T | undefined;
       },
+      async consume(key: string) {
+        const value = rows.get(key);
+        rows.delete(key);
+        return value as T | undefined;
+      },
       async delete(key: string) {
         return rows.delete(key);
       },
-      async entries(): Promise<Array<{ key: string; value: T }>> {
-        return [...rows].map(([key, value]) => ({ key, value: value as T }));
+      async entries(): Promise<Array<PluginStateEntry<T>>> {
+        return [...rows].map(([key, value]) => ({ key, value: value as T, createdAt: 0 }));
       },
       async clear() {
         rows.clear();

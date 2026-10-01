@@ -76,8 +76,8 @@ export type {
   CaptureTurn,
 } from "./types.js";
 
-/** Result of landing a prompt. `false` means it was already in the landing zone. */
-export type CapturePromptResult = CapturePromptRecord | null;
+/** Result of landing a prompt. `recordCapturePrompt` always returns the stored row. */
+export type CapturePromptResult = CapturePromptRecord;
 
 /**
  * The reserved attachment surface.
