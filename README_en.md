@@ -13,7 +13,7 @@ OpenCode itself retains no memory: information gained within a session (files mo
 ## Prerequisites
 
 - **OpenCode V2** (`@opencode/plugin` 2.0.20 or later; V1 is not supported)
-- **Node 22.5+** (or Bun): the retrieval tools depend on `node:sqlite`. If unavailable, snapshots and extraction continue to work; only the search tools are missing
+- **Node 22.5+** (or Bun): the retrieval tools depend on `node:sqlite`. If unavailable, snapshots and extraction continue to work; only the search tools are missing. Check the version with `node -v`; upgrade first if it is below 22.5
 - **Two local GGUF models** (~3.7 GB total, see [Local models](#local-models))
 
 ## Getting Started
@@ -25,14 +25,14 @@ Clone mem-plus into OpenCode's global plugins directory `~/.config/opencode/plug
 ```bash
 # Linux / macOS
 mkdir -p ~/.config/opencode/plugins
-git clone <this-repo> ~/.config/opencode/plugins/mem-plus
+git clone https://github.com/GuzhouYiyun/mem-plus.git ~/.config/opencode/plugins/mem-plus
 cd ~/.config/opencode/plugins/mem-plus
 ```
 
 ```powershell
 # Windows
 New-Item -ItemType Directory -Force "$env:USERPROFILE\.config\opencode\plugins"
-git clone <this-repo> "$env:USERPROFILE\.config\opencode\plugins\mem-plus"
+git clone https://github.com/GuzhouYiyun/mem-plus.git "$env:USERPROFILE\.config\opencode\plugins\mem-plus"
 cd "$env:USERPROFILE\.config\opencode\plugins\mem-plus"
 ```
 
@@ -41,38 +41,69 @@ cd "$env:USERPROFILE\.config\opencode\plugins\mem-plus"
 ```bash
 npm install                  # repository root
 cd plugin && npm install     # plugin directory
-node plugin/scripts/link-openclaw-alias.mjs   # required; skipping it prevents the plugin from loading
 ```
+
+The root `npm install` generates the runtime module alias automatically via postinstall (idempotent; safe to re-run). If you install with scripts disabled (e.g. `npm install --ignore-scripts`), run `node plugin/scripts/link-openclaw-alias.mjs` manually, otherwise the plugin cannot load.
 
 `npm install` also pulls the prebuilt `node-llama-cpp` binary for the platform. Without the dependencies, the plugin still loads and session snapshots keep writing; LLM extraction is not performed.
 
-### 3. Register the plugin
+### 3. Register the plugin (usually not needed)
 
-Edit `opencode.jsonc` (the global `~/.config/opencode/opencode.jsonc`, or a project-level `opencode.jsonc`):
+When the repository lives in the global plugins directory `~/.config/opencode/plugins/`, OpenCode discovers and loads it automatically at startup — no registration required.
+
+Edit the global `~/.config/opencode/opencode.jsonc` (or a project-level `opencode.jsonc`) only when:
+
+- the repository was cloned somewhere else,
+- you need to pass configuration options to the plugin, or
+- `plugin loaded` is missing from the log after restarting (step 5) — i.e. auto-discovery did not take effect.
 
 ```jsonc
 {
   "$schema": "https://opencode.ai/config.json",
   "plugins": [
-    "C:/full/path/to/mem-plus/plugin"
+    "/full/path/to/mem-plus"
   ]
 }
 ```
 
-On Windows, paths must use forward slashes and must point at the `plugin/` directory inside the repository (the plugin reads its engine from the repository root and cannot be copied out on its own).
+The path points at the repository root (the plugin entry is declared in the root `package.json`); use forward slashes on Windows. Relative paths resolve from the directory containing the config file. Save the file, then restart OpenCode.
 
 ### 4. Download the models
 
-Place both files in `mem-plus/models/`:
+Create a `models/` directory at the repository root (it is not included in the clone), then download and place both files in `mem-plus/models/`:
 
 | File | Size | Purpose | Download |
 |---|---|---|---|
 | `qwen3.5-4b-q4_k_m.gguf` | ~2.6 GB | extraction | [Hugging Face](https://huggingface.co/Qwen/Qwen3.5-4B-GGUF) |
 | `bge-m3-f16.gguf` | ~1.1 GB | vector embedding | [Hugging Face](https://huggingface.co/BAAI/bge-m3-gguf) |
 
-See [Local models](#local-models).
+The file names must match the table exactly (the repository may host several quantizations; picking the wrong one breaks extraction or search). See [Local models](#local-models).
 
-### 5. Index existing files (optional)
+### 5. Restart OpenCode and verify
+
+Restart OpenCode so the plugin takes effect (the command is the same on Windows and Linux / macOS):
+
+```bash
+opencode service restart
+```
+
+Verify the installation succeeded (both should appear):
+
+```powershell
+# Windows: the log's last lines should show `plugin loaded`
+Get-Content "$env:USERPROFILE\.config\opencode\mem-plus\mem-plus.log" -Tail 5
+```
+
+```bash
+# Linux / macOS
+tail -n 5 ~/.config/opencode/mem-plus/mem-plus.log
+```
+
+Then complete one conversation turn in any project; a `memory/` directory should appear in the project directory (see [Where the data lives](#where-the-data-lives)).
+
+If `plugin loaded` is missing from the log: first register the plugin with the path form from step 3 and restart again; if it is still missing, see [Troubleshooting](#troubleshooting).
+
+### 6. Index existing files (optional)
 
 Memory entries written after registration are added to the retrieval index automatically. A full index pass is required only if `memory/` or `MEMORY.md` files pre-date the plugin registration (e.g. manually written session logs, or files migrated from another project) — those are not scanned automatically:
 
@@ -154,7 +185,7 @@ All options are optional. To pass options, use the object form in `opencode.json
   "$schema": "https://opencode.ai/config.json",
   "plugins": [
     {
-      "package": "./plugins/mem-plus/plugin",
+      "package": "./plugins/mem-plus",
       "options": {
         "model": { "gpu": "auto" },
         "service": { "port": 4748 }

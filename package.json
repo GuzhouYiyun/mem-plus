@@ -5,6 +5,16 @@
   "type": "module",
   "description": "OpenCode plugin giving coding agents persistent local memory.",
   "license": "MIT",
+  "main": "./index.ts",
+  "exports": {
+    ".": "./index.ts"
+  },
+  "opencode": {
+    "type": "plugin"
+  },
+  "scripts": {
+    "postinstall": "node plugin/scripts/link-openclaw-alias.mjs"
+  },
   "engines": {
     "node": ">=22.5.0"
   },

@@ -9,8 +9,8 @@
   "$schema": "https://opencode.ai/config.json",
   "plugins": [
     {
-      // 必须指向仓库里的 plugin/ 子目录，不是仓库根目录
-      "package": "C:/Users/你的用户名/.config/opencode/plugins/mem-plus/plugin",
+      // 指向仓库根目录（插件入口已声明在根 package.json 的 main/exports）
+      "package": "C:/Users/你的用户名/.config/opencode/plugins/mem-plus",
 
       "options": {
         "model": {

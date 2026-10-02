@@ -13,7 +13,7 @@ OpenCode 本身不具备记忆能力：会话中获取的信息（修改过的�
 ## 环境要求
 
 - **OpenCode V2**（`@opencode/plugin` 2.0.20 及以上；不支持 V1）
-- **Node 22.5+**（或 Bun）：检索工具依赖 `node:sqlite`。若缺失，快照与抽取功能正常运行，仅检索工具不可用
+- **Node 22.5+**（或 Bun）：检索工具依赖 `node:sqlite`。若缺失，快照与抽取功能正常运行，仅检索工具不可用。`node -v` 查看版本，低于 22.5 请先升级
 - **两个本地 GGUF 模型**（共约 3.7 GB，见 [本地模型](#本地模型)）
 
 ## 快速开始
@@ -25,14 +25,14 @@ OpenCode 本身不具备记忆能力：会话中获取的信息（修改过的�
 ```bash
 # Linux / macOS
 mkdir -p ~/.config/opencode/plugins
-git clone <this-repo> ~/.config/opencode/plugins/mem-plus
+git clone https://github.com/GuzhouYiyun/mem-plus.git ~/.config/opencode/plugins/mem-plus
 cd ~/.config/opencode/plugins/mem-plus
 ```
 
 ```powershell
 # Windows
 New-Item -ItemType Directory -Force "$env:USERPROFILE\.config\opencode\plugins"
-git clone <this-repo> "$env:USERPROFILE\.config\opencode\plugins\mem-plus"
+git clone https://github.com/GuzhouYiyun/mem-plus.git "$env:USERPROFILE\.config\opencode\plugins\mem-plus"
 cd "$env:USERPROFILE\.config\opencode\plugins\mem-plus"
 ```
 
@@ -41,40 +41,69 @@ cd "$env:USERPROFILE\.config\opencode\plugins\mem-plus"
 ```bash
 npm install                  # 仓库根目录
 cd plugin && npm install     # 插件目录
-node plugin/scripts/link-openclaw-alias.mjs   # 必需；跳过将导致插件加载失败
 ```
+
+根目录的 `npm install` 会通过 postinstall 自动生成运行时模块别名（幂等，可重复执行；若使用 `npm install --ignore-scripts` 等跳过脚本的装法，需手动执行 `node plugin/scripts/link-openclaw-alias.mjs`，否则插件无法加载）。
 
 `npm install` 会同时安装 `node-llama-cpp` 对应平台的预编译二进制。未安装依赖时，插件仍可加载，会话快照正常写入，但 LLM 抽取不执行。
 
-### 3. 注册插件
+### 3. 注册插件（通常无需操作）
 
-编辑全局 `~/.config/opencode/opencode.jsonc`（也可用项目目录下的 `opencode.jsonc`）：
+仓库位于全局插件目录 `~/.config/opencode/plugins/` 下时，OpenCode 启动时自动发现并加载，无需注册。
+
+以下情况才需编辑全局 `~/.config/opencode/opencode.jsonc`（或项目目录下的 `opencode.jsonc`）：
+
+- 仓库克隆在其他位置
+- 需要向插件传入配置选项
+- 重启后日志中没有 `plugin loaded`（见第 5 步），即自动发现未生效
 
 ```jsonc
 {
   "$schema": "https://opencode.ai/config.json",
   "plugins": [
-    "./plugins/mem-plus/plugin"
+    "C:/full/path/to/mem-plus"
   ]
 }
 ```
 
-相对路径相对于配置文件所在目录解析，上例即 `~/.config/opencode/plugins/mem-plus/plugin`；也可写绝对路径（Windows 下须用正斜杠）。
-
-路径必须指向仓库内的 `plugin/` 目录（插件自仓库根目录读取引擎，不能单独复制使用）。
+路径指向仓库根目录（插件入口已声明在根 `package.json`）；Windows 下须用正斜杠；相对路径相对于配置文件所在目录解析。保存后重启 OpenCode 生效。
 
 ### 4. 下载模型
 
-将以下两个文件放置于 `mem-plus/models/`：
+在仓库根目录创建 `models` 目录（克隆时不包含该目录），将以下两个文件下载并放置于 `mem-plus/models/`：
 
 | 文件 | 大小 | 用途 | 下载 |
 |---|---|---|---|
 | `qwen3.5-4b-q4_k_m.gguf` | ~2.6 GB | 抽取 | [Hugging Face](https://huggingface.co/Qwen/Qwen3.5-4B-GGUF) |
 | `bge-m3-f16.gguf` | ~1.1 GB | 向量嵌入 | [Hugging Face](https://huggingface.co/BAAI/bge-m3-gguf) |
 
-详见 [本地模型](#本地模型)。
+文件名须与表格一致（仓库页内可能有多个量化版本，选错会导致抽取失败或检索不可用）。详见 [本地模型](#本地模型)。
 
-### 5. 索引已有文件（可选）
+### 5. 重启 OpenCode 并验证
+
+安装完成后重启 OpenCode 使插件生效（Windows 与 Linux / macOS 命令相同）：
+
+```bash
+opencode service restart
+```
+
+验证安装成功（两个都应出现）：
+
+```powershell
+# Windows：日志最后几行应出现 `plugin loaded`
+Get-Content "$env:USERPROFILE\.config\opencode\mem-plus\mem-plus.log" -Tail 5
+```
+
+```bash
+# Linux / macOS
+tail -n 5 ~/.config/opencode/mem-plus/mem-plus.log
+```
+
+随后在任意项目中完成一个对话 turn，项目目录下应生成 `memory/` 目录（见 [数据位置](#数据位置)）。
+
+日志中没有 `plugin loaded` 时：先按第 3 步的路径形式注册插件并再次重启；仍不出现则见 [故障排除](#故障排除)。
+
+### 6. 索引已有文件（可选）
 
 插件注册后写入的记忆条目会自动登记进检索索引。仅当环境中存在**注册之前**的 `memory/` 或 `MEMORY.md` 文件（例如手动写入的会话记录、自旧项目迁移的文件）时，需要执行一次全量索引将其纳入；此类文件不会被自动扫描：
 
@@ -156,7 +185,7 @@ GPU 优先级：**独显 > 核显 > CPU**，某级不可用时自动回退至下
   "$schema": "https://opencode.ai/config.json",
   "plugins": [
     {
-      "package": "./plugins/mem-plus/plugin",
+      "package": "./plugins/mem-plus",
       "options": {
         "model": { "gpu": "auto" },
         "service": { "port": 4748 }
