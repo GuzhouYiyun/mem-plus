@@ -8,6 +8,8 @@
 
 依据 OpenClaw 开发的 OpenCode 持久记忆系统。全部推理在本地 GGUF 模型上运行，不调用外部 API，不产生按量计费。
 
+不只是记忆：在 `SOUL.md` / `IDENTITY.md` 写入人设（角色扮演、专属助手、严格的代码评审员……），agent 每轮都以该性格与语气行事；长期记忆逐日累积，它会越来越懂你和你的项目（见[提示词注入](#提示词注入)）。
+
 OpenCode 本身不具备记忆能力：会话中获取的信息（修改过的文件、遇到的障碍、失败的方案）在会话结束后即丢失。mem-plus 为 OpenCode 提供持久记忆系统：
 
 - **会话快照** — 每轮对话自动归档为 `memory/YYYY-MM-DD-标题.md`
@@ -15,6 +17,9 @@ OpenCode 本身不具备记忆能力：会话中获取的信息（修改过的�
 - **混合检索** — 全文与向量双通道，模型可自动检索历史记忆
 - **睡眠整理** — 每日将当日条目汇编写入 `MEMORY.md`（长期记忆）与 `DREAMS.md`（洞察日志）
 - **提示词注入** — `AGENTS.md`、`MEMORY.md` 等工作区文件在每轮对话前注入系统提示词，其内容对模型始终可见
+- **人设与成长** — `SOUL.md`、`IDENTITY.md`、`USER.md` 等文件定义 agent 的性格、身份与用户画像，可随时修改；与逐日沉淀的长期记忆一起，agent 随使用慢慢"长成"你期望的助手
+
+
 
 ## 环境要求
 
@@ -28,17 +33,19 @@ OpenCode 本身不具备记忆能力：会话中获取的信息（修改过的�
 
 将 mem-plus 克隆到 OpenCode 的全局插件目录 `~/.config/opencode/plugins/`，与其他插件统一管理：
 
+```powershell
+# Windows
+git clone https://github.com/GuzhouYiyun/mem-plus.git "$env:USERPROFILE\.config\opencode\plugins\mem-plus"
+cd "$env:USERPROFILE\.config\opencode\plugins\mem-plus"
+```
+
 ```bash
 # Linux / macOS
 git clone https://github.com/GuzhouYiyun/mem-plus.git ~/.config/opencode/plugins/mem-plus
 cd ~/.config/opencode/plugins/mem-plus
 ```
 
-```powershell
-# Windows
-git clone https://github.com/GuzhouYiyun/mem-plus.git "$env:USERPROFILE\.config\opencode\plugins\mem-plus"
-cd "$env:USERPROFILE\.config\opencode\plugins\mem-plus"
-```
+也可以不从 git 克隆：在 GitHub 仓库页面下载源码压缩包（Code → Download ZIP），解压后将目录重命名为 `mem-plus` 放入全局插件目录 `~/.config/opencode/plugins/`。目录名保持一致，后续各步骤中的路径才不变。
 
 ### 2. 安装依赖
 
@@ -52,26 +59,33 @@ npm install                  # 插件目录
 
 `npm install` 会同时安装 `node-llama-cpp` 对应平台的预编译二进制。未安装依赖时，插件仍可加载，会话快照正常写入，但 LLM 抽取不执行。
 
-### 3. 注册插件（通常无需操作）
+### 3. 注册插件（默认安装无需操作）
 
-仓库位于全局插件目录 `~/.config/opencode/plugins/` 下时，OpenCode 启动时自动发现并加载，无需注册。
+第 1 步克隆进全局插件目录 `~/.config/opencode/plugins/` 时，OpenCode 启动时自动发现并加载——无需注册，直接跳过本节。
 
-以下情况才需编辑全局 `~/.config/opencode/opencode.jsonc`（或项目目录下的 `opencode.jsonc`）：
+仅在以下情况才需写入 `opencode.jsonc`（全局 `~/.config/opencode/opencode.jsonc`，或项目目录下的 `opencode.jsonc`）：
 
-- 仓库克隆在其他位置
+- 克隆到了全局插件目录以外的位置
 - 需要向插件传入配置选项
 - 重启后日志中没有 `plugin loaded`（见第 5 步），即自动发现未生效
+
+最小示例（只告诉 OpenCode 插件在哪，不传选项）：
 
 ```jsonc
 {
   "$schema": "https://opencode.ai/config.json",
   "plugins": [
-    "C:/full/path/to/mem-plus"
+    "C:/path/to/where/you/cloned/mem-plus"
   ]
 }
 ```
 
-路径指向仓库根目录（插件入口已声明在根 `package.json`）；Windows 下须用正斜杠；相对路径相对于配置文件所在目录解析。保存后重启 OpenCode 生效。
+路径规则：
+
+- 路径即第 1 步克隆（或解压）的实际位置，且须指向 **mem-plus 仓库根目录**——含 `package.json`、`index.ts`、`plugin/` 的那一层（入口声明在根 `package.json`），不要写成内层 `plugin/` 子目录
+- Windows 下须用正斜杠；建议写绝对路径，相对路径则相对配置文件所在目录解析
+- `plugins` 的条目有两种写法：字符串形式只填路径（如上例，不传任何选项）；对象形式把路径放进 `"package"`、要传的选项放进 `"options"`。需要传选项时用对象形式（形如 `{ "package": "...", "options": { ... } }`），全部可选项见[配置](#配置)
+- 保存后重启 OpenCode（`opencode service restart`）生效
 
 ### 4. 下载模型
 
@@ -163,10 +177,13 @@ memory_reindex  {"scope": "all", "embed": true}
 ~/.config/opencode/mem-plus/
 ├── index.db                   # 检索索引（可随时删除，通过 memory_reindex 重建）
 ├── mem-plus.log               # 日志
+├── archive/<项目名>--<哈希>/   # 各项目 memory/ 的全局镜像（跨项目检索的数据来源）
+│   ├── INDEX.md               # 该项目的归档索引
+│   └── memory/…               # 与 <项目>/memory/ 同名
 └── dreaming/<项目名>.last-day # 睡眠整理标记（删除后可强制重新执行）
 ```
 
-Markdown 文件为唯一数据源，索引为可再生数据。
+Markdown 文件为唯一数据源；`archive/` 是其全局镜像，索引为可再生数据。
 
 ### 推理服务
 
@@ -241,7 +258,7 @@ GPU 优先级：**独显 > 核显 > CPU**，某级不可用时自动回退至下
 
 1. 快照继续写入（不产生费用）
 2. 抽取暂缓执行，待处理记录保留
-3. 服务恢复后自动补做抽取
+3. 服务恢复后自动补做抽取：每个完成 turn 时插件先探测本地服务，可用才执行抽取；不可用时本轮跳过，待处理记录原样保留——服务恢复后的下一个 turn 自动补做，无需手动操作
 
 如需启用计费模型回退，请显式设置 `model.allowHostedFallback: true` 或 `model.content: "opencode"`。
 
@@ -251,7 +268,18 @@ GPU 优先级：**独显 > 核显 > CPU**，某级不可用时自动回退至下
 
 ## 提示词注入
 
-每轮模型调用前，mem-plus 读取项目根目录下的工作区文件（`AGENTS.md`、`SOUL.md`、`IDENTITY.md`、`USER.md`、`BOOTSTRAP.md`、`MEMORY.md`）并注入系统提示词。`MEMORY.md` 中的长期记忆因此对模型每轮均可见。
+每轮模型调用前，mem-plus 读取项目根目录下的工作区文件并注入系统提示词。这些文件的名称与语义沿用 openclaw 的约定，缺失的文件自动跳过，可随时增改，下一轮即生效：
+
+| 文件 | 作用 |
+|---|---|
+| `AGENTS.md` | 项目协作约定（工作规则、代码风格、偏好） |
+| `SOUL.md` | 人设：agent 的性格、价值观与行为准则（openclaw 的"灵魂"文件） |
+| `IDENTITY.md` | 身份：名字、角色、自称与语气 |
+| `USER.md` | 用户画像：称呼、偏好、背景信息 |
+| `BOOTSTRAP.md` | 启动引导说明 |
+| `MEMORY.md` | 长期记忆，由睡眠整理每日汇入 |
+
+写入 `SOUL.md` / `IDENTITY.md` 即为 agent 设定性格与身份；日常工作中踩过的坑、失败的方案经 LLM 抽取与睡眠整理沉淀进 `MEMORY.md`，注入内容逐日累积，agent 对项目的理解随使用演进。演进发生在提示词与记忆层面（注入文件、检索索引），不改变模型本身。
 
 ## 故障排除
 
@@ -266,6 +294,46 @@ GPU 优先级：**独显 > 核显 > CPU**，某级不可用时自动回退至下
 | `Index: 0 documents` | 执行 `memory_reindex` |
 | `hybrid` / `vector` 返回 0 条 | 执行 `memory_reindex {"embed": true}` 并等待完成 |
 | `memory/` 目录不出现 | 需完成一个完整 turn（结算 + 2 秒防抖）后生成 |
+
+## 卸载
+
+彻底移除插件及其数据（顺序执行）：
+
+1. 关闭 OpenCode，并停止本地推理服务（命令在 Windows 与 Linux / macOS 上相同）：
+
+   ```bash
+   opencode service stop
+   ```
+
+2. 删除共享数据目录（索引、日志、`archive/` 归档镜像、睡眠整理标记）：
+
+   ```powershell
+   # Windows
+   Remove-Item -Recurse -Force "$env:USERPROFILE\.config\opencode\mem-plus"
+   ```
+
+   ```bash
+   # Linux / macOS
+   rm -rf ~/.config/opencode/mem-plus
+   ```
+
+   目录内全部为可再生数据或项目目录 markdown 的镜像，直接删除即可
+3. （可选）删除各项目中的 `MEMORY.md` 与 `memory/`。记忆本体即这些 markdown 文件，需保留时先备份
+4. 删除插件目录（含 `models/` 下约 3.7 GB 的模型文件）：
+
+   ```powershell
+   # Windows
+   Remove-Item -Recurse -Force "$env:USERPROFILE\.config\opencode\plugins\mem-plus"
+   ```
+
+   ```bash
+   # Linux / macOS
+   rm -rf ~/.config/opencode/plugins/mem-plus
+   ```
+
+   插件克隆在其他位置的，删除对应目录
+5. 曾在 `opencode.jsonc` 中注册过插件的，删除相应条目；仅靠全局插件目录自动发现加载的，无需此步
+6. 重启 OpenCode，卸载完成
 
 ## 许可证
 

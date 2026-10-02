@@ -8,6 +8,8 @@
 
 A persistent memory system for OpenCode, built on OpenClaw. All inference runs on local GGUF models; no external API calls, no usage-based billing.
 
+More than memory: put a persona into `SOUL.md` / `IDENTITY.md` (role-play, a dedicated assistant, a strict code reviewer…), and the agent acts and speaks as that character every turn; as long-term memory accumulates day by day, it comes to know you and your project better and better (see [Prompt injection](#prompt-injection)).
+
 OpenCode itself retains no memory: information gained within a session (files modified, problems encountered, approaches that failed) is lost when the session ends. mem-plus provides OpenCode with a persistent memory system:
 
 - **Session snapshots** — each turn is automatically archived as `memory/YYYY-MM-DD-Title.md`
@@ -15,6 +17,7 @@ OpenCode itself retains no memory: information gained within a session (files mo
 - **Hybrid search** — full-text and vector lanes; the model retrieves historical memories automatically
 - **Dreaming digest** — daily entries are compiled into `MEMORY.md` (long-term memory) and `DREAMS.md` (insights log)
 - **Prompt injection** — workspace files such as `AGENTS.md` and `MEMORY.md` are injected into the system prompt before every turn, so their content is always visible to the model
+- **Persona & growth** — `SOUL.md`, `IDENTITY.md`, and `USER.md` define the agent's character, identity, and user profile, and can be edited at any time; together with long-term memory that grows day by day, the agent matures over time into the assistant you expect
 
 ## Prerequisites
 
@@ -28,17 +31,19 @@ OpenCode itself retains no memory: information gained within a session (files mo
 
 Clone mem-plus into OpenCode's global plugins directory `~/.config/opencode/plugins/` so it is managed alongside your other plugins:
 
+```powershell
+# Windows
+git clone https://github.com/GuzhouYiyun/mem-plus.git "$env:USERPROFILE\.config\opencode\plugins\mem-plus"
+cd "$env:USERPROFILE\.config\opencode\plugins\mem-plus"
+```
+
 ```bash
 # Linux / macOS
 git clone https://github.com/GuzhouYiyun/mem-plus.git ~/.config/opencode/plugins/mem-plus
 cd ~/.config/opencode/plugins/mem-plus
 ```
 
-```powershell
-# Windows
-git clone https://github.com/GuzhouYiyun/mem-plus.git "$env:USERPROFILE\.config\opencode\plugins\mem-plus"
-cd "$env:USERPROFILE\.config\opencode\plugins\mem-plus"
-```
+Cloning is not required: you can also download the source archive from the repository page on GitHub (Code → Download ZIP). Extract it, rename the folder to `mem-plus`, and place it in the global plugins directory `~/.config/opencode/plugins/`. Keeping the folder name consistent is what keeps the paths in every later step the same.
 
 ### 2. Install dependencies
 
@@ -52,26 +57,33 @@ The root `npm install` generates the runtime module alias automatically via post
 
 `npm install` also pulls the prebuilt `node-llama-cpp` binary for the platform. Without the dependencies, the plugin still loads and session snapshots keep writing; LLM extraction is not performed.
 
-### 3. Register the plugin (usually not needed)
+### 3. Register the plugin (not needed for the default install)
 
-When the repository lives in the global plugins directory `~/.config/opencode/plugins/`, OpenCode discovers and loads it automatically at startup — no registration required.
+When step 1 cloned into the global plugins directory `~/.config/opencode/plugins/`, OpenCode discovers and loads it automatically at startup — no registration required; skip this section.
 
-Edit the global `~/.config/opencode/opencode.jsonc` (or a project-level `opencode.jsonc`) only when:
+Write into `opencode.jsonc` (the global `~/.config/opencode/opencode.jsonc`, or a project-level `opencode.jsonc`) only when:
 
-- the repository was cloned somewhere else,
+- you cloned somewhere other than the global plugins directory,
 - you need to pass configuration options to the plugin, or
 - `plugin loaded` is missing from the log after restarting (step 5) — i.e. auto-discovery did not take effect.
+
+Minimal example (just tell OpenCode where the plugin lives; no options):
 
 ```jsonc
 {
   "$schema": "https://opencode.ai/config.json",
   "plugins": [
-    "/full/path/to/mem-plus"
+    "/path/to/where/you/cloned/mem-plus"
   ]
 }
 ```
 
-The path points at the repository root (the plugin entry is declared in the root `package.json`); use forward slashes on Windows. Relative paths resolve from the directory containing the config file. Save the file, then restart OpenCode.
+Path rules:
+
+- The path is wherever you actually cloned (or unzipped) it in step 1, and it must point at the **root of the mem-plus repository** — the level containing `package.json`, `index.ts`, and `plugin/` (the entry is declared in the root `package.json`), not the inner `plugin/` subdirectory
+- Use forward slashes on Windows; an absolute path is recommended, relative paths resolve from the directory containing the config file
+- Each `plugins` entry can be written two ways: a plain string (path only, as in the example above — no options) or an object with the path under `"package"` and any options under `"options"` (i.e. `{ "package": "...", "options": { ... } }`). Use the object form when you need to pass options; all available options are listed in [Configuration](#configuration)
+- Save the file, then restart OpenCode (`opencode service restart`)
 
 ### 4. Download the models
 
@@ -163,10 +175,13 @@ Shared data (one index for all projects):
 ~/.config/opencode/mem-plus/
 ├── index.db                   # retrieval index (safe to delete; rebuild with memory_reindex)
 ├── mem-plus.log               # log
+├── archive/<project>--<hash>/ # global mirror of every project's memory/ (the data source for cross-project search)
+│   ├── INDEX.md               # per-project archive index
+│   └── memory/…               # same file names as <project>/memory/
 └── dreaming/<project>.last-day # dreaming marker (delete to force a re-run)
 ```
 
-The markdown files are the source of truth; the index is regenerable data.
+The markdown files are the source of truth; `archive/` is their global mirror, and the index is regenerable data.
 
 ### Inference service
 
@@ -241,7 +256,7 @@ The design principle of this plugin is fully local inference. When local inferen
 
 1. Snapshots keep writing (no cost incurred)
 2. Extraction is deferred; pending records are retained
-3. When the service recovers, pending extractions run automatically
+3. When the service recovers, pending extractions run automatically: on every settled turn the plugin probes the local service first and only runs extraction when it is reachable; otherwise the turn is skipped and the pending records are left intact, so the next turn after the service comes back picks them up — no manual action needed
 
 To opt into a metered fallback, set `model.allowHostedFallback: true` or `model.content: "opencode"` explicitly.
 
@@ -251,7 +266,18 @@ Triggered by the first settled turn of each calendar day (at most once per day),
 
 ## Prompt injection
 
-Before each model call, mem-plus reads the workspace files at the project root (`AGENTS.md`, `SOUL.md`, `IDENTITY.md`, `USER.md`, `BOOTSTRAP.md`, `MEMORY.md`) and injects them into the system prompt. The long-term memory in `MEMORY.md` is therefore visible to the model on every turn.
+Before each model call, mem-plus reads the workspace files at the project root and injects them into the system prompt. The file names and their meanings follow openclaw's conventions; missing files are skipped, and edits take effect from the next turn:
+
+| File | Purpose |
+|---|---|
+| `AGENTS.md` | project conventions (working rules, code style, preferences) |
+| `SOUL.md` | the agent's persona: character, values, code of conduct (openclaw's "soul" file) |
+| `IDENTITY.md` | identity: name, role, self-reference and tone |
+| `USER.md` | your profile: how to address you, preferences, background |
+| `BOOTSTRAP.md` | startup / bootstrap instructions |
+| `MEMORY.md` | long-term memory, compiled daily by the dreaming digest |
+
+Writing a `SOUL.md` / `IDENTITY.md` gives the agent that character and identity; day by day, the LLM extraction and dreaming digest distill lessons — mistakes, dead ends, hard-won fixes — into `MEMORY.md`, so the injected context accumulates and the agent's understanding of your project evolves with use. The evolution happens at the prompt-and-memory level (injected files, retrieval index), not in the model's weights.
 
 ## Troubleshooting
 
@@ -266,6 +292,46 @@ The log file is at `~/.config/opencode/mem-plus/mem-plus.log`; consult it first 
 | `Index: 0 documents` | run `memory_reindex` |
 | `hybrid` / `vector` returns 0 | run `memory_reindex {"embed": true}` and wait for it to complete |
 | the `memory/` directory never appears | it is created after one full turn (settled + 2 s debounce) |
+
+## Uninstalling
+
+Remove the plugin and all of its data (in order):
+
+1. Close OpenCode, and stop the local inference service (the command is the same on Windows and Linux / macOS):
+
+   ```bash
+   opencode service stop
+   ```
+
+2. Delete the shared data directory (index, log, `archive/` mirrors, dreaming markers):
+
+   ```powershell
+   # Windows
+   Remove-Item -Recurse -Force "$env:USERPROFILE\.config\opencode\mem-plus"
+   ```
+
+   ```bash
+   # Linux / macOS
+   rm -rf ~/.config/opencode/mem-plus
+   ```
+
+   Everything in it is either regenerable or a mirror of the markdown in your project directories — safe to delete outright
+3. (Optional) Delete `MEMORY.md` and `memory/` in each project. These markdown files are the memories themselves; back them up first if you want to keep them
+4. Delete the plugin directory (its `models/` folder holds the ~3.7 GB of model files):
+
+   ```powershell
+   # Windows
+   Remove-Item -Recurse -Force "$env:USERPROFILE\.config\opencode\plugins\mem-plus"
+   ```
+
+   ```bash
+   # Linux / macOS
+   rm -rf ~/.config/opencode/plugins/mem-plus
+   ```
+
+   If you cloned it somewhere else, delete that directory instead
+5. If you registered the plugin in `opencode.jsonc`, remove that entry; auto-discovery from the global plugins directory needs no such step
+6. Restart OpenCode; the uninstall is complete
 
 ## License
 
