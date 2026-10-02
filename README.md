@@ -70,14 +70,18 @@ cd plugin && npm install     # 插件目录
 
 ### 4. 下载模型
 
-在仓库根目录创建 `models` 目录（克隆时不包含该目录），将以下两个文件下载并放置于 `mem-plus/models/`：
+在仓库根目录创建 `models` 目录（克隆时不包含该目录），下载以下两个文件、重命名为目标文件名后，放置于 `mem-plus/models/`：
 
-| 文件 | 大小 | 用途 | 下载 |
-|---|---|---|---|
-| `qwen3.5-4b-q4_k_m.gguf` | ~2.6 GB | 抽取 | [Hugging Face](https://huggingface.co/Qwen/Qwen3.5-4B-GGUF) |
-| `bge-m3-f16.gguf` | ~1.1 GB | 向量嵌入 | [Hugging Face](https://huggingface.co/BAAI/bge-m3-gguf) |
+| 目标文件名 | 大小 | 用途 | 国内（ModelScope） | 海外（Hugging Face） |
+|---|---|---|---|---|
+| `qwen3.5-4b-q4_k_m.gguf` | ~2.7 GB | 抽取 | [Qwen3.5-4B-Q4_K_M.gguf](https://modelscope.cn/models/unsloth/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf) | [Qwen3.5-4B-Q4_K_M.gguf](https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf) |
+| `bge-m3-f16.gguf` | ~1.2 GB | 向量嵌入 | [bge-m3-FP16.gguf](https://modelscope.cn/models/gpustack/bge-m3-GGUF/resolve/main/bge-m3-FP16.gguf) | [bge-m3-FP16.gguf](https://huggingface.co/gpustack/bge-m3-GGUF/resolve/main/bge-m3-FP16.gguf) |
 
-文件名须与表格一致（仓库页内可能有多个量化版本，选错会导致抽取失败或检索不可用）。详见 [本地模型](#本地模型)。
+注意：
+
+- 源仓库中的文件名为 `Qwen3.5-4B-Q4_K_M.gguf` 和 `bge-m3-FP16.gguf`，下载后须重命名为目标文件名。
+- 目标文件名须与表格完全一致；仓库中还托管有其他量化版本，本插件仅支持表格所列文件。
+- 详见 [本地模型](#本地模型)。
 
 ### 5. 重启 OpenCode 并验证
 

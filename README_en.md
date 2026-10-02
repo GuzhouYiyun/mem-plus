@@ -70,14 +70,18 @@ The path points at the repository root (the plugin entry is declared in the root
 
 ### 4. Download the models
 
-Create a `models/` directory at the repository root (it is not included in the clone), then download and place both files in `mem-plus/models/`:
+Create a `models/` directory at the repository root (it is not included in the clone), download the two files below, rename each to its target name, and place them in `mem-plus/models/`:
 
-| File | Size | Purpose | Download |
-|---|---|---|---|
-| `qwen3.5-4b-q4_k_m.gguf` | ~2.6 GB | extraction | [Hugging Face](https://huggingface.co/Qwen/Qwen3.5-4B-GGUF) |
-| `bge-m3-f16.gguf` | ~1.1 GB | vector embedding | [Hugging Face](https://huggingface.co/BAAI/bge-m3-gguf) |
+| Target file name | Size | Purpose | ModelScope (China) | Hugging Face (international) |
+|---|---|---|---|---|
+| `qwen3.5-4b-q4_k_m.gguf` | ~2.7 GB | extraction | [Qwen3.5-4B-Q4_K_M.gguf](https://modelscope.cn/models/unsloth/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf) | [Qwen3.5-4B-Q4_K_M.gguf](https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf) |
+| `bge-m3-f16.gguf` | ~1.2 GB | vector embedding | [bge-m3-FP16.gguf](https://modelscope.cn/models/gpustack/bge-m3-GGUF/resolve/main/bge-m3-FP16.gguf) | [bge-m3-FP16.gguf](https://huggingface.co/gpustack/bge-m3-GGUF/resolve/main/bge-m3-FP16.gguf) |
 
-The file names must match the table exactly (the repository may host several quantizations; picking the wrong one breaks extraction or search). See [Local models](#local-models).
+Notes:
+
+- The source files are named `Qwen3.5-4B-Q4_K_M.gguf` and `bge-m3-FP16.gguf`; rename them to the target names after downloading.
+- The target file names must match the table exactly. The repositories also host other quantizations, but only the files listed here are supported.
+- See [Local models](#local-models).
 
 ### 5. Restart OpenCode and verify
 
