@@ -36,3 +36,5 @@ m3.mjs
 *.txt
 # local dev notes (never publish)
 TODO.md
+
+VERIFY.md
