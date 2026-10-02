@@ -53,6 +53,8 @@ import {
 } from "./event-compat.js";
 import type { PluginContext } from "./opencode.js";
 import { writeSessionSnapshot } from "./snapshot.js";
+import { loadWorkspaceBootstrapFiles } from "../../src/agents/workspace.js";
+import { buildBootstrapContextFiles } from "../../src/agents/embedded-agent-helpers/bootstrap.js";
 
 /** Settle time after a turn completes before snapshot + sweep run. */
 const TURN_SETTLE_MS = 2_000;
@@ -260,6 +262,31 @@ export default Plugin.define({
     const controller = new AbortController();
     const settleTimers = new Map<string, ReturnType<typeof setTimeout>>();
     let closed = false;
+
+    // Inject workspace bootstrap files (AGENTS.md, MEMORY.md, SOUL.md, etc.) into
+    // the session system prompt -- the same mechanism openclaw uses for its
+    // embedded agents. The files are read fresh on every model request because the
+    // workspace owner may edit them between turns; openclaw's own bootstrap cache
+    // refreshes per turn for the same reason.
+    await ctx.session.hook("context", async (event) => {
+      try {
+        const files = await loadWorkspaceBootstrapFiles(workspaceDir);
+        const contextFiles = buildBootstrapContextFiles(files);
+        const lines: string[] = [];
+        for (const file of contextFiles) {
+          if (!file.content || file.content.trim().length === 0) continue;
+          lines.push(`## ${file.path}`);
+          lines.push("");
+          lines.push(file.content.trim());
+          lines.push("");
+        }
+        if (lines.length > 0) {
+          event.system.push({ type: "text", text: lines.join("\n") });
+        }
+      } catch (error) {
+        log("bootstrap injection failed", error);
+      }
+    });
 
     /**
      * Daily dreaming sweep, gated to once per calendar day. openclaw schedules this
