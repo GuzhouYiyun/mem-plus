@@ -79,7 +79,7 @@ npm install
 
 会装上 `node-llama-cpp`（含你平台的原生二进制）。
 
-**不装也能用** —— 插件照常加载，抽取自动改用 OpenCode 自己的模型。只有想用本地 GGUF 才必须装。
+**不装也能加载** —— 插件照常加载，只是抽取不跑（快照照写，待处理记录留在 landing zone，装好后自动恢复）。只有想用本地 GGUF 才必须装。详见 [不会偷偷扣费](#不会偷偷扣费)。
 
 ### 3. 生成模块别名（必需）
 
@@ -130,7 +130,7 @@ mem-plus/models/qwen3.5-4b-q4_k_m.gguf
 mem-plus/models/bge-m3-f16.gguf
 ```
 
-`models/` 在 `.gitignore` 里（约 3.7 GB，不适合进仓库）。细节见 [本地模型](#本地模型)。
+`models/` 在 `.gitignore` 里（约 3.7 GB，不适合进仓库）。下载方式和必需性说明见 [本地模型](#本地模型)。
 
 ---
 
@@ -367,12 +367,32 @@ node-llama-cpp 加载原生绑定时会 fork 一个子进程做兼容性自检�
 
 ## 本地模型
 
-`models/` 在 `.gitignore` 里，需要你自己放两个文件：
+`models/` 在 `.gitignore` 里（约 3.7 GB，不适合进仓库），克隆下来要自己放两个文件：
 
-| 用途 | 默认文件名 | 体积 | 干什么 |
-|---|---|---|---|
-| 抽取 | `qwen3.5-4b-q4_k_m.gguf` | ~2.6 GB | 把一次助手回合总结成结构化条目 |
-| 向量 | `bge-m3-f16.gguf` | ~1.1 GB | 给记忆块算嵌入（**检索层用，现在还没接**） |
+| 用途 | 默认文件名 | 体积 | 干什么 | 没它会怎样 |
+|---|---|---|---|---|
+| 抽取 | `qwen3.5-4b-q4_k_m.gguf` | ~2.6 GB | 把一次助手回合总结成结构化条目 | 日志 `extraction DISABLED (GGUF not found)`，快照照写，没有抽取条目 |
+| 向量 | `bge-m3-f16.gguf` | ~1.1 GB | 给记忆块算嵌入，供 `hybrid` / `vector` 检索用 | 只有纯文本检索可用，`hybrid` / `vector` 报 `Vector search needs the local inference service` |
+
+两个都要才算完整。**只做纯文本检索的话向量模型可以不下** —— 这部分功能完全不依赖它。
+
+### 模型在哪下载
+
+两个都在 Hugging Face 上，按**文件名**搜索即可（GGUF 量化重打包很多，选同名文件）：
+
+| 文件 | 建议搜索词 |
+|---|---|
+| `qwen3.5-4b-q4_k_m.gguf` | Hugging Face 搜 `qwen3.5 4b q4_k_m gguf` |
+| `bge-m3-f16.gguf` | Hugging Face 搜 `bge-m3 f16 gguf` |
+
+命令行的话，找到对应仓库后用：
+
+```bash
+# 需要先装 huggingface-cli（pip install huggingface_hub[cli]）
+huggingface-cli download <仓库名> <上面的文件名> --local-dir models
+```
+
+**必需性说明**：这两个文件决定了"本地、不出网、不计费"这三个核心承诺是否成立。没有它们，插件仍然能跑，但抽取不执行、向量检索不可用 —— 剩下的是一个只写快照、只能全文搜索的降级形态。所以它们不是可选的"加分项"，而是完整功能的前提。
 
 放到别处也行，用 `model.dir` / `model.contentPath` / `model.embedPath` 指过去。模型懒加载 —— 不触发抽取的项目不会占那 4 GB。
 

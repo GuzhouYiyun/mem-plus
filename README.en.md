@@ -61,7 +61,7 @@ cd plugin
 npm install
 ```
 
-This pulls `node-llama-cpp` with your platform's prebuilt binaries. **Skipping it still works** — the plugin loads and extraction falls back to OpenCode's own model. You only need it for local GGUF.
+This pulls `node-llama-cpp` with your platform's prebuilt binaries. **Skipping it still loads the plugin** — extraction simply does not run (snapshots keep working, pending captures stay parked in the landing zone and resume once the service is back). You only need it for local GGUF. See [You are never silently billed](#you-are-never-silently-billed).
 
 **3. Generate the module alias (required)**
 
@@ -342,9 +342,13 @@ node-llama-cpp self-tests its native binding by forking a child process (`testBi
 | Purpose | Default filename | Size | Role |
 |---|---|---|---|
 | Extraction | `qwen3.5-4b-q4_k_m.gguf` | ~2.6 GB | Summarizes one assistant turn into a structured entry |
-| Embedding | `bge-m3-f16.gguf` | ~1.1 GB | Embeds memory chunks (**for the retrieval layer, not wired yet**) |
+| Embedding | `bge-m3-f16.gguf` | ~1.1 GB | Embeds memory chunks; the foundation for `hybrid` / `vector` retrieval |
 
 Elsewhere is fine — point `model.dir` / `model.contentPath` / `model.embedPath` wherever they live. Models load lazily, so a project that never extracts never pays the ~4 GB.
+
+> **Required?** Both files live in `models/` (gitignored, ~3.7 GB — too big for the repo). Without them the plugin still runs, but extraction does not execute and vector retrieval is unavailable: you are left with snapshot-writing plus pure-text search. If you only need text search, the embedding model can be skipped.
+>
+> **Where to download**: both are GGUF weights on Hugging Face — search `qwen3.5 4b q4_k_m gguf` and `bge-m3 f16 gguf` by filename. With the CLI: `huggingface-cli download <repo> <filename> --local-dir models`.
 
 > **Windows note**: Defender real-time scanning slows GGUF inference down badly. If extraction crawls, exclude the `models/` directory from Defender (needs administrator).
 
