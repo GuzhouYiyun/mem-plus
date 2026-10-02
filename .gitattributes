@@ -1,0 +1,7 @@
+*.sql text eol=lf
+*.md  text eol=lf
+
+*.png binary
+*.gguf binary
+
+plugin/node_modules/** binary
