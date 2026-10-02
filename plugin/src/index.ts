@@ -30,6 +30,8 @@ import {
   listPendingCapturePrompts,
 } from "../../extensions/memory-core/src/capture/index.js";
 import { configureMemoryCoreDreamingState } from "../../extensions/memory-core/src/dreaming-state.js";
+import { runDreamingSweepPhases } from "../../extensions/memory-core/src/dreaming-phases.js";
+import { formatMemoryDreamingDay } from "../../extensions/memory-core/src/capture/day.js";
 import {
   createCaptureDependencies,
   disabledComplete,
@@ -42,7 +44,7 @@ import { createLogger } from "./log.js";
 import { indexPath, openIndex } from "./memory-index.js";
 import { indexWrittenFile, indexTail } from "./memory-scan.js";
 import { buildMemoryTools } from "./memory-tools.js";
-import { archiveProjectSlug, logFile, projectSlug } from "./paths.js";
+import { archiveProjectSlug, logFile, projectSlug, stateRoot } from "./paths.js";
 import {
   eventBelongsToWorkspace,
   isExecutionEnded,
@@ -259,6 +261,74 @@ export default Plugin.define({
     const settleTimers = new Map<string, ReturnType<typeof setTimeout>>();
     let closed = false;
 
+    /**
+     * Daily dreaming sweep, gated to once per calendar day. openclaw schedules this
+     * with its own cron daemon (`dreaming-cron.ts`); mem-plus has no cron host, so
+     * the equivalent trigger is the first settled turn of a new day. The marker
+     * file is the only state -- a day boundary means "run once", and writing the
+     * marker before waiting means a crash mid-sweep re-runs at most once.
+     */
+    const maybeRunDreaming = async (): Promise<void> => {
+      try {
+        const now = Date.now();
+        const today = formatMemoryDreamingDay(now);
+        const marker = path.join(stateRoot(), "dreaming", `${slug}.last-day`);
+        let last = "";
+        try {
+          const fs = await import("node:fs/promises");
+          last = (await fs.readFile(marker, "utf8")).trim();
+        } catch {
+          // First run: no marker yet, treat as a new day.
+        }
+        if (last === today) return;
+        // Record the attempt first so a failed sweep does not retrigger every turn.
+        const { mkdir, writeFile } = await import("node:fs/promises");
+        await mkdir(path.dirname(marker), { recursive: true });
+        await writeFile(marker, today, "utf8");
+
+        const subagent =
+          localService && (await localService.ready())
+            ? {
+                complete: async ({
+                  message,
+                  extraSystemPrompt,
+                }: {
+                  message: string;
+                  extraSystemPrompt?: string;
+                }) => ({
+                  text: await localService.generate({
+                    systemPrompt: extraSystemPrompt,
+                    prompt: message,
+                  }),
+                }),
+              }
+            : undefined;
+        const result = await runDreamingSweepPhases({
+          agentId: "main",
+          workspaceDir,
+          pluginConfig: {
+            dreaming: {
+              enabled: true,
+              storage: { mode: "inline", separateReports: false },
+            },
+          },
+          logger: {
+            info: (msg: string) => log(`dreaming: ${msg}`),
+            warn: (msg: string) => log(`dreaming: ${msg}`),
+            error: (msg: string) => log(`dreaming: ${msg}`),
+          },
+          subagent,
+          nowMs: now,
+        } as unknown as Parameters<typeof runDreamingSweepPhases>[0]);
+        log(
+          `dreaming sweep done: light+rem+deep over ${workspaceDir} ` +
+            `(degradedPhases=${result?.degradedPhases ?? 0}, pendingNarratives=${result?.pendingNarratives ?? 0})`,
+        );
+      } catch (error) {
+        log("dreaming sweep failed", error);
+      }
+    };
+
     /** Snapshot, then sweep, for one session. Kept sequential so a slow LLM call
      *  cannot outlive the next turn's snapshot of the same session. */
     const settle = async (sessionID: string): Promise<void> => {
@@ -322,6 +392,9 @@ export default Plugin.define({
       } catch (error) {
         log("sweep failed", error);
       }
+
+      // Dreaming runs at most once per day; every settled turn checks the clock.
+      void maybeRunDreaming();
     };
 
     const scheduleSettle = (sessionID: string): void => {

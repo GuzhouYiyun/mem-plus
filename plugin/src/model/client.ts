@@ -48,6 +48,7 @@ export type MemPlusService = {
    */
   ready(): Promise<boolean>;
   extract(params: { systemPrompt: string; prompt: string }): Promise<string>;
+  generate(params: { systemPrompt?: string; prompt: string; maxTokens?: number }): Promise<string>;
   /**
    * `signal` comes from the tool call's context, so stopping a session also stops
    * the embed request it started. On this hardware an embed takes seconds, so
@@ -354,6 +355,13 @@ export function createServiceClient(
       call("/extract", { systemPrompt, prompt }, 10 * 60_000).then((json) => {
         const text = (json as { text?: unknown }).text;
         if (typeof text !== "string") throw new Error("/extract returned no text");
+        return text;
+      }),
+
+    generate: ({ systemPrompt, prompt, maxTokens }) =>
+      call("/generate", { systemPrompt, prompt, maxTokens }, 10 * 60_000).then((json) => {
+        const text = (json as { text?: unknown }).text;
+        if (typeof text !== "string") throw new Error("/generate returned no text");
         return text;
       }),
 

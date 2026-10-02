@@ -339,6 +339,18 @@ async function extract({ systemPrompt, prompt, maxTokens }) {
   return JSON.stringify(reconciled);
 }
 
+async function generate({ systemPrompt, prompt, maxTokens }) {
+  const completion = await getExtractionEngine();
+  const limit = maxTokens ?? config.maxTokens;
+  const startedAt = Date.now();
+  const text = await completion.generateCompletion(
+    `${(systemPrompt ?? "").trim()}\n\n${(prompt ?? "").trim()}`,
+    { maxTokens: limit, temperature: 0.4, topP: 0.9 },
+  );
+  log(`generate done in ${Date.now() - startedAt} ms (${text.length} chars)`);
+  return text;
+}
+
 async function embed(input) {
   const { context } = await getEmbedModel();
   const embedding = await context.getEmbeddingFor(input);
@@ -389,6 +401,25 @@ const server = createServer((req, res) => {
       },
       idleTimeoutMinutes: config.idleMinutes,
       uptimeSeconds: Math.round(process.uptime()),
+    });
+  }
+
+  if (req.method === "POST" && url.pathname === "/generate") {
+    return runExtract(async () => {
+      const body = await readBody(req, 8 * 1024 * 1024);
+      if (typeof body.prompt !== "string" || body.prompt.length === 0) {
+        return sendJson(res, 400, { error: "prompt is required" });
+      }
+      try {
+        const text = await generate({
+          systemPrompt: typeof body.systemPrompt === "string" ? body.systemPrompt : undefined,
+          prompt: body.prompt,
+          maxTokens: typeof body.maxTokens === "number" ? body.maxTokens : undefined,
+        });
+        return sendJson(res, 200, { text });
+      } catch (error) {
+        return sendJson(res, 500, { error: String(error && error.message ? error.message : error) });
+      }
     });
   }
 
