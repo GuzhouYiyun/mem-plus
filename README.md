@@ -73,8 +73,9 @@ cd mem-plus
 ### 2. 安装依赖
 
 ```bash
-cd plugin
+# 在仓库根目录做：
 npm install
+cd plugin && npm install
 ```
 
 会装上 `node-llama-cpp`（含你平台的原生二进制）。
