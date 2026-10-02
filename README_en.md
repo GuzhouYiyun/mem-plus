@@ -1,6 +1,12 @@
+<div align="center">
+
 # mem-plus
 
-A persistent memory system for AI coding agents. All inference runs on local GGUF models; no external API calls, no usage-based billing.
+[中文](./README.md)
+
+</div>
+
+A persistent memory system for OpenCode, built on OpenClaw. All inference runs on local GGUF models; no external API calls, no usage-based billing.
 
 OpenCode itself retains no memory: information gained within a session (files modified, problems encountered, approaches that failed) is lost when the session ends. mem-plus provides OpenCode with a persistent memory system:
 
@@ -24,14 +30,12 @@ Clone mem-plus into OpenCode's global plugins directory `~/.config/opencode/plug
 
 ```bash
 # Linux / macOS
-mkdir -p ~/.config/opencode/plugins
 git clone https://github.com/GuzhouYiyun/mem-plus.git ~/.config/opencode/plugins/mem-plus
 cd ~/.config/opencode/plugins/mem-plus
 ```
 
 ```powershell
 # Windows
-New-Item -ItemType Directory -Force "$env:USERPROFILE\.config\opencode\plugins"
 git clone https://github.com/GuzhouYiyun/mem-plus.git "$env:USERPROFILE\.config\opencode\plugins\mem-plus"
 cd "$env:USERPROFILE\.config\opencode\plugins\mem-plus"
 ```
@@ -40,7 +44,8 @@ cd "$env:USERPROFILE\.config\opencode\plugins\mem-plus"
 
 ```bash
 npm install                  # repository root
-cd plugin && npm install     # plugin directory
+cd plugin                    # enter the plugin directory
+npm install                  # plugin directory
 ```
 
 The root `npm install` generates the runtime module alias automatically via postinstall (idempotent; safe to re-run). If you install with scripts disabled (e.g. `npm install --ignore-scripts`), run `node plugin/scripts/link-openclaw-alias.mjs` manually, otherwise the plugin cannot load.
@@ -70,18 +75,17 @@ The path points at the repository root (the plugin entry is declared in the root
 
 ### 4. Download the models
 
-Create a `models/` directory at the repository root (it is not included in the clone), download the two files below, rename each to its target name, and place them in `mem-plus/models/`:
+Create a `models/` directory at the repository root (it is not included in the clone), then download both files into `mem-plus/models/`:
 
-| Target file name | Size | Purpose | ModelScope (China) | Hugging Face (international) |
+| File name | Size | Purpose | ModelScope (China) | Hugging Face (international) |
 |---|---|---|---|---|
-| `qwen3.5-4b-q4_k_m.gguf` | ~2.7 GB | extraction | [Qwen3.5-4B-Q4_K_M.gguf](https://modelscope.cn/models/unsloth/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf) | [Qwen3.5-4B-Q4_K_M.gguf](https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf) |
-| `bge-m3-f16.gguf` | ~1.2 GB | vector embedding | [bge-m3-FP16.gguf](https://modelscope.cn/models/gpustack/bge-m3-GGUF/resolve/main/bge-m3-FP16.gguf) | [bge-m3-FP16.gguf](https://huggingface.co/gpustack/bge-m3-GGUF/resolve/main/bge-m3-FP16.gguf) |
+| `Qwen3.5-4B-Q4_K_M.gguf` | ~2.7 GB | extraction | [Qwen3.5-4B-Q4_K_M.gguf](https://modelscope.cn/models/unsloth/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf) | [Qwen3.5-4B-Q4_K_M.gguf](https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf) |
+| `bge-m3-FP16.gguf` | ~1.2 GB | vector embedding | [bge-m3-FP16.gguf](https://modelscope.cn/models/gpustack/bge-m3-GGUF/resolve/main/bge-m3-FP16.gguf) | [bge-m3-FP16.gguf](https://huggingface.co/gpustack/bge-m3-GGUF/resolve/main/bge-m3-FP16.gguf) |
 
 Notes:
 
-- The source files are named `Qwen3.5-4B-Q4_K_M.gguf` and `bge-m3-FP16.gguf`; rename them to the target names after downloading.
-- The target file names must match the table exactly. The repositories also host other quantizations; those are not part of the default configuration.
-- To use a different model, note that the two slots are not interchangeable: the extraction slot requires a completion-style (base) language model, and the embedding slot requires a model with an embedding head. Either rename the file to one of the target names above, or point `model.contentPath` / `model.embedPath` at it (see [Configuration](#configuration)).
+- The repositories also host other quantizations; those are not part of the default configuration.
+- To use a different model, note that the two slots are not interchangeable: the extraction slot requires a completion-style (base) language model, and the embedding slot requires a model with an embedding head. To replace without touching the configuration, rename the new model to the exact file names in the table above (`Qwen3.5-4B-Q4_K_M.gguf` / `bge-m3-FP16.gguf`) and drop it into `models/`; or keep its original name and point `model.contentPath` / `model.embedPath` at the actual paths (see [Configuration](#configuration)).
 - See [Local models](#local-models).
 
 ### 5. Restart OpenCode and verify
@@ -178,8 +182,8 @@ GPU priority: **dedicated GPU > integrated GPU > CPU**, falling back to the next
 
 When replacing the models:
 
-- **The extraction model must be a completion-style (base) model; Instruct / Chat models must not be used.** Instruct models silently return empty extraction results. The default `qwen3.5-4b-q4_k_m.gguf` is a base model and is suitable.
-- **The embedding model must have an embedding head.** The default `bge-m3-f16.gguf` satisfies this; a language model placed in the embedding slot fails on first use.
+- **The extraction model must be a completion-style (base) model; Instruct / Chat models must not be used.** Instruct models silently return empty extraction results. The default `Qwen3.5-4B-Q4_K_M.gguf` is a base model and is suitable.
+- **The embedding model must have an embedding head.** The default `bge-m3-FP16.gguf` satisfies this; a language model placed in the embedding slot fails on first use.
 - If only full-text search is used, the embedding model (`bge-m3`) may be omitted.
 - After swapping the embedding model, run `memory_reindex {"scope": "all", "embed": true}` to rebuild the vectors. Vectors computed by the previous model are in a different space; mixing them produces wrong hybrid / vector results.
 
@@ -211,8 +215,8 @@ Full example: [`opencode.example.jsonc`](./opencode.example.jsonc).
 | `model.content` | `"local"` | `"local"` = local GGUF service; `"opencode"` = OpenCode's metered model |
 | `model.allowHostedFallback` | `false` | allow fallback to the metered model when local inference is unavailable |
 | `model.dir` | `<repo>/models` | directory holding the GGUF files |
-| `model.contentPath` | `model.dir/qwen3.5-4b-q4_k_m.gguf` | extraction model path |
-| `model.embedPath` | `model.dir/bge-m3-f16.gguf` | embedding model path |
+| `model.contentPath` | `model.dir/Qwen3.5-4B-Q4_K_M.gguf` | extraction model path |
+| `model.embedPath` | `model.dir/bge-m3-FP16.gguf` | embedding model path |
 | `model.gpu` | `"auto"` | `"auto"` / `"cuda"` / `"vulkan"` / `"cpu"` |
 | `model.gpuLayers` | `"auto"` | layers placed in VRAM |
 | `model.contextSize` | `16384` | extraction context window |

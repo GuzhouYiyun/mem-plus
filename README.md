@@ -1,6 +1,12 @@
+<div align="center">
+
 # mem-plus
 
-面向 AI 编码代理的持久记忆系统。全部推理在本地 GGUF 模型上运行，不调用外部 API，不产生按量计费。
+[English](./README_en.md)
+
+</div>
+
+依据 OpenClaw 开发的 OpenCode 持久记忆系统。全部推理在本地 GGUF 模型上运行，不调用外部 API，不产生按量计费。
 
 OpenCode 本身不具备记忆能力：会话中获取的信息（修改过的文件、遇到的障碍、失败的方案）在会话结束后即丢失。mem-plus 为 OpenCode 提供持久记忆系统：
 
@@ -24,14 +30,12 @@ OpenCode 本身不具备记忆能力：会话中获取的信息（修改过的�
 
 ```bash
 # Linux / macOS
-mkdir -p ~/.config/opencode/plugins
 git clone https://github.com/GuzhouYiyun/mem-plus.git ~/.config/opencode/plugins/mem-plus
 cd ~/.config/opencode/plugins/mem-plus
 ```
 
 ```powershell
 # Windows
-New-Item -ItemType Directory -Force "$env:USERPROFILE\.config\opencode\plugins"
 git clone https://github.com/GuzhouYiyun/mem-plus.git "$env:USERPROFILE\.config\opencode\plugins\mem-plus"
 cd "$env:USERPROFILE\.config\opencode\plugins\mem-plus"
 ```
@@ -40,7 +44,8 @@ cd "$env:USERPROFILE\.config\opencode\plugins\mem-plus"
 
 ```bash
 npm install                  # 仓库根目录
-cd plugin && npm install     # 插件目录
+cd plugin                    # 进入插件目录
+npm install                  # 插件目录
 ```
 
 根目录的 `npm install` 会通过 postinstall 自动生成运行时模块别名（幂等，可重复执行；若使用 `npm install --ignore-scripts` 等跳过脚本的装法，需手动执行 `node plugin/scripts/link-openclaw-alias.mjs`，否则插件无法加载）。
@@ -70,18 +75,17 @@ cd plugin && npm install     # 插件目录
 
 ### 4. 下载模型
 
-在仓库根目录创建 `models` 目录（克隆时不包含该目录），下载以下两个文件、重命名为目标文件名后，放置于 `mem-plus/models/`：
+在仓库根目录创建 `models` 目录（克隆时不包含该目录），并将以下两个文件下载至 `mem-plus/models/`：
 
-| 目标文件名 | 大小 | 用途 | 国内（ModelScope） | 海外（Hugging Face） |
+| 文件名 | 大小 | 用途 | 国内（ModelScope） | 海外（Hugging Face） |
 |---|---|---|---|---|
-| `qwen3.5-4b-q4_k_m.gguf` | ~2.7 GB | 抽取 | [Qwen3.5-4B-Q4_K_M.gguf](https://modelscope.cn/models/unsloth/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf) | [Qwen3.5-4B-Q4_K_M.gguf](https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf) |
-| `bge-m3-f16.gguf` | ~1.2 GB | 向量嵌入 | [bge-m3-FP16.gguf](https://modelscope.cn/models/gpustack/bge-m3-GGUF/resolve/main/bge-m3-FP16.gguf) | [bge-m3-FP16.gguf](https://huggingface.co/gpustack/bge-m3-GGUF/resolve/main/bge-m3-FP16.gguf) |
+| `Qwen3.5-4B-Q4_K_M.gguf` | ~2.7 GB | 抽取 | [Qwen3.5-4B-Q4_K_M.gguf](https://modelscope.cn/models/unsloth/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf) | [Qwen3.5-4B-Q4_K_M.gguf](https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf) |
+| `bge-m3-FP16.gguf` | ~1.2 GB | 向量嵌入 | [bge-m3-FP16.gguf](https://modelscope.cn/models/gpustack/bge-m3-GGUF/resolve/main/bge-m3-FP16.gguf) | [bge-m3-FP16.gguf](https://huggingface.co/gpustack/bge-m3-GGUF/resolve/main/bge-m3-FP16.gguf) |
 
 注意：
 
-- 源仓库中的文件名为 `Qwen3.5-4B-Q4_K_M.gguf` 和 `bge-m3-FP16.gguf`，下载后须重命名为目标文件名。
-- 目标文件名须与表格完全一致。仓库中还托管有其他量化版本，它们不属于默认配置。
-- 如想使用其他模型，两个槽位的类型不可互换：抽取槽位须为 completion 风格（base）语言模型，嵌入槽位须为带 embedding 头的模型。可将其他模型重命名为上方目标文件名，或用 `model.contentPath` / `model.embedPath` 指向原文件（见[配置](#配置)）。
+- 仓库中还托管有其他量化版本，它们不属于默认配置。
+- 如想使用其他模型，两个槽位的类型不可互换：抽取槽位须为 completion 风格（base）语言模型，嵌入槽位须为带 embedding 头的模型。不经配置直接替换时，须将新模型重命名为与上表文件名相同（`Qwen3.5-4B-Q4_K_M.gguf` / `bge-m3-FP16.gguf`）后放入 `models/`；或保留原文件名，用 `model.contentPath` / `model.embedPath` 指向实际路径（见[配置](#配置)）。
 - 详见 [本地模型](#本地模型)。
 
 ### 5. 重启 OpenCode 并验证
@@ -178,8 +182,8 @@ GPU 优先级：**独显 > 核显 > CPU**，某级不可用时自动回退至下
 
 替换模型时须注意：
 
-- **抽取模型必须使用 completion 风格（base）模型，不得使用 Instruct / Chat 风格模型**。使用 Instruct 模型进行抽取将静默返回空结果。默认的 `qwen3.5-4b-q4_k_m.gguf` 为 base 模型，适用。
-- **嵌入模型须带 embedding 头**。默认的 `bge-m3-f16.gguf` 满足此要求；嵌入槽位放入语言模型会在首次使用时报错。
+- **抽取模型必须使用 completion 风格（base）模型，不得使用 Instruct / Chat 风格模型**。使用 Instruct 模型进行抽取将静默返回空结果。默认的 `Qwen3.5-4B-Q4_K_M.gguf` 为 base 模型，适用。
+- **嵌入模型须带 embedding 头**。默认的 `bge-m3-FP16.gguf` 满足此要求；嵌入槽位放入语言模型会在首次使用时报错。
 - 若仅使用文本检索，可省略嵌入模型（`bge-m3`）。
 - 更换嵌入模型后须执行 `memory_reindex {"scope": "all", "embed": true}` 重建向量。旧向量由旧模型计算，空间混杂会导致 hybrid / vector 检索结果错误。
 
@@ -211,8 +215,8 @@ GPU 优先级：**独显 > 核显 > CPU**，某级不可用时自动回退至下
 | `model.content` | `"local"` | `"local"` = 本地 GGUF 服务；`"opencode"` = OpenCode 计费模型 |
 | `model.allowHostedFallback` | `false` | 本地推理不可用时是否允许回退至计费模型 |
 | `model.dir` | `<repo>/models` | GGUF 文件所在目录 |
-| `model.contentPath` | `model.dir/qwen3.5-4b-q4_k_m.gguf` | 抽取模型路径 |
-| `model.embedPath` | `model.dir/bge-m3-f16.gguf` | 嵌入模型路径 |
+| `model.contentPath` | `model.dir/Qwen3.5-4B-Q4_K_M.gguf` | 抽取模型路径 |
+| `model.embedPath` | `model.dir/bge-m3-FP16.gguf` | 嵌入模型路径 |
 | `model.gpu` | `"auto"` | `"auto"` / `"cuda"` / `"vulkan"` / `"cpu"` |
 | `model.gpuLayers` | `"auto"` | 分配至显存的层数 |
 | `model.contextSize` | `16384` | 抽取上下文窗口 |

@@ -70,8 +70,8 @@ function readArgs(argv) {
       case "--embed": args.embedPath = path.resolve(value); i++; break;
     }
   }
-  if (!args.contentPath) args.contentPath = path.resolve(PLUGIN_ROOT, "..", "models", "qwen3.5-4b-q4_k_m.gguf");
-  if (!args.embedPath) args.embedPath = path.resolve(PLUGIN_ROOT, "..", "models", "bge-m3-f16.gguf");
+  if (!args.contentPath) args.contentPath = path.resolve(PLUGIN_ROOT, "..", "models", "Qwen3.5-4B-Q4_K_M.gguf");
+  if (!args.embedPath) args.embedPath = path.resolve(PLUGIN_ROOT, "..", "models", "bge-m3-FP16.gguf");
   return args;
 }
 

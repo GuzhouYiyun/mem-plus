@@ -28,8 +28,8 @@
           // "dir": "C:/Users/你的用户名/models",
 
           // 需要分别指定时再打开这两行
-          // "contentPath": "C:/Users/你的用户名/models/qwen3.5-4b-q4_k_m.gguf",
-          // "embedPath":   "C:/Users/你的用户名/models/bge-m3-f16.gguf",
+          // "contentPath": "C:/Users/你的用户名/models/Qwen3.5-4B-Q4_K_M.gguf",
+          // "embedPath":   "C:/Users/你的用户名/models/bge-m3-FP16.gguf",
 
           // 独显 > 核显 > CPU。默认 "auto" 就是按 cuda -> metal -> vulkan -> cpu 逐个试
           // 可选：cuda / vulkan / cpu

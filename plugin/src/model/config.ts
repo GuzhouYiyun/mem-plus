@@ -182,8 +182,8 @@ export function readModelConfig(options: unknown): ModelConfig {
     gpu: readGpu(nested["gpu"] ?? root["gpu"]),
     modelDir,
     contentModelPath:
-      readString(nested["contentPath"]) ?? path.join(modelDir, "qwen3.5-4b-q4_k_m.gguf"),
-    embedModelPath: readString(nested["embedPath"]) ?? path.join(modelDir, "bge-m3-f16.gguf"),
+      readString(nested["contentPath"]) ?? path.join(modelDir, "Qwen3.5-4B-Q4_K_M.gguf"),
+    embedModelPath: readString(nested["embedPath"]) ?? path.join(modelDir, "bge-m3-FP16.gguf"),
     contextSize: readNumber(nested["contextSize"], 16_384, 512, 262_144),
     maxNewTokens: readNumber(nested["maxNewTokens"], 512, 32, 8_192),
     threads: readNumber(nested["threads"], 0, 0, 128),
