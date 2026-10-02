@@ -80,7 +80,8 @@ Create a `models/` directory at the repository root (it is not included in the c
 Notes:
 
 - The source files are named `Qwen3.5-4B-Q4_K_M.gguf` and `bge-m3-FP16.gguf`; rename them to the target names after downloading.
-- The target file names must match the table exactly. The repositories also host other quantizations, but only the files listed here are supported.
+- The target file names must match the table exactly. The repositories also host other quantizations; those are not part of the default configuration.
+- To use a different model, note that the two slots are not interchangeable: the extraction slot requires a completion-style (base) language model, and the embedding slot requires a model with an embedding head. Either rename the file to one of the target names above, or point `model.contentPath` / `model.embedPath` at it (see [Configuration](#configuration)).
 - See [Local models](#local-models).
 
 ### 5. Restart OpenCode and verify
@@ -178,7 +179,9 @@ GPU priority: **dedicated GPU > integrated GPU > CPU**, falling back to the next
 When replacing the models:
 
 - **The extraction model must be a completion-style (base) model; Instruct / Chat models must not be used.** Instruct models silently return empty extraction results. The default `qwen3.5-4b-q4_k_m.gguf` is a base model and is suitable.
+- **The embedding model must have an embedding head.** The default `bge-m3-f16.gguf` satisfies this; a language model placed in the embedding slot fails on first use.
 - If only full-text search is used, the embedding model (`bge-m3`) may be omitted.
+- After swapping the embedding model, run `memory_reindex {"scope": "all", "embed": true}` to rebuild the vectors. Vectors computed by the previous model are in a different space; mixing them produces wrong hybrid / vector results.
 
 ## Configuration
 
