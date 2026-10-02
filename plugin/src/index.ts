@@ -55,6 +55,10 @@ import type { PluginContext } from "./opencode.js";
 import { writeSessionSnapshot } from "./snapshot.js";
 import { loadWorkspaceBootstrapFiles } from "../../src/agents/workspace.js";
 import { buildBootstrapContextFiles } from "../../src/agents/embedded-agent-helpers/bootstrap.js";
+import {
+  prepareContextFilesForPrompt,
+  buildProjectContextSection,
+} from "../../src/agents/system-prompt-context-files.js";
 
 /** Settle time after a turn completes before snapshot + sweep run. */
 const TURN_SETTLE_MS = 2_000;
@@ -272,14 +276,8 @@ export default Plugin.define({
       try {
         const files = await loadWorkspaceBootstrapFiles(workspaceDir);
         const contextFiles = buildBootstrapContextFiles(files);
-        const lines: string[] = [];
-        for (const file of contextFiles) {
-          if (!file.content || file.content.trim().length === 0) continue;
-          lines.push(`## ${file.path}`);
-          lines.push("");
-          lines.push(file.content.trim());
-          lines.push("");
-        }
+        const preparedFiles = prepareContextFilesForPrompt(contextFiles);
+        const lines = buildProjectContextSection(preparedFiles);
         if (lines.length > 0) {
           event.system.push({ type: "text", text: lines.join("\n") });
         }
