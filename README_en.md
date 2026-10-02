@@ -216,4 +216,11 @@ The log file is at `~/.config/opencode/mem-plus/mem-plus.log`; consult it first 
 
 ## License
 
-MIT. This repository contains copies of the memory-related modules of [openclaw](https://github.com/openclaw/openclaw) (MIT, Copyright (c) 2026 OpenClaw Foundation). See [LICENSE](./LICENSE) and [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md).
+This repository is licensed under MIT. Third-party code incorporated:
+
+| Source | Scope | License | Copyright |
+|---|---|---|---|
+| [openclaw](https://github.com/openclaw/openclaw) | copies of the memory-related modules under `src/`, `extensions/`, `packages/` | MIT | Copyright (c) 2026 OpenClaw Foundation |
+| [opencode-mem](https://github.com/tickernelz/opencode-mem) | web admin UI layout (planned integration) | MIT | Copyright (c) 2025 Zhafron Adani Kautsar |
+
+Full license texts for each source: [LICENSE](./LICENSE) and [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md).

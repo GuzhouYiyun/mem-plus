@@ -216,4 +216,11 @@ GPU 优先级：**独显 > 核显 > CPU**，某级不可用时自动回退至下
 
 ## 许可证
 
-MIT。本仓库包含 [openclaw](https://github.com/openclaw/openclaw) 记忆相关模块的副本（MIT，Copyright (c) 2026 OpenClaw Foundation）。详见 [LICENSE](./LICENSE) 与 [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md)。
+本仓库采用 MIT 许可。其中包含的第三方代码：
+
+| 来源 | 范围 | 许可 | 版权 |
+|---|---|---|---|
+| [openclaw](https://github.com/openclaw/openclaw) | `src/`、`extensions/`、`packages/` 下记忆相关模块的副本 | MIT | Copyright (c) 2026 OpenClaw Foundation |
+| [opencode-mem](https://github.com/tickernelz/opencode-mem) | Web 管理界面布局（计划并入） | MIT | Copyright (c) 2025 Zhafron Adani Kautsar |
+
+各来源的完整许可文本见 [LICENSE](./LICENSE) 与 [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md)。
