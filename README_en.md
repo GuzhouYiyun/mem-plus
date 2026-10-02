@@ -1,24 +1,24 @@
 # mem-plus
 
-A persistent memory system for AI coding agents. All inference runs on local GGUF models — no external APIs, no per-use billing.
+A persistent memory system for AI coding agents. All inference runs on local GGUF models; no external API calls, no usage-based billing.
 
-OpenCode itself has no memory: everything a session learns (which files changed, which bug hit, which approach failed) is gone when the tab closes. mem-plus gives OpenCode a real memory system:
+OpenCode itself retains no memory: information gained within a session (files modified, problems encountered, approaches that failed) is lost when the session ends. mem-plus provides OpenCode with a persistent memory system:
 
-- **Session snapshots** — every turn is automatically archived as `memory/YYYY-MM-DD-Title.md`
-- **LLM extraction** — a local model distills each turn into a structured entry (what was done / outcome / tags), written to `memory/YYYY-MM-DD.md`
-- **Hybrid search** — full-text + vector lanes; the model can automatically find old memories
+- **Session snapshots** — each turn is automatically archived as `memory/YYYY-MM-DD-Title.md`
+- **LLM extraction** — a local model distills each turn into a structured entry (request / outcome / tags), written to `memory/YYYY-MM-DD.md`
+- **Hybrid search** — full-text and vector lanes; the model retrieves historical memories automatically
 - **Dreaming digest** — daily entries are compiled into `MEMORY.md` (long-term memory) and `DREAMS.md` (insights log)
-- **Prompt injection** — workspace files like `AGENTS.md` and `MEMORY.md` are injected into the system prompt every turn, so the model always "remembers" them
+- **Prompt injection** — workspace files such as `AGENTS.md` and `MEMORY.md` are injected into the system prompt before every turn, so their content is always visible to the model
 
 ## Prerequisites
 
 - **OpenCode V2** (`@opencode/plugin` 2.0.20 or later; V1 is not supported)
-- **Node 22.5+** (or Bun): the retrieval tools rely on `node:sqlite`. Without it, snapshots and extraction keep working; only the search tools are unavailable
+- **Node 22.5+** (or Bun): the retrieval tools depend on `node:sqlite`. If unavailable, snapshots and extraction continue to work; only the search tools are missing
 - **Two local GGUF models** (~3.7 GB total, see [Local models](#local-models))
 
 ## Getting Started
 
-### 1. Clone
+### 1. Clone the repository
 
 ```bash
 git clone <this-repo> mem-plus
@@ -28,16 +28,16 @@ cd mem-plus
 ### 2. Install dependencies
 
 ```bash
-npm install                  # repo root
+npm install                  # repository root
 cd plugin && npm install     # plugin directory
-node plugin/scripts/link-openclaw-alias.mjs   # required — skipping this breaks plugin loading
+node plugin/scripts/link-openclaw-alias.mjs   # required; skipping it prevents the plugin from loading
 ```
 
-`npm install` also pulls the prebuilt `node-llama-cpp` binary for your platform. Without the dependencies the plugin still loads and snapshots keep writing; only extraction stops.
+`npm install` also pulls the prebuilt `node-llama-cpp` binary for the platform. Without the dependencies, the plugin still loads and session snapshots keep writing; LLM extraction is not performed.
 
 ### 3. Register the plugin
 
-Edit `opencode.jsonc` (global `~/.config/opencode/opencode.jsonc`, or a project-level `opencode.jsonc`):
+Edit `opencode.jsonc` (the global `~/.config/opencode/opencode.jsonc`, or a project-level `opencode.jsonc`):
 
 ```jsonc
 {
@@ -48,11 +48,11 @@ Edit `opencode.jsonc` (global `~/.config/opencode/opencode.jsonc`, or a project-
 }
 ```
 
-On Windows use forward slashes, and the path must point at the `plugin/` directory inside the repo (the plugin reads its engine from the repo root, so it cannot be copied out on its own).
+On Windows, paths must use forward slashes and must point at the `plugin/` directory inside the repository (the plugin reads its engine from the repository root and cannot be copied out on its own).
 
 ### 4. Download the models
 
-Put both files into `mem-plus/models/`:
+Place both files in `mem-plus/models/`:
 
 | File | Size | Purpose | Download |
 |---|---|---|---|
@@ -61,25 +61,26 @@ Put both files into `mem-plus/models/`:
 
 See [Local models](#local-models).
 
-### 5. Build the index (first run)
+### 5. Index existing files (optional)
 
-After registering the plugin, have the model run once:
+Memory entries written after registration are added to the retrieval index automatically. A full index pass is required only if `memory/` or `MEMORY.md` files pre-date the plugin registration (e.g. manually written session logs, or files migrated from another project) — those are not scanned automatically:
 
 ```
 memory_reindex  {"scope": "all", "embed": true}
 ```
 
-Only after this do `hybrid` / `vector` search modes return results.
+- Scans all existing memory files and rebuilds the index. Idempotent; safe to repeat.
+- `embed: true` computes a vector for each chunk via the embedding model, enabling `hybrid` / `vector` semantic search. For full-text search only, run `{"scope": "all"}`.
 
-## Day-to-day
+## Day-to-day usage
 
 ### The three retrieval tools
 
-The model calls them automatically; you can also name them directly in a conversation.
+The model invokes them automatically; users may also invoke them explicitly in a session.
 
-| Tool | What it does |
+| Tool | Purpose |
 |---|---|
-| `memory_search` | Search memories. Default is pure text search (fastest, no model needed); `mode: "hybrid"` blends vectors; `scope: "archive"` searches across projects |
+| `memory_search` | Search memories. Default is pure full-text search (fastest, no model required); `mode: "hybrid"` blends in vectors; `scope: "archive"` searches across projects |
 | `memory_get` | Read a full entry by id |
 | `memory_reindex` | Rebuild the index from markdown files; `embed: true` fills in vectors |
 
@@ -90,12 +91,14 @@ The model calls them automatically; you can also name them directly in a convers
 - `mode` — `text` (default) / `hybrid` / `vector`
 - `limit`, `kind` (`entry` / `snapshot` / `memory`), `tag`, `since`, `until`, `project`
 
-Text search is **AND**-based: every word must match. Start specific, widen if nothing comes back.
+Full-text search is **AND**-based: every query term must match. Start with specific terms and broaden the query if no results are returned.
 
-### Where data lives
+### Where the data lives
+
+Project data:
 
 ```
-<your-project>/
+<project>/
 ├── MEMORY.md                  # long-term memory
 └── memory/
     ├── 2026-10-02.md          # extracted entries
@@ -107,18 +110,18 @@ Shared data (one index for all projects):
 
 ```
 ~/.config/opencode/mem-plus/
-├── index.db                   # search index (safe to delete — rebuild with memory_reindex)
+├── index.db                   # retrieval index (safe to delete; rebuild with memory_reindex)
 ├── mem-plus.log               # log
 └── dreaming/<project>.last-day # dreaming marker (delete to force a re-run)
 ```
 
-The markdown files are the source of truth; the index is a disposable projection.
+The markdown files are the source of truth; the index is regenerable data.
 
 ### Inference service
 
-The plugin starts a local inference service on `127.0.0.1:4748` (a separate process). Multiple OpenCode windows share one service, so VRAM is not duplicated per window. The service exits after 10 minutes idle — it will not keep burning CPU after you close OpenCode.
+The plugin starts a local inference service on `127.0.0.1:4748` (a separate process). Multiple OpenCode windows share a single service, so VRAM is not duplicated. The service exits after 10 minutes of idle time; it will not keep consuming CPU after OpenCode is closed.
 
-GPU priority: **dedicated GPU > integrated GPU > CPU**, falling back automatically on failure. The log reports the backend that was picked:
+GPU priority: **dedicated GPU > integrated GPU > CPU**, falling back to the next tier automatically. The log reports the backend that was selected:
 
 ```
 [mem-plus] [mem-plus:serve] llama backend = vulkan (gpu) build=prebuilt
@@ -126,14 +129,14 @@ GPU priority: **dedicated GPU > integrated GPU > CPU**, falling back automatical
 
 ## Local models
 
-If you swap models:
+When replacing the models:
 
-- **The extraction model must be a completion-style (base) model, not an Instruct / Chat model.** Instruct models silently return empty extraction results. The default `qwen3.5-4b-q4_k_m.gguf` is a base model and works.
-- If you only use text search, you can skip the embedding model (`bge-m3`).
+- **The extraction model must be a completion-style (base) model; Instruct / Chat models must not be used.** Instruct models silently return empty extraction results. The default `qwen3.5-4b-q4_k_m.gguf` is a base model and is suitable.
+- If only full-text search is used, the embedding model (`bge-m3`) may be omitted.
 
 ## Configuration
 
-Everything is optional. To pass options, use the object form:
+All options are optional. To pass options, use the object form in `opencode.jsonc`:
 
 ```jsonc
 {
@@ -154,62 +157,62 @@ Full example: [`opencode.example.jsonc`](./opencode.example.jsonc).
 
 ### Model
 
-| Key | Default | Meaning |
+| Key | Default | Description |
 |---|---|---|
-| `model.content` | `"local"` | `"local"` = GGUF service; `"opencode"` = metered OpenCode model |
-| `model.allowHostedFallback` | `false` | allow fallback to the metered model when local inference is down |
+| `model.content` | `"local"` | `"local"` = local GGUF service; `"opencode"` = OpenCode's metered model |
+| `model.allowHostedFallback` | `false` | allow fallback to the metered model when local inference is unavailable |
 | `model.dir` | `<repo>/models` | directory holding the GGUF files |
 | `model.contentPath` | `model.dir/qwen3.5-4b-q4_k_m.gguf` | extraction model path |
 | `model.embedPath` | `model.dir/bge-m3-f16.gguf` | embedding model path |
 | `model.gpu` | `"auto"` | `"auto"` / `"cuda"` / `"vulkan"` / `"cpu"` |
-| `model.gpuLayers` | `"auto"` | layers kept in VRAM |
+| `model.gpuLayers` | `"auto"` | layers placed in VRAM |
 | `model.contextSize` | `16384` | extraction context window |
-| `model.maxNewTokens` | `512` | max tokens per extraction |
-| `model.threads` | `0` | CPU threads (only used for the CPU fallback) |
+| `model.maxNewTokens` | `512` | maximum tokens per extraction |
+| `model.threads` | `0` | CPU threads (effective only in the CPU fallback) |
 | `model.logLevel` | `"warn"` | `"silent"` / `"warn"` / `"info"` / `"debug"` |
 
 ### Service
 
-| Key | Default | Meaning |
+| Key | Default | Description |
 |---|---|---|
-| `service.port` | `4748` | start port; increments up to 4758 if busy |
+| `service.port` | `4748` | start port; increments automatically up to 4758 when busy |
 | `service.host` | `"127.0.0.1"` | bind address (loopback only) |
-| `service.autostart` | `true` | start the service if it is not running |
-| `service.idleMinutes` | `10` | auto-exit after this many idle minutes; `0` = never |
-| `service.startTimeoutMs` | `30000` | how long to wait for the service to become ready |
-| `service.url` | — | use an already-running service at this URL |
+| `service.autostart` | `true` | start the service automatically when it is not running |
+| `service.idleMinutes` | `10` | auto-exit after this many idle minutes; `0` disables auto-exit |
+| `service.startTimeoutMs` | `30000` | maximum wait time for the service to become ready |
+| `service.url` | — | use a service already running at this URL |
 
-## Never silently billed
+## No silent billing
 
-The whole point of this plugin is "inference stays local". When local inference is unavailable (missing models, missing dependencies, port busy, service crashed), the plugin **does not** silently switch to your metered model:
+The design principle of this plugin is fully local inference. When local inference is unavailable (missing models, missing dependencies, a busy port, a crashed service), the plugin does **not** silently fall back to a metered model:
 
-1. Snapshots keep writing (always free)
-2. Extraction is deferred; nothing is lost
-3. Once the service is back, pending captures are retried
+1. Snapshots keep writing (no cost incurred)
+2. Extraction is deferred; pending records are retained
+3. When the service recovers, pending extractions run automatically
 
-To opt into metered inference, set `model.allowHostedFallback: true` or `model.content: "opencode"` explicitly.
+To opt into a metered fallback, set `model.allowHostedFallback: true` or `model.content: "opencode"` explicitly.
 
 ## Dreaming
 
-On the first settled turn of each calendar day, daily entries are digested into `MEMORY.md` and `DREAMS.md`, at most once per day. Delete the marker under `~/.config/opencode/mem-plus/dreaming/` to force a re-run. When the local service is unavailable, dreaming degrades to entries-only (no LLM narrative).
+Triggered by the first settled turn of each calendar day (at most once per day), it compiles that day's entries into `MEMORY.md` and `DREAMS.md`. Delete the marker under `~/.config/opencode/mem-plus/dreaming/` to force a re-run on the next turn. When the local service is unavailable, the digest degrades to entries only (no LLM narrative).
 
 ## Prompt injection
 
-At the start of every turn, mem-plus loads the workspace files at the project root (`AGENTS.md`, `SOUL.md`, `IDENTITY.md`, `USER.md`, `BOOTSTRAP.md`, `MEMORY.md`) and injects them into the system prompt, so the long-term memory in `MEMORY.md` is visible to the model every turn.
+Before each model call, mem-plus reads the workspace files at the project root (`AGENTS.md`, `SOUL.md`, `IDENTITY.md`, `USER.md`, `BOOTSTRAP.md`, `MEMORY.md`) and injects them into the system prompt. The long-term memory in `MEMORY.md` is therefore visible to the model on every turn.
 
 ## Troubleshooting
 
-**Logs**: `~/.config/opencode/mem-plus/mem-plus.log` — check this first.
+The log file is at `~/.config/opencode/mem-plus/mem-plus.log`; consult it first when diagnosing a problem.
 
 | Symptom | Cause / action |
 |---|---|
-| `extraction DISABLED (GGUF not found)` | model not in `models/`. Snapshots keep writing |
-| `service did not become healthy ... within 30s` | service did not start. Run it manually: `cd plugin && node serve/server.mjs --port 4748` |
-| `local service unavailable; deferring the sweep` | service temporarily down; records are kept and retried |
-| empty extraction output (`summary=0 chars`) | extraction model is an Instruct-style model, see [Local models](#local-models) |
+| `extraction DISABLED (GGUF not found)` | the model is not in `models/`. Snapshot writing is unaffected |
+| `service did not become healthy ... within 30s` | the service did not start. Start it manually: `cd plugin && node serve/server.mjs --port 4748` |
+| `local service unavailable; deferring the sweep` | the service is temporarily unavailable; records are retained and retried automatically |
+| empty extraction output (`summary=0 chars`) | the extraction model is Instruct-style; see [Local models](#local-models) |
 | `Index: 0 documents` | run `memory_reindex` |
-| `hybrid` / `vector` returns 0 | run `memory_reindex {"embed": true}` and wait for it to finish |
-| `memory/` directory never appears | one full turn is required (settled + 2s debounce) |
+| `hybrid` / `vector` returns 0 | run `memory_reindex {"embed": true}` and wait for it to complete |
+| the `memory/` directory never appears | it is created after one full turn (settled + 2 s debounce) |
 
 ## License
 
