@@ -34,3 +34,5 @@ t3.mjs
 m2.mjs
 m3.mjs
 *.txt
+# local dev notes (never publish)
+TODO.md
