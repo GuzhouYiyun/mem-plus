@@ -18,11 +18,22 @@ OpenCode itself retains no memory: information gained within a session (files mo
 
 ## Getting Started
 
-### 1. Clone the repository
+### 1. Clone into the OpenCode plugins directory
+
+Clone mem-plus into OpenCode's global plugins directory `~/.config/opencode/plugins/` so it is managed alongside your other plugins:
 
 ```bash
-git clone <this-repo> mem-plus
-cd mem-plus
+# Linux / macOS
+mkdir -p ~/.config/opencode/plugins
+git clone <this-repo> ~/.config/opencode/plugins/mem-plus
+cd ~/.config/opencode/plugins/mem-plus
+```
+
+```powershell
+# Windows
+New-Item -ItemType Directory -Force "$env:USERPROFILE\.config\opencode\plugins"
+git clone <this-repo> "$env:USERPROFILE\.config\opencode\plugins\mem-plus"
+cd "$env:USERPROFILE\.config\opencode\plugins\mem-plus"
 ```
 
 ### 2. Install dependencies
@@ -143,7 +154,7 @@ All options are optional. To pass options, use the object form in `opencode.json
   "$schema": "https://opencode.ai/config.json",
   "plugins": [
     {
-      "package": "C:/full/path/to/mem-plus/plugin",
+      "package": "./plugins/mem-plus/plugin",
       "options": {
         "model": { "gpu": "auto" },
         "service": { "port": 4748 }

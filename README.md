@@ -18,11 +18,22 @@ OpenCode 本身不具备记忆能力：会话中获取的信息（修改过的�
 
 ## 快速开始
 
-### 1. 克隆仓库
+### 1. 克隆到 OpenCode 插件目录
+
+将 mem-plus 克隆到 OpenCode 的全局插件目录 `~/.config/opencode/plugins/`，与其他插件统一管理：
 
 ```bash
-git clone <this-repo> mem-plus
-cd mem-plus
+# Linux / macOS
+mkdir -p ~/.config/opencode/plugins
+git clone <this-repo> ~/.config/opencode/plugins/mem-plus
+cd ~/.config/opencode/plugins/mem-plus
+```
+
+```powershell
+# Windows
+New-Item -ItemType Directory -Force "$env:USERPROFILE\.config\opencode\plugins"
+git clone <this-repo> "$env:USERPROFILE\.config\opencode\plugins\mem-plus"
+cd "$env:USERPROFILE\.config\opencode\plugins\mem-plus"
 ```
 
 ### 2. 安装依赖
@@ -37,18 +48,20 @@ node plugin/scripts/link-openclaw-alias.mjs   # 必需；跳过将导致插件�
 
 ### 3. 注册插件
 
-编辑 `opencode.jsonc`（全局 `~/.config/opencode/opencode.jsonc`，或项目目录下的 `opencode.jsonc`）：
+编辑全局 `~/.config/opencode/opencode.jsonc`（也可用项目目录下的 `opencode.jsonc`）：
 
 ```jsonc
 {
   "$schema": "https://opencode.ai/config.json",
   "plugins": [
-    "C:/full/path/to/mem-plus/plugin"
+    "./plugins/mem-plus/plugin"
   ]
 }
 ```
 
-Windows 下路径须使用正斜杠，且必须指向仓库内的 `plugin/` 目录（插件自仓库根目录读取引擎，不能单独复制使用）。
+相对路径相对于配置文件所在目录解析，上例即 `~/.config/opencode/plugins/mem-plus/plugin`；也可写绝对路径（Windows 下须用正斜杠）。
+
+路径必须指向仓库内的 `plugin/` 目录（插件自仓库根目录读取引擎，不能单独复制使用）。
 
 ### 4. 下载模型
 
@@ -143,7 +156,7 @@ GPU 优先级：**独显 > 核显 > CPU**，某级不可用时自动回退至下
   "$schema": "https://opencode.ai/config.json",
   "plugins": [
     {
-      "package": "C:/full/path/to/mem-plus/plugin",
+      "package": "./plugins/mem-plus/plugin",
       "options": {
         "model": { "gpu": "auto" },
         "service": { "port": 4748 }

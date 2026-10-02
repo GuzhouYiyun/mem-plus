@@ -10,7 +10,7 @@
   "plugins": [
     {
       // 必须指向仓库里的 plugin/ 子目录，不是仓库根目录
-      "package": "C:/Users/你的用户名/repos/mem-plus/plugin",
+      "package": "C:/Users/你的用户名/.config/opencode/plugins/mem-plus/plugin",
 
       "options": {
         "model": {
