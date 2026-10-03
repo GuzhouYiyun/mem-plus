@@ -16,10 +16,14 @@
 // KEY LAYOUT
 //   `mem-plus/<namespace>/<key>` -- one namespace per capture namespace so a
 //   `scan` is exactly one logical store, and `entries()` never has to filter.
+import { createHash } from "node:crypto";
 import type {
   OpenKeyedStoreOptions,
+  PluginStateCompareIntent,
+  PluginStateCompareResult,
   PluginStateEntry,
   PluginStateKeyedStore,
+  PluginStateObservation,
 } from "openclaw/plugin-sdk/plugin-state-runtime";
 import type { MemoryCoreOpenKeyedStore } from "../../extensions/memory-core/src/dreaming-state.js";
 import type { PluginContext } from "./opencode.js";
@@ -50,6 +54,13 @@ function asStorageValue(stored: StoredValue): Parameters<PluginContext["storage"
   return stored as unknown as Parameters<PluginContext["storage"]["set"]>[1];
 }
 
+/** Content image for observation tokens; "-" marks an absent key. */
+function observationImage(raw: unknown): string {
+  return raw === undefined
+    ? "-"
+    : createHash("sha256").update(JSON.stringify(raw)).digest("hex");
+}
+
 async function scanNamespace(
   ctx: PluginContext,
   namespace: string,
@@ -78,7 +89,57 @@ function keyedStore<T>(ctx: PluginContext, options: OpenKeyedStoreOptions): Plug
     return isStoredValue(raw) ? raw : undefined;
   };
 
+  /**
+   * Atomic-compare surface required by the memory-core workspace lock
+   * (`PluginStateKeyedStore.observe` / `compareAndApply`).
+   *
+   * `ctx.storage` is last-writer-wins and has no transactions, so this is a
+   * best-effort CAS: the comparison token is `1:<namespace>:<image>` where
+   * `<image>` hashes the raw stored value ("-" when absent). `set` is verified
+   * by re-reading the key after writing; a concurrent write that lands in the
+   * window between our read and write reports as a conflict instead. The lock
+   * protocol tolerates that window (40 ms backoff, stealable stale entries),
+   * and the consequence of the residual race is at worst two dream sweeps
+   * running back-to-back -- never silent data loss.
+   */
+  const observeOne = async (key: string): Promise<PluginStateObservation<T>> => {
+    const raw = await ctx.storage.get(prefix + key);
+    return {
+      value: isStoredValue(raw) ? (raw.v as T) : undefined,
+      comparison: `1:${options.namespace}:${observationImage(raw)}`,
+    };
+  };
+
+  const compareAndApplyOne = async (
+    key: string,
+    comparison: string,
+    intent: PluginStateCompareIntent<T>,
+  ): Promise<PluginStateCompareResult<T>> => {
+    const current = await observeOne(key);
+    if (current.comparison !== comparison) {
+      return { status: "conflict", current };
+    }
+    if (intent.action === "delete") {
+      const absent = current.comparison === `1:${options.namespace}:-`;
+      await ctx.storage.remove(prefix + key);
+      return { status: absent ? "unchanged" : "applied" };
+    }
+    if (intent.action === "keep") {
+      return { status: "unchanged" };
+    }
+    const stored = asStorageValue({ c: Date.now(), v: intent.value });
+    await ctx.storage.set(prefix + key, stored);
+    const verifyRaw = await ctx.storage.get(prefix + key);
+    if (JSON.stringify(verifyRaw) !== JSON.stringify(stored)) {
+      return { status: "conflict", current: await observeOne(key) };
+    }
+    return { status: "applied" };
+  };
+
   return {
+    observe: (key) => observeOne(key),
+    compareAndApply: (key, comparison, intent) => compareAndApplyOne(key, comparison, intent),
+
     async register(key: string, value: T): Promise<void> {
       await ctx.storage.set(prefix + key, asStorageValue({ c: Date.now(), v: value }));
     },
