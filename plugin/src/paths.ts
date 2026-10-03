@@ -1,15 +1,13 @@
 // Where memory lives.
 //
 // LAYOUT (openclaw's agent-workspace model, unchanged)
-//   openclaw keeps every memory file in the agent's single workspace
-//   (default `~/.openclaw/workspace`): `MEMORY.md`, `memory/YYYY-MM-DD.md`,
-//   `DREAMS.md` -- one home, never inside the project the agent is working in.
-//   mem-plus reuses openclaw's own home, resolved with openclaw's own resolver
-//   (`resolveDefaultAgentWorkspaceDir`: `OPENCLAW_WORKSPACE_DIR`, then
-//   `OPENCLAW_STATE_DIR`, then `~/.openclaw/workspace`), so if openclaw is
-//   installed later it finds the same home. OpenCode's per-project directory is
-//   not a home: projects appear in the home as directory labels, not as
-//   separate stores.
+//   openclaw keeps every memory file in the agent's single workspace:
+//   `MEMORY.md`, `memory/YYYY-MM-DD.md`, `DREAMS.md` -- one home, never
+//   inside the project the agent is working in. mem-plus does the same, with
+//   that one home under the opencode config dir, next to the plugin's other
+//   data: `~/.config/opencode/mem-plus/workspace/`. OpenCode's per-project
+//   directory is not a home: projects appear in the home as directory
+//   labels, not as separate stores.
 //
 //   <workspace-home>/MEMORY.md                promoted long-term memory (global)
 //   <workspace-home>/DREAMS.md               dream diary (global, human review)
@@ -26,7 +24,6 @@
 // writes is the same key `memory_search`'s date filter and the ingestion parser use.
 import os from "node:os";
 import path from "node:path";
-import { resolveDefaultAgentWorkspaceDir } from "../../src/agents/workspace-default-path.js";
 import { formatMemoryDreamingDay } from "../../extensions/memory-core/src/capture/day.js";
 
 export const MEMORY_DIR_NAME = "memory";
@@ -34,13 +31,12 @@ export const MEMORY_FILE_NAME = "MEMORY.md";
 export const DREAMS_FILE_NAME = "DREAMS.md";
 
 /**
- * The memory home -- openclaw's own agent workspace directory, resolved by
- * openclaw's resolver (env overrides first, then `~/.openclaw/workspace`),
- * not by this plugin. mem-plus's global memory layer lives exactly where
- * openclaw's would.
+ * The memory home -- the one workspace holding every memory file, openclaw's
+ * agent-workspace shape, under the opencode config dir so all of mem-plus's
+ * data (home, index, log, dreaming gate) lives in one place.
  */
 export function memoryHomeDir(): string {
-  return resolveDefaultAgentWorkspaceDir();
+  return path.join(stateRoot(), "workspace");
 }
 
 /**
@@ -81,9 +77,8 @@ export function dreamingMarker(): string {
 }
 
 /**
- * `~/.config/opencode/mem-plus` -- the shared index, the plugin's own log and
- * the dreaming gate. The memory home itself lives where openclaw's does
- * (`~/.openclaw/workspace`), not here.
+ * `~/.config/opencode/mem-plus` -- the memory home, the shared index and the
+ * plugin's own log.
  */
 export function stateRoot(): string {
   return path.join(configHome(), "opencode", "mem-plus");

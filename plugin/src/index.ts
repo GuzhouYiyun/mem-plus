@@ -8,9 +8,8 @@
 //   2. After each turn (`session.execution.succeeded`) runs the ported capture
 //      pipeline: claim -> slice the assistant turn -> bounded markdown context ->
 //      LLM structured extraction -> filter `type="skip"` -> append the daily
-//      file in the memory home -- openclaw's own workspace, default
-//      `~/.openclaw/workspace/memory/<project-slug>/YYYY-MM-DD.md`. The project
-//      directory is never written.
+//      file in the memory home: `~/.config/opencode/mem-plus/workspace/memory/
+//      <project-slug>/YYYY-MM-DD.md`. The project directory is never written.
 //   3. Re-renders the whole session as `<...>/memory/<project-slug>/<YYYY-MM-DD>-
 //      <slug>.md` in the same home, and a once-a-day global dreaming sweep
 //      distills the home into `MEMORY.md` and `DREAMS.md` at its root --
