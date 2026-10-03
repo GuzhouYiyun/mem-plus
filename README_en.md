@@ -144,20 +144,20 @@ Get-Content "$env:USERPROFILE\.config\opencode\mem-plus\mem-plus.log" -Tail 5
 tail -n 5 ~/.config/opencode/mem-plus/mem-plus.log
 ```
 
-Then complete one conversation turn in any project; a `memory/` directory should appear in the project directory (see [Where the data lives](#where-the-data-lives)).
+Then complete one conversation turn in any project; the day's files should appear under the memory home `~/.config/opencode/mem-plus/workspace/memory/` (see [Where the data lives](#where-the-data-lives)).
 
 If `plugin loaded` is missing from the log: first register the plugin with the path form from step 3 and restart again; if it is still missing, see [Troubleshooting](#troubleshooting).
 
 ### 6. Index existing files (optional)
 
-Memory entries written after registration are added to the retrieval index automatically. A full index pass is required only if `memory/` or `MEMORY.md` files pre-date the plugin registration (e.g. manually written session logs, or files migrated from another project) — those are not scanned automatically:
+Memory entries written after registration are added to the retrieval index automatically. A full index pass is required only if the memory home (`workspace/`) holds memory files that pre-date the plugin registration (e.g. manually written session logs, or files migrated from elsewhere) — those are not scanned automatically:
 
 ```
-memory_reindex  {"scope": "all", "embed": true}
+memory_reindex  {"embed": true}
 ```
 
-- Scans all existing memory files and rebuilds the index. Idempotent; safe to repeat.
-- `embed: true` computes a vector for each chunk via the embedding model, enabling `hybrid` / `vector` semantic search. For full-text search only, run `{"scope": "all"}`.
+- Scans every file in the memory home and rebuilds the index. Idempotent; safe to repeat.
+- `embed: true` computes a vector for each chunk via the embedding model, enabling `hybrid` / `vector` semantic search. For full-text search only, run `memory_reindex` without options.
 
 ## Day-to-day usage
 
@@ -167,14 +167,14 @@ The model invokes them automatically; users may also invoke them explicitly in a
 
 | Tool | Purpose |
 |---|---|
-| `memory_search` | Search memories. Default is pure full-text search (fastest, no model required); `mode: "hybrid"` blends in vectors; `scope: "archive"` searches across projects |
+| `memory_search` | Search memories. Default is pure full-text search (fastest, no model required); `mode: "hybrid"` blends in vectors; `scope: "all"` searches across projects |
 | `memory_get` | Read a full entry by id |
-| `memory_reindex` | Rebuild the index from markdown files; `embed: true` fills in vectors |
+| `memory_reindex` | Rebuild the index from the memory home's markdown files; `embed: true` fills in vectors |
 
 `memory_search` parameters:
 
 - `query` (required)
-- `scope` — `project` (default) / `all` / `archive`
+- `scope` — `project` (default: this project plus the global long-term memory) / `all` (every project)
 - `mode` — `text` (default) / `hybrid` / `vector`
 - `limit`, `kind` (`entry` / `snapshot` / `memory`), `tag`, `since`, `until`, `project`
 
@@ -182,39 +182,38 @@ Full-text search is **AND**-based: every query term must match. Start with speci
 
 ### Where the data lives
 
-Project data:
+The project directory is never written to. Every memory file lives in one fixed "memory home":
 
 ```
-<project>/
-├── MEMORY.md                  # long-term memory
+~/.config/opencode/mem-plus/workspace/
+├── MEMORY.md                        # long-term memory (global, compiled daily by dreaming)
+├── DREAMS.md                        # dreaming digest log (global, human review; not indexed)
 └── memory/
-    ├── 2026-10-02.md          # extracted entries
-    ├── DREAMS.md              # dreaming digest log
-    └── 2026-10-02-fix-bug-x.md # session snapshot
+    └── <project>--<hash>/          # one subdirectory per project (a label, not a separate store)
+        ├── 2026-10-02.md           # extracted entries
+        └── 2026-10-02-fix-bug-x.md # session snapshot
 ```
 
-Shared data (one index for all projects):
+The remaining data sits next to the memory home (one index for all projects):
 
 ```
 ~/.config/opencode/mem-plus/
-├── index.db                   # retrieval index (safe to delete; rebuild with memory_reindex)
-├── mem-plus.log               # log
-├── archive/<project>--<hash>/ # global mirror of every project's memory/ (the data source for cross-project search)
-│   ├── INDEX.md               # per-project archive index
-│   └── memory/…               # same file names as <project>/memory/
-└── dreaming/<project>.last-day # dreaming marker (delete to force a re-run)
+├── workspace/                       # the memory home (above)
+├── index.db                         # retrieval index (safe to delete; rebuild with memory_reindex)
+├── mem-plus.log                     # log
+└── dreaming/last-day                # dreaming marker (a single global one; delete to force a re-run)
 ```
 
-The markdown files are the source of truth; `archive/` is their global mirror, and the index is regenerable data.
+The markdown files are the source of truth; the index is regenerable data.
 
 ### Inference service
 
 The plugin starts a local inference service on `127.0.0.1:4748` (a separate process). Multiple OpenCode windows share a single service, so VRAM is not duplicated. The service exits after 10 minutes of idle time; it will not keep consuming CPU after OpenCode is closed.
 
-GPU priority: **dedicated GPU > integrated GPU > CPU**, falling back to the next tier automatically. The log reports the backend that was selected:
+GPU priority: **dedicated GPU > integrated GPU**; the CPU is never used. When the dedicated GPU is unavailable the integrated one is tried; when no GPU can run, the inference service does not start and the log reports the error (snapshots keep writing, extraction stays deferred until a GPU is available). The log reports the backend that was selected:
 
 ```
-[mem-plus] [mem-plus:serve] llama backend = vulkan (gpu) build=prebuilt
+[mem-plus] [mem-plus:serve] llama backend = vulkan (discrete or integrated) build=prebuilt
 ```
 
 ## Model
@@ -230,7 +229,7 @@ When replacing the models:
 - **The extraction model must be a completion-style (base) model; Instruct / Chat models must not be used.** Instruct models silently return empty extraction results. The default `Qwen3.5-4B-Q4_K_M.gguf` is a base model and is suitable.
 - **The embedding model must have an embedding head.** The default `bge-m3-FP16.gguf` satisfies this; a language model placed in the embedding slot fails on first use.
 - If only full-text search is used, the embedding model (`bge-m3`) may be omitted.
-- After swapping the embedding model, run `memory_reindex {"scope": "all", "embed": true}` to rebuild the vectors. Vectors computed by the previous model are in a different space; mixing them produces wrong hybrid / vector results.
+- After swapping the embedding model, run `memory_reindex {"embed": true}` to rebuild the vectors. Vectors computed by the previous model are in a different space; mixing them produces wrong hybrid / vector results.
 
 **Billing principle**: all inference in this plugin is fully local. When local inference is unavailable (missing models, missing dependencies, a busy port, a crashed service), the plugin does **not** silently fall back to a metered model:
 
@@ -270,11 +269,11 @@ Full example: [`opencode.example.jsonc`](./opencode.example.jsonc).
 | `model.dir` | `<repo>/models` | directory holding the GGUF files |
 | `model.contentPath` | `model.dir/Qwen3.5-4B-Q4_K_M.gguf` | extraction model path |
 | `model.embedPath` | `model.dir/bge-m3-FP16.gguf` | embedding model path |
-| `model.gpu` | `"auto"` | `"auto"` / `"cuda"` / `"vulkan"` / `"cpu"` |
+| `model.gpu` | `"auto"` | `"auto"` (dedicated > integrated, no CPU fallback) / `"cuda"` / `"vulkan"`. CPU inference was removed; a legacy `"cpu"` value is treated as `"auto"` |
 | `model.gpuLayers` | `"auto"` | layers placed in VRAM |
 | `model.contextSize` | `16384` | extraction context window |
 | `model.maxNewTokens` | `512` | maximum tokens per extraction |
-| `model.threads` | `0` | CPU threads (effective only in the CPU fallback) |
+| `model.threads` | `0` | CPU threads for host-side work (inference itself runs on the GPU) |
 | `model.logLevel` | `"warn"` | `"silent"` / `"warn"` / `"info"` / `"debug"` |
 
 ### Service
@@ -290,11 +289,11 @@ Full example: [`opencode.example.jsonc`](./opencode.example.jsonc).
 
 ## Dreaming
 
-Triggered by the first settled turn of each calendar day (at most once per day), it compiles that day's entries into `MEMORY.md` and `DREAMS.md`. Delete the marker under `~/.config/opencode/mem-plus/dreaming/` to force a re-run on the next turn. When the local service is unavailable, the digest degrades to entries only (no LLM narrative).
+Triggered by the first settled turn of each calendar day (a single global gate: at most one sweep per day across all projects), it compiles that day's entries into `MEMORY.md` (long-term memory) and `DREAMS.md` (insights log) at the memory home's root. Delete the global marker `~/.config/opencode/mem-plus/dreaming/last-day` to force a re-run on the next turn. When the local service is unavailable, the digest degrades to entries only (no LLM narrative).
 
 ## Prompt injection
 
-Before each model call, mem-plus reads the workspace files at the project root and injects them into the system prompt. The file names and their meanings follow openclaw's conventions; missing files are skipped, and edits take effect from the next turn:
+Before each model call, mem-plus reads the workspace files at the project root and injects them into the system prompt, then appends the global `MEMORY.md` at the memory home's root (`~/.config/opencode/mem-plus/workspace/`). The file names and their meanings follow openclaw's conventions; missing files are skipped, and edits take effect from the next turn:
 
 | File | Purpose |
 |---|---|
@@ -303,9 +302,8 @@ Before each model call, mem-plus reads the workspace files at the project root a
 | `IDENTITY.md` | identity: name, role, self-reference and tone |
 | `USER.md` | your profile: how to address you, preferences, background |
 | `BOOTSTRAP.md` | startup / bootstrap instructions |
-| `MEMORY.md` | long-term memory, compiled daily by the dreaming digest |
 
-Writing a `SOUL.md` / `IDENTITY.md` gives the agent that character and identity; day by day, the LLM extraction and dreaming digest distill lessons — mistakes, dead ends, hard-won fixes — into `MEMORY.md`, so the injected context accumulates and the agent's understanding of your project evolves with use. The evolution happens at the prompt-and-memory level (injected files, retrieval index), not in the model's weights.
+The global `MEMORY.md` is shared by every project and compiled daily by the dreaming digest. Writing a `SOUL.md` / `IDENTITY.md` gives the agent that character and identity; day by day, the LLM extraction and dreaming digest distill lessons — mistakes, dead ends, hard-won fixes — into `MEMORY.md`, so the injected context accumulates and the agent's understanding of your project evolves with use. The evolution happens at the prompt-and-memory level (injected files, retrieval index), not in the model's weights.
 
 ## Troubleshooting
 
@@ -314,12 +312,13 @@ The log file is at `~/.config/opencode/mem-plus/mem-plus.log`; consult it first 
 | Symptom | Cause / action |
 |---|---|
 | `extraction DISABLED (GGUF not found)` | the model is not in `models/`. Snapshot writing is unaffected |
-| `service did not become healthy ... within 30s` | the service did not start. Start it manually: `cd plugin && node serve/server.mjs --port 4748` |
+| `service did not become healthy ... within 30s` | the service did not start. Start it manually: `cd plugin && node serve/server.mjs --port 4748` and check the log for the reason |
+| `gpu backend unavailable; service will not start` | no usable GPU (dedicated > integrated, CPU is disabled). The service does not start; extraction stays deferred until a GPU becomes available |
 | `local service unavailable; deferring the sweep` | the service is temporarily unavailable; records are retained and retried automatically |
 | empty extraction output (`summary=0 chars`) | the extraction model is Instruct-style; see [Model](#model) |
 | `Index: 0 documents` | run `memory_reindex` |
 | `hybrid` / `vector` returns 0 | run `memory_reindex {"embed": true}` and wait for it to complete |
-| the `memory/` directory never appears | it is created after one full turn (settled + 2 s debounce) |
+| no day files appear under `workspace/memory/` | they are created after one full turn (settled + 2 s debounce) |
 
 ## Uninstalling
 
@@ -331,7 +330,7 @@ Remove the plugin and all of its data (in order):
    opencode service stop
    ```
 
-2. Delete the shared data directory (index, log, `archive/` mirrors, dreaming markers):
+2. Delete the data directory (the memory home `workspace/`, the index, the log, the dreaming marker):
 
    ```powershell
    # Windows
@@ -343,9 +342,8 @@ Remove the plugin and all of its data (in order):
    rm -rf ~/.config/opencode/mem-plus
    ```
 
-   Everything in it is either regenerable or a mirror of the markdown in your project directories — safe to delete outright
-3. (Optional) Delete `MEMORY.md` and `memory/` in each project. These markdown files are the memories themselves; back them up first if you want to keep them
-4. Delete the plugin directory (its `models/` folder holds the ~3.7 GB of model files):
+   It holds the memory itself plus regenerable data; back up `workspace/` first if you want to keep your memories, otherwise delete it outright
+3. Delete the plugin directory (its `models/` folder holds the ~3.7 GB of model files):
 
    ```powershell
    # Windows
@@ -358,8 +356,8 @@ Remove the plugin and all of its data (in order):
    ```
 
    If you cloned it somewhere else, delete that directory instead
-5. If you registered the plugin in `opencode.jsonc`, remove that entry; auto-discovery from the global plugins directory needs no such step
-6. Restart OpenCode; the uninstall is complete
+4. If you registered the plugin in `opencode.jsonc`, remove that entry; auto-discovery from the global plugins directory needs no such step
+5. Restart OpenCode; the uninstall is complete
 
 ## License
 

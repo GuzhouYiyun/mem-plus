@@ -19,9 +19,10 @@
 //   service is back -- a lost summary is recoverable, silent billing is not.
 //
 // BACKEND PRIORITY
-//   discrete GPU > integrated GPU > CPU, resolved explicitly rather than handed
-//   to `gpu: "auto"`, so which one won is observable in the log instead of
-//   guessed at.
+//   discrete GPU > integrated GPU; CPU is not a supported backend. The chain
+//   is resolved explicitly rather than handed to `gpu: "auto"`, so which one
+//   won is observable in the log instead of guessed at. When no GPU works the
+//   service refuses to start and the failure lands in the log.
 //
 // EVERYTHING IS OVERRIDABLE THROUGH `ctx.options`, because the model directory
 // in particular is machine-local: it lives next to the checkout by default and
@@ -30,7 +31,7 @@ import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-export type GpuPreference = "auto" | "cuda" | "vulkan" | "cpu";
+export type GpuPreference = "auto" | "cuda" | "vulkan";
 
 /** Which model produces capture summaries. `opencode` routes to `ctx.generate.text`. */
 export type ContentBackend = "local" | "opencode";
@@ -56,7 +57,7 @@ export type ModelConfig = {
   /** KV-cache size for the extraction session. The capture prompt is bounded at 128 KB. */
   readonly contextSize: number;
   readonly maxNewTokens: number;
-  /** CPU threads; only consulted by the CPU fallback backend. */
+  /** CPU threads for host-side work (inference itself runs on the GPU). */
   readonly threads: number;
   /**
    * Layers pushed to the GPU. `"auto"` sizes the offload to current VRAM and
@@ -137,7 +138,9 @@ function readBoolean(value: unknown): boolean | undefined {
 }
 
 function readGpu(value: unknown): GpuPreference {
-  if (value === "auto" || value === "cuda" || value === "vulkan" || value === "cpu") return value;
+  if (value === "auto" || value === "cuda" || value === "vulkan") return value;
+  // CPU inference was removed (discrete > integrated, no fallback to CPU): a
+  // legacy "cpu" value or anything else is demoted to "auto".
   return "auto";
 }
 

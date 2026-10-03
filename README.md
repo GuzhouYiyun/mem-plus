@@ -146,20 +146,20 @@ Get-Content "$env:USERPROFILE\.config\opencode\mem-plus\mem-plus.log" -Tail 5
 tail -n 5 ~/.config/opencode/mem-plus/mem-plus.log
 ```
 
-随后在任意项目中完成一个对话 turn，项目目录下应生成 `memory/` 目录（见 [数据位置](#数据位置)）。
+随后在任意项目中完成一个对话 turn，记忆家 `~/.config/opencode/mem-plus/workspace/memory/` 下应出现当日文件（见 [数据位置](#数据位置)）。
 
 日志中没有 `plugin loaded` 时：先按第 3 步的路径形式注册插件并再次重启；仍不出现则见 [故障排除](#故障排除)。
 
 ### 6. 索引已有文件（可选）
 
-插件注册后写入的记忆条目会自动登记进检索索引。仅当环境中存在**注册之前**的 `memory/` 或 `MEMORY.md` 文件（例如手动写入的会话记录、自旧项目迁移的文件）时，需要执行一次全量索引将其纳入；此类文件不会被自动扫描：
+插件注册后写入的记忆条目会自动登记进检索索引。仅当记忆家 `workspace/` 下存在**注册之前**已有的记忆文件（例如手动写入或迁移来的文件）时，需要执行一次全量索引将其纳入；此类文件不会被自动扫描：
 
 ```
-memory_reindex  {"scope": "all", "embed": true}
+memory_reindex  {"embed": true}
 ```
 
-- 该命令扫描全部现有记忆文件并重建索引，幂等，可重复执行。
-- `embed: true` 由嵌入模型为各内容块计算向量，启用 `hybrid` / `vector` 语义检索；仅需全文检索时执行 `{"scope": "all"}` 即可。
+- 该命令扫描记忆家全部文件并重建索引，幂等，可重复执行。
+- `embed: true` 由嵌入模型为各内容块计算向量，启用 `hybrid` / `vector` 语义检索；仅需全文检索时直接执行 `memory_reindex` 即可。
 
 ## 日常使用
 
@@ -169,14 +169,14 @@ memory_reindex  {"scope": "all", "embed": true}
 
 | 工具 | 作用 |
 |---|---|
-| `memory_search` | 检索记忆。默认为纯文本检索（最快，无需模型）；`mode: "hybrid"` 融合向量检索；`scope: "archive"` 跨项目搜索 |
+| `memory_search` | 检索记忆。默认为纯文本检索（最快，无需模型）；`mode: "hybrid"` 融合向量检索；`scope: "all"` 跨项目搜索 |
 | `memory_get` | 按 id 读取完整条目 |
-| `memory_reindex` | 从 markdown 文件重建索引；`embed: true` 补齐向量 |
+| `memory_reindex` | 重建记忆家的检索索引；`embed: true` 补齐向量 |
 
 `memory_search` 参数：
 
 - `query`（必填）
-- `scope` — `project`（默认）/ `all` / `archive`
+- `scope` — `project`（默认，本项目加全局长期记忆）/ `all`（全部项目）
 - `mode` — `text`（默认）/ `hybrid` / `vector`
 - `limit`、`kind`（`entry` / `snapshot` / `memory`）、`tag`、`since`、`until`、`project`
 
@@ -184,39 +184,38 @@ memory_reindex  {"scope": "all", "embed": true}
 
 ### 数据位置
 
-项目内的数据：
+项目目录内不写入任何文件。所有记忆文件集中在一个固定的"记忆家"：
 
 ```
-<项目目录>/
-├── MEMORY.md                  # 长期记忆
+~/.config/opencode/mem-plus/workspace/
+├── MEMORY.md                        # 长期记忆（全局，由睡眠整理每日汇入）
+├── DREAMS.md                        # 睡眠整理日志（全局，供人工审阅，不进入检索索引）
 └── memory/
-    ├── 2026-10-02.md          # 抽取条目
-    ├── DREAMS.md              # 睡眠整理日志
-    └── 2026-10-02-fix-bug-x.md # 会话快照
+    └── <项目名>--<哈希>/            # 按项目分子目录（项目只是标签，不是独立库）
+        ├── 2026-10-02.md            # 抽取条目
+        └── 2026-10-02-fix-bug-x.md  # 会话快照
 ```
 
-共享数据（所有项目共用一个索引）：
+其余数据与记忆家同目录（所有项目共用一个索引）：
 
 ```
 ~/.config/opencode/mem-plus/
-├── index.db                   # 检索索引（可随时删除，通过 memory_reindex 重建）
-├── mem-plus.log               # 日志
-├── archive/<项目名>--<哈希>/   # 各项目 memory/ 的全局镜像（跨项目检索的数据来源）
-│   ├── INDEX.md               # 该项目的归档索引
-│   └── memory/…               # 与 <项目>/memory/ 同名
-└── dreaming/<项目名>.last-day # 睡眠整理标记（删除后可强制重新执行）
+├── workspace/                       # 记忆家（如上）
+├── index.db                         # 检索索引（可随时删除，通过 memory_reindex 重建）
+├── mem-plus.log                     # 日志
+└── dreaming/last-day                # 睡眠整理标记（全局单个，删除后可强制重新执行）
 ```
 
-Markdown 文件为唯一数据源；`archive/` 是其全局镜像，索引为可再生数据。
+Markdown 文件为唯一数据源；索引为可再生数据。
 
 ### 推理服务
 
 插件在 `127.0.0.1:4748` 启动本地推理服务（独立进程）。多个 OpenCode 窗口共享同一服务，避免重复占用显存。服务空闲 10 分钟后自动退出，关闭 OpenCode 后不会持续占用 CPU。
 
-GPU 优先级：**独显 > 核显 > CPU**，某级不可用时自动回退至下一级。日志将报告最终选用的后端：
+GPU 优先级：**独显 > 核显**，不使用 CPU。独显不可用时自动尝试核显；若连核显也运行不了，推理服务不启动，日志直接报错（快照照常写入，抽取保持延后，直至出现可用 GPU）。日志将报告最终选用的后端：
 
 ```
-[mem-plus] [mem-plus:serve] llama backend = vulkan (gpu) build=prebuilt
+[mem-plus] [mem-plus:serve] llama backend = vulkan (discrete or integrated) build=prebuilt
 ```
 
 ## 模型
@@ -232,7 +231,7 @@ mem-plus 默认使用两个本地 GGUF 模型：抽取模型 `Qwen3.5-4B-Q4_K_M.
 - **抽取模型必须使用 completion 风格（base）模型，不得使用 Instruct / Chat 风格模型**。使用 Instruct 模型进行抽取将静默返回空结果。默认的 `Qwen3.5-4B-Q4_K_M.gguf` 为 base 模型，适用。
 - **嵌入模型须带 embedding 头**。默认的 `bge-m3-FP16.gguf` 满足此要求；嵌入槽位放入语言模型会在首次使用时报错。
 - 若仅使用文本检索，可省略嵌入模型（`bge-m3`）。
-- 更换嵌入模型后须执行 `memory_reindex {"scope": "all", "embed": true}` 重建向量。旧向量由旧模型计算，空间混杂会导致 hybrid / vector 检索结果错误。
+- 更换嵌入模型后须执行 `memory_reindex {"embed": true}` 重建向量。旧向量由旧模型计算，空间混杂会导致 hybrid / vector 检索结果错误。
 
 **计费原则**：本插件推理全程本地化。本地推理不可用时（模型缺失、依赖未安装、端口被占用、服务异常），插件**不会**静默回退至计费模型：
 
@@ -272,11 +271,11 @@ mem-plus 默认使用两个本地 GGUF 模型：抽取模型 `Qwen3.5-4B-Q4_K_M.
 | `model.dir` | `<repo>/models` | GGUF 文件所在目录 |
 | `model.contentPath` | `model.dir/Qwen3.5-4B-Q4_K_M.gguf` | 抽取模型路径 |
 | `model.embedPath` | `model.dir/bge-m3-FP16.gguf` | 嵌入模型路径 |
-| `model.gpu` | `"auto"` | `"auto"` / `"cuda"` / `"vulkan"` / `"cpu"` |
+| `model.gpu` | `"auto"` | `"auto"`（独显 > 核显，无 CPU 回退）/ `"cuda"` / `"vulkan"`。CPU 推理已移除，旧的 `"cpu"` 值按 `"auto"` 处理 |
 | `model.gpuLayers` | `"auto"` | 分配至显存的层数 |
 | `model.contextSize` | `16384` | 抽取上下文窗口 |
 | `model.maxNewTokens` | `512` | 单次抽取最大 token 数 |
-| `model.threads` | `0` | CPU 线程数（仅 CPU 回退时生效） |
+| `model.threads` | `0` | CPU 线程数（宿主侧运算用；推理本身在 GPU 上运行） |
 | `model.logLevel` | `"warn"` | `"silent"` / `"warn"` / `"info"` / `"debug"` |
 
 ### 服务
@@ -292,11 +291,11 @@ mem-plus 默认使用两个本地 GGUF 模型：抽取模型 `Qwen3.5-4B-Q4_K_M.
 
 ## 睡眠整理
 
-每个日历日内的首个完成 turn 触发（每日最多执行一次），将当日条目汇编写入 `MEMORY.md` 与 `DREAMS.md`。删除 `~/.config/opencode/mem-plus/dreaming/` 下的标记文件可强制在下一 turn 重新执行。本地服务不可用时，整理流程降级为仅写入条目，不生成 LLM 叙述。
+每个日历日内的首个完成 turn 触发（全局门控，所有项目每日合计最多一次），将当日条目汇编写入记忆家根部的 `MEMORY.md`（长期记忆）与 `DREAMS.md`（洞察日志）。删除全局标记 `~/.config/opencode/mem-plus/dreaming/last-day` 可强制在下一 turn 重新执行。本地服务不可用时，整理流程降级为仅写入条目，不生成 LLM 叙述。
 
 ## 提示词注入
 
-每轮模型调用前，mem-plus 读取项目根目录下的工作区文件并注入系统提示词。这些文件的名称与语义沿用 openclaw 的约定，缺失的文件自动跳过，可随时增改，下一轮即生效：
+每轮模型调用前，mem-plus 读取项目根目录下的工作区文件并注入系统提示词，随后追加记忆家（`~/.config/opencode/mem-plus/workspace/`）根部的全局 `MEMORY.md`。这些文件的名称与语义沿用 openclaw 的约定，缺失的文件自动跳过，可随时增改，下一轮即生效：
 
 | 文件 | 作用 |
 |---|---|
@@ -305,9 +304,8 @@ mem-plus 默认使用两个本地 GGUF 模型：抽取模型 `Qwen3.5-4B-Q4_K_M.
 | `IDENTITY.md` | 身份：名字、角色、自称与语气 |
 | `USER.md` | 用户画像：称呼、偏好、背景信息 |
 | `BOOTSTRAP.md` | 启动引导说明 |
-| `MEMORY.md` | 长期记忆，由睡眠整理每日汇入 |
 
-写入 `SOUL.md` / `IDENTITY.md` 即为 agent 设定性格与身份；日常工作中踩过的坑、失败的方案经 LLM 抽取与睡眠整理沉淀进 `MEMORY.md`，注入内容逐日累积，agent 对项目的理解随使用演进。演进发生在提示词与记忆层面（注入文件、检索索引），不改变模型本身。
+全局 `MEMORY.md` 所有项目共用一份，由睡眠整理每日汇入。写入 `SOUL.md` / `IDENTITY.md` 即为 agent 设定性格与身份；日常工作中踩过的坑、失败的方案经 LLM 抽取与睡眠整理沉淀进 `MEMORY.md`，注入内容逐日累积，agent 对项目的理解随使用演进。演进发生在提示词与记忆层面（注入文件、检索索引），不改变模型本身。
 
 ## 故障排除
 
@@ -316,12 +314,13 @@ mem-plus 默认使用两个本地 GGUF 模型：抽取模型 `Qwen3.5-4B-Q4_K_M.
 | 现象 | 原因 / 处理 |
 |---|---|
 | `extraction DISABLED (GGUF not found)` | 模型未放置于 `models/` 目录。快照写入不受影响 |
-| `service did not become healthy ... within 30s` | 服务未启动。手动执行：`cd plugin && node serve/server.mjs --port 4748` |
+| `service did not become healthy ... within 30s` | 服务未启动。手动执行：`cd plugin && node serve/server.mjs --port 4748`，观察日志定位原因 |
+| `gpu backend unavailable; service will not start` | 无可用 GPU（独显 > 核显，CPU 已禁用）。服务不启动，抽取保持延后；出现可用 GPU 后恢复 |
 | `local service unavailable; deferring the sweep` | 服务暂不可用；记录保留，恢复后自动重试 |
 | 抽取输出为空（`summary=0 chars`） | 抽取模型为 Instruct 风格，参见 [模型](#模型) |
 | `Index: 0 documents` | 执行 `memory_reindex` |
 | `hybrid` / `vector` 返回 0 条 | 执行 `memory_reindex {"embed": true}` 并等待完成 |
-| `memory/` 目录不出现 | 需完成一个完整 turn（结算 + 2 秒防抖）后生成 |
+| `workspace/memory/` 下不出现当日文件 | 需完成一个完整 turn（结算 + 2 秒防抖）后生成 |
 
 ## 卸载
 
@@ -333,7 +332,7 @@ mem-plus 默认使用两个本地 GGUF 模型：抽取模型 `Qwen3.5-4B-Q4_K_M.
    opencode service stop
    ```
 
-2. 删除共享数据目录（索引、日志、`archive/` 归档镜像、睡眠整理标记）：
+2. 删除数据目录（记忆家 `workspace/`、索引、日志、睡眠整理标记）：
 
    ```powershell
    # Windows
@@ -345,9 +344,8 @@ mem-plus 默认使用两个本地 GGUF 模型：抽取模型 `Qwen3.5-4B-Q4_K_M.
    rm -rf ~/.config/opencode/mem-plus
    ```
 
-   目录内全部为可再生数据或项目目录 markdown 的镜像，直接删除即可
-3. （可选）删除各项目中的 `MEMORY.md` 与 `memory/`。记忆本体即这些 markdown 文件，需保留时先备份
-4. 删除插件目录（含 `models/` 下约 3.7 GB 的模型文件）：
+   目录内即记忆本体与可再生数据；需保留记忆时先备份 `workspace/`，否则直接删除
+3. 删除插件目录（含 `models/` 下约 3.7 GB 的模型文件）：
 
    ```powershell
    # Windows
@@ -360,8 +358,8 @@ mem-plus 默认使用两个本地 GGUF 模型：抽取模型 `Qwen3.5-4B-Q4_K_M.
    ```
 
    插件克隆在其他位置的，删除对应目录
-5. 曾在 `opencode.jsonc` 中注册过插件的，删除相应条目；仅靠全局插件目录自动发现加载的，无需此步
-6. 重启 OpenCode，卸载完成
+4. 曾在 `opencode.jsonc` 中注册过插件的，删除相应条目；仅靠全局插件目录自动发现加载的，无需此步
+5. 重启 OpenCode，卸载完成
 
 ## 许可证
 

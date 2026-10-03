@@ -30,12 +30,13 @@ import { fileURLToPath } from "node:url";
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PLUGIN_ROOT = path.resolve(HERE, "..");
 
-/** 独显 > 核显 > CPU。cuda 是 NVIDIA 独显；vulkan 覆盖 AMD/Intel 独显和所有核显。 */
+/** 独显 > 核显，CPU 不参与。cuda 是 NVIDIA 独显；metal 是 Apple GPU；
+ *  vulkan 覆盖 AMD/Intel 独显和所有核显。没有可用 GPU 时服务拒绝启动
+ *  （CPU 推理已移除），而不是回落到 CPU 慢速运行。 */
 const GPU_PRIORITY = {
-  auto: ["cuda", "metal", "vulkan", false],
-  cuda: ["cuda", false],
-  vulkan: ["vulkan", false],
-  cpu: [false],
+  auto: ["cuda", "metal", "vulkan"],
+  cuda: ["cuda"],
+  vulkan: ["vulkan"],
 };
 
 const LOG_LEVELS = (mod) => ({
@@ -77,6 +78,12 @@ function readArgs(argv) {
 
 const config = readArgs(process.argv.slice(2));
 
+// CPU 推理已移除：旧配置里 gpu=cpu 不再支持，记一条日志后按 auto（独显 > 核显）处理。
+if (config.gpu === "cpu") {
+  log("gpu=cpu is no longer supported (dedicated > integrated, CPU is not a fallback); using gpu=auto");
+  config.gpu = "auto";
+}
+
 // ---------------------------------------------------------------- 串行化
 // 一个模型一个 context；两次抽取抢同一个 sequence 会交错写 KV cache。
 // 互斥链顺带保证模型不会被并发加载两次。
@@ -116,9 +123,10 @@ function loadNodeLlama() {
 }
 
 function describeGpu(gpu) {
-  if (gpu === false) return "cpu";
   if (gpu === "cuda") return "cuda (discrete)";
-  if (gpu === "vulkan") return "vulkan (gpu)";
+  if (gpu === "vulkan") return "vulkan (discrete or integrated)";
+  if (gpu === "metal") return "metal (apple gpu)";
+  if (gpu === false) return "cpu (legacy value; no longer selected)";
   return String(gpu);
 }
 
@@ -127,7 +135,7 @@ async function openLlama() {
   const levels = LOG_LEVELS(mod);
   const supported = new Set(await mod.getLlamaGpuTypes("supported"));
   const order = GPU_PRIORITY[config.gpu] ?? GPU_PRIORITY.auto;
-  const candidates = order.filter((gpu) => gpu === false || supported.has(gpu));
+  const candidates = order.filter((gpu) => supported.has(gpu));
 
   const failures = [];
   for (const gpu of candidates) {
@@ -144,10 +152,12 @@ async function openLlama() {
     } catch (error) {
       const reason = error instanceof Error ? error.message.split("\n")[0] : String(error);
       failures.push(`${describeGpu(gpu)}: ${reason}`);
-      log(`backend ${describeGpu(gpu)} unavailable, falling back`, reason);
+      log(`backend ${describeGpu(gpu)} unavailable, trying next (discrete > integrated, no CPU)`, reason);
     }
   }
-  throw new Error(`no usable llama.cpp backend (priority ${config.gpu}) :: ${failures.join(" | ")}`);
+  throw new Error(
+    `no usable GPU backend (priority ${config.gpu}; discrete > integrated, CPU is not allowed) :: ${failures.join(" | ")}`,
+  );
 }
 
 async function getContentModel() {
@@ -471,6 +481,15 @@ const server = createServer((req, res) => {
 
 function message(error) {
   return error instanceof Error ? error.message.split("\n")[0] : String(error);
+}
+
+// 启动前先确认 GPU 后端：独显 > 核显，CPU 已禁用。任何一层都起不来的话，
+// 服务不监听、直接报错退出——插件端看到启动失败会把抽取延后，快照照常写入。
+try {
+  await openLlama();
+} catch (error) {
+  log("gpu backend unavailable; service will not start (discrete > integrated, CPU is not allowed)", error);
+  process.exit(1);
 }
 
 // 端口被占用就顺延，和 opencode-mem 的做法一致（它用 4747-4757）。
