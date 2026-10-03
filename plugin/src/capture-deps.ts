@@ -8,6 +8,7 @@ import path from "node:path";
 import { CAPTURE_LATEST_MEMORY_CHARS, CAPTURE_MAX_TOOL_INPUT_LENGTH } from "../../extensions/memory-core/src/capture/constants.js";
 import { appendCaptureEntry } from "../../extensions/memory-core/src/capture/write.js";
 import { dailyMemoryFile, homeProjectMemoryDir, memoryFile } from "./paths.js";
+import type { HostedModelRef } from "./model/config.js";
 import { asSessionMessage, type PluginContext, type SessionContentPart, type SessionMessageView } from "./opencode.js";
 import type {
   CaptureDependencies,
@@ -127,10 +128,16 @@ export function disabledComplete(reason: string): CaptureCompleteOverride {
 /**
  * Metered transport via the user's own OpenCode model. Only reachable through an
  * explicit `model.content: "opencode"` or `model.allowHostedFallback: true`.
+ *
+ * `model` pins which OpenCode model runs the extraction (`model.hostedModel`).
+ * Omitted, `ctx.generate.text` uses OpenCode's own default -- unchanged behavior.
  */
-export function hostedComplete(ctx: PluginContext): CaptureCompleteOverride {
+export function hostedComplete(ctx: PluginContext, model?: HostedModelRef): CaptureCompleteOverride {
   return async ({ systemPrompt, prompt }) => {
-    const result = await ctx.generate.text({ prompt: `${systemPrompt}\n\n${prompt}` });
+    const result = await ctx.generate.text({
+      prompt: `${systemPrompt}\n\n${prompt}`,
+      ...(model ? { model } : {}),
+    });
     return result.text;
   };
 }

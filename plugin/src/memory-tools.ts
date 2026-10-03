@@ -32,12 +32,15 @@ import {
   storeVector,
   toMatchExpression,
   unitsMissingVectors,
+  type CorpusFilter,
   type SearchFilters,
   type SearchHit,
   type SearchMode,
 } from "./memory-index.js";
-import { discoverHomeFiles, reindexFiles } from "./memory-scan.js";
+import { discoverHomeFiles, discoverWikiFiles, reindexFiles } from "./memory-scan.js";
 import { projectSlug } from "./paths.js";
+import { readWikiConfig } from "./wiki/config.js";
+import { importChatGptExport } from "./wiki/chatgpt.js";
 
 /**
  * The exact shape `editor.add` accepts, derived from the context rather than
@@ -68,6 +71,8 @@ export type RetrievalDeps = {
   readonly log: (message: string, detail?: unknown) => void;
   /** How many units to embed per reindex pass. Keeps one tool call bounded. */
   readonly embedBatch?: number;
+  /** Raw `opencode.jsonc` options, for the wiki corpus settings. */
+  readonly options?: unknown;
 };
 
 const DEFAULT_LIMIT = 8;
@@ -79,6 +84,19 @@ const EMBED_BUDGET = 64;
 
 const SCOPE_ALL = "all";
 const SCOPE_PROJECT = "project";
+
+/**
+ * Which corpus a search may return.
+ *
+ * Defaults to `memory` so every existing query behaves exactly as before: the
+ * document corpus is opt-in per call, and `all` is the only way to mix it with
+ * memory hits. An unrecognised value falls back to the default rather than
+ * failing the call -- a typo narrowing to nothing would look like data loss.
+ */
+function readCorpus(input: RawInput): CorpusFilter {
+  const value = str(input, "corpus");
+  return value === "wiki" || value === "all" ? value : "memory";
+}
 
 /**
  * Warn-once latch for the degraded-vector notice, per mode.
@@ -358,6 +376,7 @@ async function runSearch(
     until: str(input, "until"),
     project: projectFilter,
     currentProjectOnly: scope === SCOPE_PROJECT,
+    corpus: readCorpus(input),
   };
 
   const errors: string[] = [];
@@ -495,11 +514,15 @@ async function runReindex(
   const wantVectors = bool(input, "embed", false);
   const started = Date.now();
 
-  // The whole home is the corpus, because it is the only tree. Scanning and
-  // pruning a subset would delete the other projects' documents, and pruning
-  // must always run against the complete set of on-disk files.
+  // Each corpus is scanned and pruned on its own, and both are scanned in full:
+  // pruning a subset of a corpus would delete documents that are still on disk,
+  // and pruning must always run against the complete set for that root.
   const files = await discoverHomeFiles();
   const report = await reindexFiles({ db, files, root: "home" });
+  const wiki = readWikiConfig(deps.options);
+  const wikiFiles = wiki.enabled ? await discoverWikiFiles(wiki.dir) : [];
+  const wikiReport =
+    wikiFiles.length > 0 ? await reindexFiles({ db, files: wikiFiles, root: "wiki" }) : null;
 
   // A first reindex has nothing embedded yet, so vector mode would return
   // nothing at all. Filling the budget here means one tool call is enough to
@@ -514,6 +537,9 @@ async function runReindex(
     content: [
       `Reindexed ${report.indexed} of ${report.scanned} file(s) (${report.skipped} unchanged).`,
       report.pruned > 0 ? `Removed ${report.pruned} document(s) deleted from disk.` : "",
+      wikiReport
+        ? `Wiki corpus: ${wikiReport.indexed} of ${wikiReport.scanned} page(s) (${wikiReport.skipped} unchanged).`
+        : "",
       embedded > 0 ? `Embedded ${embedded} unit(s).` : "",
       "",
       `Index: ${stats.documents} documents, ${stats.units} searchable units, ${stats.vectors} vectors.`,
@@ -524,7 +550,7 @@ async function runReindex(
     ]
       .filter((line) => line !== "")
       .join("\n"),
-    metadata: { ...report, embedded, ...stats },
+    metadata: { ...report, wiki: wikiReport, embedded, ...stats },
   };
 }
 
@@ -537,7 +563,10 @@ const SEARCH_DESCRIPTION = [
   "Prefer it over asking: the answer is usually already here.",
   "",
   "Default scope is this project only, plus the global long-term memory. Pass",
-  "scope \"all\" to include every other project. mode \"hybrid\" (text plus",
+  "scope \"all\" to include every other project. corpus \"memory\" (default) searches",
+  "only what mem-plus recorded; corpus \"wiki\" searches the document corpus",
+  "(imported pages such as a ChatGPT export, or notes you dropped in the wiki",
+  "directory); corpus \"all\" searches both. mode \"hybrid\" (text plus",
   "embeddings) is the most useful; it needs the local inference service. Dates",
   "are YYYY-MM-DD.",
 ].join("\n");
@@ -564,9 +593,15 @@ const SEARCH_INPUT = {
     },
     kind: {
       type: "string",
-      enum: ["entry", "turn", "memory"],
+      enum: ["entry", "turn", "memory", "wiki"],
       description:
-        '"entry" is a distilled memory, "turn" is one exchange from a session transcript, "memory" is promoted long-term memory. Omit for all.',
+        '"entry" is a distilled memory, "turn" is one exchange from a session transcript, "memory" is promoted long-term memory, "wiki" is a section of a document from the wiki corpus. Omit for all.',
+    },
+    corpus: {
+      type: "string",
+      enum: ["memory", "wiki", "all"],
+      description:
+        '"memory" (default) searches what mem-plus recorded from your sessions. "wiki" searches the document corpus (imported pages, notes). "all" searches both.',
     },
     type: {
       type: "string",
@@ -677,9 +712,112 @@ export function buildMemoryTools(deps: RetrievalDeps): RetrievalTools {
     },
   };
 
-  const tools: readonly MemoryTool[] = [search, get, reindex];
+  // The wiki importer is the one tool that writes outside the memory home, so it
+  // is opt-in twice: `wiki.enabled` must not be false, and it can always be
+  // dry-run first. With the corpus disabled the tool is not registered at all --
+  // a tool that always answers "disabled" is one the model keeps calling.
+  const wiki = readWikiConfig(deps.options);
+  const wikiImport: MemoryTool = {
+    name: "memory_wiki_import",
+    description: [
+      "Import a ChatGPT data export into the wiki corpus (the searchable document",
+      "directory), one markdown page per conversation, then index them.",
+      "",
+      "Use it when the user asks to bring their ChatGPT history or exported notes",
+      "into memory. Ask for the export directory first: ChatGPT's \"Export data\"",
+      "produces a zip containing conversations.json.",
+      "",
+      "Dry-run first to see how many conversations would be written. Re-importing",
+      "the same export is safe and idempotent -- unchanged conversations are left",
+      "alone.",
+    ].join("\n"),
+    input: {
+      type: "object",
+      properties: {
+        path: {
+          type: "string",
+          description:
+            "Path to the export directory or to its conversations.json. This is a local file path, not a URL.",
+        },
+        dryRun: {
+          type: "boolean",
+          description: "Report what would be written without writing anything.",
+        },
+      },
+      required: ["path"],
+      additionalProperties: false,
+    },
+    execute: async (input) => {
+      const { content, metadata } = await runWikiImport(deps, raw(input));
+      return { content, metadata } satisfies ToolResult;
+    },
+  };
+
+  const tools: readonly MemoryTool[] = wiki.enabled
+    ? [search, get, reindex, wikiImport]
+    : [search, get, reindex];
   deps.log(`retrieval tools ready: ${tools.map((tool) => tool.name).join(", ")}`);
   return { available: true, tools };
+}
+
+async function runWikiImport(
+  deps: RetrievalDeps,
+  input: RawInput,
+): Promise<{ content: string; metadata: Record<string, unknown> }> {
+  const db = deps.db;
+  if (!db) {
+    return {
+      content: "Import is unavailable: no `node:sqlite` in this runtime.",
+      metadata: {},
+    };
+  }
+  const target = str(input, "path");
+  if (!target) {
+    return {
+      content: "A `path` is required: the ChatGPT export directory or its conversations.json.",
+      metadata: { available: true, error: "missing path" },
+    };
+  }
+  const wiki = readWikiConfig(deps.options);
+  try {
+    const report = await importChatGptExport({
+      wikiDir: wiki.dir,
+      exportPath: target,
+      dryRun: bool(input, "dryRun", false),
+    });
+    // Index what was written immediately, so the pages are searchable in this
+    // session rather than at the next startup reindex.
+    let indexed = 0;
+    if (!report.dryRun && report.written > 0) {
+      const files = await discoverWikiFiles(wiki.dir);
+      const reindex = await reindexFiles({ db, files, root: "wiki" });
+      indexed = reindex.indexed;
+    }
+    const lines = [
+      report.dryRun
+        ? `Would import ${report.conversations} conversation(s) from ${report.exportPath} into ${wiki.dir}.`
+        : `Imported ${report.written} of ${report.conversations} conversation(s) from ${report.exportPath}.`,
+      !report.dryRun && report.unchanged > 0
+        ? `${report.unchanged} unchanged (already imported).`
+        : "",
+      report.skipped > 0 ? `${report.skipped} could not be written.` : "",
+      indexed > 0
+        ? `Indexed ${indexed} new page(s); search them with memory_search {"corpus": "wiki"}.`
+        : "",
+      report.dryRun
+        ? "Nothing was written. Repeat without dryRun to import."
+        : "Search them with memory_search and corpus \"wiki\" (or \"all\").",
+    ];
+    return {
+      content: lines.filter((line) => line !== "").join("\n"),
+      metadata: { ...report, indexed },
+    };
+  } catch (error) {
+    return {
+      content: `Import failed: ${error instanceof Error ? error.message : String(error)}`,
+      metadata: { available: true, error: "import failed" },
+    };
+  }
 }
 
 /** Narrow an unvalidated tool input to the string-keyed object the handlers read. */

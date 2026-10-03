@@ -37,12 +37,29 @@ export type GpuPreference = "auto" | "cuda" | "vulkan";
 /** Which model produces capture summaries. `opencode` routes to `ctx.generate.text`. */
 export type ContentBackend = "local" | "opencode";
 
+/**
+ * An OpenCode model reference: the metered model that produces capture summaries
+ * when `model.content` is `"opencode"`. Optional on purpose -- leaving it unset
+ * keeps OpenCode's own model choice, which is the behavior without this option.
+ *
+ * Field names match `@opencode/client`'s `ModelRef` (`providerID` + `id`) so it
+ * can be handed to `ctx.generate.text` without reshaping. Users still write the
+ * familiar `"providerID/modelID"` string in `opencode.jsonc`; see `readHostedModel`.
+ */
+export type HostedModelRef = { readonly providerID: string; readonly id: string };
+
 export type ModelConfig = {
   /**
    * `"opencode"` sends extraction to `ctx.generate.text` on purpose, by explicit
    * configuration. This is an opt-in, not a failure mode.
    */
   readonly contentBackend: ContentBackend;
+  /**
+   * Which OpenCode model `ctx.generate.text` should use. `undefined` = OpenCode's
+   * default choice. Only reachable through `contentBackend: "opencode"` or an
+   * enabled `allowHostedFallback`.
+   */
+  readonly hostedModel?: HostedModelRef;
   /**
    * Whether an *unavailable local service* may be covered by the user's paid
    * OpenCode model. Defaults to `false`: with it off, a local failure skips the
@@ -55,6 +72,14 @@ export type ModelConfig = {
   readonly modelDir: string;
   readonly contentModelPath: string;
   readonly embedModelPath: string;
+  /** `model.embed: false` = fts-only, the openclaw `provider: "none"` mode. */
+  readonly embedEnabled: boolean;
+  /**
+   * Whether the user named an embedding file. An explicit path that is missing
+   * is a broken configuration (reported); an absent default is just "no vectors
+   * here", which degrades silently.
+   */
+  readonly embedPathExplicit: boolean;
   /** KV-cache size for the extraction session. The capture prompt is bounded at 128 KB. */
   readonly contextSize: number;
   readonly maxNewTokens: number;
@@ -160,6 +185,29 @@ function readLogLevel(value: unknown): ModelConfig["logLevel"] {
   return "warn";
 }
 
+/**
+ * `model.hostedModel` as the string users actually type in `opencode.jsonc`
+ * (`"providerID/modelID"`), or as the object form `{ providerID, modelID }`.
+ * Split on the first slash only: model ids carry slashes themselves
+ * (`openrouter/anthropic/claude-sonnet-4`). A malformed value yields
+ * `undefined` -- i.e. OpenCode's default choice, never a thrown config error.
+ */
+function readHostedModel(value: unknown): HostedModelRef | undefined {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    const slash = trimmed.indexOf("/");
+    if (slash <= 0 || slash === trimmed.length - 1) return undefined;
+    return { providerID: trimmed.slice(0, slash), id: trimmed.slice(slash + 1) };
+  }
+  if (typeof value === "object" && value !== null) {
+    const ref = value as Record<string, unknown>;
+    const providerID = readString(ref["providerID"]);
+    const id = readString(ref["modelID"]) ?? readString(ref["id"]);
+    if (providerID && id) return { providerID, id };
+  }
+  return undefined;
+}
+
 function readGpuLayers(value: unknown): number | "auto" {
   if (value === "auto") return "auto";
   if (typeof value === "number" && Number.isFinite(value)) {
@@ -168,12 +216,49 @@ function readGpuLayers(value: unknown): number | "auto" {
   return "auto";
 }
 
-/** GGUF files that are not where the config says they should be. */
+/**
+ * Embedding requirement, ported from openclaw's
+ * `MemoryEmbeddingProviderRequirement` (extensions/memory-core/src/memory/
+ * manager-provider-lifecycle.ts): the two model slots fail independently, and a
+ * missing embedding model degrades search to keyword-only instead of taking the
+ * whole memory subsystem down with it.
+ *
+ * - `"required"`: the user pointed at a specific embedding model and it is not
+ *   there -- report it, do not silently search worse than asked.
+ * - `"optional"`: no explicit choice, or the model is simply absent (the common
+ *   case: a text-only install). Vector search is off, everything else works.
+ * - `"fts-only"`: `model.embed: false` -- embeddings were turned off on purpose.
+ */
+export type EmbedRequirementMode = "required" | "optional" | "fts-only";
+
+export type EmbedAvailability = {
+  readonly mode: EmbedRequirementMode;
+  readonly missingPath?: string;
+};
+
+/**
+ * Decide how the embedding slot behaves, openclaw-style: an explicit path is a
+ * requirement, everything else is optional.
+ */
+export function resolveEmbedAvailability(config: ModelConfig): EmbedAvailability {
+  if (!config.embedEnabled) return { mode: "fts-only" };
+  if (existsSync(config.embedModelPath)) return { mode: "optional" };
+  return config.embedPathExplicit
+    ? { mode: "required", missingPath: config.embedModelPath }
+    : { mode: "optional", missingPath: config.embedModelPath };
+}
+
+/** GGUF files that are not where the config says they should be (both slots). */
 export function missingModelPaths(config: ModelConfig): string[] {
   const missing: string[] = [];
   if (!existsSync(config.contentModelPath)) missing.push(config.contentModelPath);
   if (!existsSync(config.embedModelPath)) missing.push(config.embedModelPath);
   return missing;
+}
+
+/** Only the extraction slot: extraction cannot run without it. */
+export function missingContentPaths(config: ModelConfig): string[] {
+  return existsSync(config.contentModelPath) ? [] : [config.contentModelPath];
 }
 
 /** Permissive read: `ctx.options` is untyped JSON supplied by opencode.json(c). */
@@ -192,12 +277,15 @@ export function readModelConfig(options: unknown): ModelConfig {
 
   return {
     contentBackend,
+    hostedModel: readHostedModel(nested["hostedModel"]),
     allowHostedFallback: readBoolean(nested["allowHostedFallback"]) ?? false,
     gpu: readGpu(nested["gpu"] ?? root["gpu"]),
     modelDir,
     contentModelPath:
       readString(nested["contentPath"]) ?? path.join(modelDir, "Qwen3.5-4B-Q4_K_M.gguf"),
     embedModelPath: readString(nested["embedPath"]) ?? path.join(modelDir, "bge-m3-FP16.gguf"),
+    embedEnabled: nested["embed"] !== false,
+    embedPathExplicit: readString(nested["embedPath"]) !== undefined,
     contextSize: readNumber(nested["contextSize"], 16_384, 512, 262_144),
     maxNewTokens: readNumber(nested["maxNewTokens"], 512, 32, 8_192),
     threads: readNumber(nested["threads"], 0, 0, 128),

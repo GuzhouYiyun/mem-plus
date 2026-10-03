@@ -97,6 +97,36 @@ export async function discoverHomeFiles(): Promise<DiscoveredFile[]> {
   return found;
 }
 
+/**
+ * Every markdown file in the document corpus (the wiki directory).
+ *
+ * The same walk as the memory home, different root: recursive `.md`, dot
+ * directories skipped (which is also what keeps an Obsidian `.obsidian` folder
+ * out of the index). Wiki pages carry no project identity -- they are not a
+ * record of work in some repository, so they get the global `""` and stay
+ * reachable from a project-scoped search.
+ */
+export async function discoverWikiFiles(dir: string): Promise<DiscoveredFile[]> {
+  const files: string[] = [];
+  await walk(dir, files);
+  const found: DiscoveredFile[] = [];
+  for (const file of files) {
+    try {
+      const info = await stat(file);
+      found.push({
+        file,
+        root: "wiki",
+        project: "",
+        bytes: info.size,
+        mtime: Math.trunc(info.mtimeMs),
+      });
+    } catch {
+      // Raced with a delete.
+    }
+  }
+  return found;
+}
+
 export type ReindexReport = {
   readonly scanned: number;
   readonly indexed: number;

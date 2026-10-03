@@ -43,7 +43,8 @@ import {
   hostedComplete,
 } from "./capture-deps.js";
 import { createStorageOpenKeyedStore } from "./kv.js";
-import { missingModelPaths, readModelConfig, readServiceConfig } from "./model/config.js";
+import { missingContentPaths, readModelConfig, readServiceConfig, resolveEmbedAvailability } from "./model/config.js";
+import { readWikiConfig } from "./wiki/config.js";
 import { createServiceClient, type MemPlusService } from "./model/client.js";
 import { createLogger } from "./log.js";
 import { indexPath, openIndex } from "./memory-index.js";
@@ -122,16 +123,32 @@ export default Plugin.define({
     // record pending so it is retried once the service is back.
     const modelConfig = readModelConfig(ctx.options);
     const serviceConfig = readServiceConfig(ctx.options);
-    const missing = missingModelPaths(modelConfig);
+    const wikiConfig = readWikiConfig(ctx.options);
+    // openclaw treats the two model slots independently
+    // (manager-provider-lifecycle.ts): extraction needs the content model, and
+    // only extraction. A missing embedding model degrades search to
+    // keyword-only -- it must not take extraction down with it.
+    const missingContent = missingContentPaths(modelConfig);
+    const embedAvailability = resolveEmbedAvailability(modelConfig);
+    const vectorsUsable = embedAvailability.mode !== "fts-only" && !embedAvailability.missingPath;
     const allowHosted = modelConfig.allowHostedFallback;
+    const hostedLabel = modelConfig.hostedModel
+      ? `${modelConfig.hostedModel.providerID}/${modelConfig.hostedModel.id}`
+      : "opencode default";
     let service: MemPlusService | null = null;
     if (modelConfig.contentBackend === "opencode") {
       // Explicit configuration, not a failure mode.
-      log('extraction model = opencode (options.model.content = "opencode") -- metered, by request');
-    } else if (missing.length > 0) {
-      for (const file of missing) log(`  missing ${file} -- see README "本地模型"`);
+      log(
+        'extraction model = opencode (options.model.content = "opencode") -- metered, by request ' +
+          `(model = ${hostedLabel})`,
+      );
+    } else if (missingContent.length > 0) {
+      for (const file of missingContent) log(`  missing ${file} -- see README "本地模型"`);
       if (allowHosted) {
-        log("extraction model = opencode (fallback: GGUF not found, model.allowHostedFallback = true)");
+        log(
+          "extraction model = opencode (fallback: GGUF not found, model.allowHostedFallback = true) " +
+            `(model = ${hostedLabel})`,
+        );
       } else {
         log(
           "extraction DISABLED (GGUF not found; snapshots still written). " +
@@ -145,6 +162,26 @@ export default Plugin.define({
         `extraction model = local gguf via ${serviceConfig.host}:${serviceConfig.port} ` +
           `(gpu priority ${modelConfig.gpu}, idle ${serviceConfig.idleMinutes} min)`,
       );
+    }
+
+    // Vector search degrades on its own: openclaw's `optional` embed requirement
+    // ("Semantic memory recall is degraded..."), not a subsystem failure. The
+    // retrieval tools take a null service as "vector modes disabled", so text
+    // search keeps working and `hybrid` / `vector` report themselves unavailable.
+    if (embedAvailability.mode === "fts-only") {
+      log("vector search off (model.embed = false) -- text search only");
+    } else if (embedAvailability.missingPath) {
+      if (embedAvailability.mode === "required") {
+        log(
+          `  missing ${embedAvailability.missingPath} (model.embedPath) -- vector search stays off; ` +
+            "fix the path or remove the option to fall back silently",
+        );
+      } else {
+        log(
+          `  no embedding model at ${embedAvailability.missingPath} -- vector search off, ` +
+            "text search unaffected",
+        );
+      }
     }
 
     const localService = service;
@@ -173,15 +210,15 @@ export default Plugin.define({
                     "(model.allowHostedFallback = true -- metered)",
                   error,
                 );
-                return await hostedComplete(ctx)({ systemPrompt, prompt });
+                return await hostedComplete(ctx, modelConfig.hostedModel)({ systemPrompt, prompt });
               }
             }
           : modelConfig.contentBackend === "opencode"
             // Explicit opt-in, so this one is not a fallback.
-            ? hostedComplete(ctx)
+            ? hostedComplete(ctx, modelConfig.hostedModel)
             : disabledComplete(
-                missing.length > 0
-                  ? `GGUF not found: ${missing.join(", ")}`
+                missingContent.length > 0
+                  ? `GGUF not found: ${missingContent.join(", ")}`
                   : "no local service and no hosted opt-in",
               ),
       ),
@@ -200,10 +237,18 @@ export default Plugin.define({
     const index = openIndex();
     if (index) {
       log(`index ${indexPath()}`);
+      log(
+        wikiConfig.enabled
+          ? `wiki corpus ${wikiConfig.dir} (search it with memory_search corpus "wiki")`
+          : "wiki corpus disabled (options.wiki.enabled = false)",
+      );
       const retrieval = buildMemoryTools({
         db: index,
         workspaceDir,
-        service: localService,
+        // Null service = vector modes off (see the note above); extraction above
+        // keeps its own reference either way.
+        service: vectorsUsable ? localService : null,
+        options: ctx.options,
         log,
       });
       if (retrieval.available) {

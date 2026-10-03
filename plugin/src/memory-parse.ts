@@ -33,6 +33,22 @@ const MIDDLE_DOT = "\\u00b7";
 import { chunkMarkdown } from "openclaw/plugin-sdk/memory-core-host-engine-indexing";
 import { enforceEmbeddingMaxInputTokens } from "openclaw/plugin-sdk/memory-core-host-engine-indexing";
 import { estimateStringChars } from "../../packages/normalization-core/src/cjk-chars.js";
+import { extractFrontmatterBlock } from "../../packages/markdown-core/src/frontmatter.js";
+import YAML from "yaml";
+
+/**
+ * Which corpus a document belongs to.
+ *
+ * `home` is the memory home (`workspace/`) and carries everything the plugin
+ * writes: capture diaries, session snapshots, promoted long-term memory. `wiki`
+ * is the document corpus (`wiki/`, default `~/.config/opencode/mem-plus/wiki`)
+ * imported or dropped in by the user. Both live in one index and one set of
+ * tools; the root is what keeps them separable in search.
+ *
+ * Defined here rather than in memory-index.ts because the reader needs it, and
+ * the index imports this module.
+ */
+export type IndexRoot = "home" | "wiki";
 
 // THE `m` FLAG IS LOAD-BEARING
 //   These patterns are used two ways: against a single line by `splitOn`, and
@@ -67,7 +83,7 @@ const SESSION_MARKER = /<!--\s*mem-plus-session:([A-Za-z0-9_-]+)\s*-->/;
 
 export type MemoryUnit = {
   /** Which reader produced this unit. Recorded so search can filter by it. */
-  readonly kind: "entry" | "turn" | "memory";
+  readonly kind: "entry" | "turn" | "memory" | "wiki";
   /** Epoch ms from the heading, when it carries one. `null` for long-term memory. */
   readonly ts: number | null;
   /** `YYYY-MM-DD`, derived from `ts` so filters never re-parse a timestamp. */
@@ -84,7 +100,7 @@ export type MemoryUnit = {
 };
 
 export type ParsedDocument = {
-  readonly kind: "entry-day" | "snapshot" | "memory";
+  readonly kind: "entry-day" | "snapshot" | "memory" | "wiki";
   readonly title: string;
   readonly units: readonly MemoryUnit[];
 };
@@ -345,15 +361,92 @@ function parseLongTerm(text: string, fallbackTitle: string): ParsedDocument {
 }
 
 /**
+ * Read one wiki page (a document under the wiki corpus directory).
+ *
+ * Ported in spirit from openclaw's `extensions/memory-wiki`, which compiles a
+ * document vault into its memory store; here a page is an ordinary markdown file
+ * with optional YAML frontmatter, and sections are the units. A page carries no
+ * timestamps -- it is reference material, not a record of something that
+ * happened -- so `ts` / `day` stay null and date filters never match it.
+ *
+ * Frontmatter is metadata rather than prose: `title` names the document,
+ * `labels` become tags (so `memory_search`'s `tag` filter reaches imported
+ * pages), and `sourceType` becomes the entry type. The block itself is dropped:
+ * indexing YAML keys as searchable text would let a query match `status: draft`
+ * on every single imported page.
+ */
+function parseWiki(text: string, fallbackTitle: string): ParsedDocument {
+  const extracted = extractFrontmatterBlock(text);
+  const body = extracted?.body ?? text;
+  const meta = readFrontmatter(extracted?.block);
+  const title =
+    typeof meta["title"] === "string" && meta["title"].trim().length > 0
+      ? meta["title"].trim()
+      : (/^#\s+(.+)$/m.exec(body)?.[1]?.trim() ?? fallbackTitle);
+  const tags = Array.isArray(meta["labels"])
+    ? meta["labels"].filter((label): label is string => typeof label === "string" && label.length > 0)
+    : typeof meta["tags"] === "string"
+      ? meta["tags"].split(",").map((tag) => tag.trim()).filter(Boolean)
+      : [];
+  const entryType = typeof meta["sourceType"] === "string" ? meta["sourceType"] : null;
+
+  const { matches } = splitOn(body, /^##\s+(.+)$/);
+  const sectionUnits = matches.map(({ match, body: sectionBody }) => {
+    const flat = flatten(sectionBody);
+    return {
+      kind: "wiki" as const,
+      ts: null,
+      day: null,
+      entryType,
+      tags,
+      marker: null,
+      heading: (match[1] ?? "section").trim(),
+      text: flat,
+    };
+  });
+
+  if (sectionUnits.length > 0) return { kind: "wiki", title, units: sectionUnits };
+
+  const flat = flatten(body);
+  return {
+    kind: "wiki",
+    title,
+    units:
+      flat.length === 0
+        ? []
+        : [{ kind: "wiki", ts: null, day: null, entryType, tags, marker: null, heading: firstLine(flat, title), text: flat }],
+  };
+}
+
+/** Parse a frontmatter block, tolerating anything that is not a YAML mapping. */
+function readFrontmatter(block: string | undefined): Record<string, unknown> {
+  if (!block) return {};
+  try {
+    const parsed: unknown = YAML.parse(block);
+    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : {};
+  } catch {
+    // Malformed YAML in a user-authored page is not a reason to skip the page.
+    return {};
+  }
+}
+
+/**
  * Pick a reader from the file's *content* rather than its name.
  *
  * Name-based dispatch looks tidier and breaks on the first user who renames a
  * memory file or points the plugin at a symlinked tree. The marker comments are
  * written by this plugin's own writers, so they are the more reliable signal;
  * the filename is only the fallback for a file with nothing recognisable.
+ *
+ * `root` decides the corpus, because a wiki page is ordinary markdown that the
+ * content probes cannot distinguish from a long-term memory file: the same text
+ * under `wiki/` is reference material and under `workspace/` it is memory.
  */
-export function parseMemoryDocument(file: string, text: string): ParsedDocument {
+export function parseMemoryDocument(file: string, text: string, root: IndexRoot = "home"): ParsedDocument {
   const base = file.replace(/\\/g, "/").split("/").pop() ?? file;
+  if (root === "wiki") return withChunking(parseWiki(text, base));
 
   if (SESSION_MARKER.test(text)) return withChunking(parseSnapshot(text, base));
   if (ENTRY_HEADING.test(text)) return withChunking(parseEntryDay(text, base));

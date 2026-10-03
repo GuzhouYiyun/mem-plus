@@ -77,6 +77,18 @@ export function dreamingMarker(): string {
 }
 
 /**
+ * The document corpus -- openclaw's `memory-wiki` vault, in mem-plus's layout.
+ *
+ * Everything the plugin writes lives under the memory home; this is the one tree
+ * the *user* owns: markdown pages dropped in here (an Obsidian vault, notes,
+ * exported documents) are indexed as the `wiki` corpus and stay readable without
+ * the plugin. The ChatGPT importer writes its pages under `sources/`.
+ */
+export function wikiDir(): string {
+  return path.join(stateRoot(), "wiki");
+}
+
+/**
  * `~/.config/opencode/mem-plus` -- the memory home, the shared index and the
  * plugin's own log.
  */

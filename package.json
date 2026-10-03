@@ -55,7 +55,6 @@
   "files": [
     "LICENSE",
     "README.md",
-    "README_en.md",
     "bootstrap.ts",
     "cli-root-options.mjs",
     "extensions/memory-core/src/capture/constants.ts",

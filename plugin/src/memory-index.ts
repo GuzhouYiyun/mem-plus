@@ -31,7 +31,7 @@ import {
   selectHybridSearchResults,
 } from "../../extensions/memory-core/src/memory/hybrid.js";
 import { stateRoot } from "./paths.js";
-import { parseMemoryDocument, type MemoryUnit, type ParsedDocument } from "./memory-parse.js";
+import { parseMemoryDocument, type IndexRoot, type MemoryUnit, type ParsedDocument } from "./memory-parse.js";
 
 /** `~/.config/opencode/mem-plus/index.db`. */
 export function indexPath(): string {
@@ -39,14 +39,19 @@ export function indexPath(): string {
 }
 
 /**
- * The one searchable tree. There is exactly one -- the memory home -- so the
- * value exists for schema stability, not for choosing between two.
+ * The searchable corpora. Defined by the reader (memory-parse.ts) and re-exported
+ * here, because the index is what stores the distinction and everything that
+ * indexes or prunes already imports `IndexRoot` from this module.
  */
-export type IndexRoot = "home";
+export type { IndexRoot } from "./memory-parse.js";
 
 export type SearchMode = "text" | "vector" | "hybrid";
 
+/** Which corpora a search may return. `memory` is the default so existing queries are unchanged. */
+export type CorpusFilter = "memory" | "wiki" | "all";
+
 export type SearchFilters = {
+  readonly corpus?: CorpusFilter;
   readonly project?: string;
   readonly kind?: MemoryUnit["kind"];
   readonly entryType?: string;
@@ -62,6 +67,7 @@ export type SearchHit = {
   readonly score: number;
   readonly project: string;
   readonly path: string;
+  readonly root: IndexRoot;
   readonly documentKind: string;
   readonly day: string | null;
   readonly entryType: string | null;
@@ -215,12 +221,11 @@ function contentHash(text: string): string {
 /**
  * Which root owns a given content when two files hold identical bytes.
  *
- * With a single tree the comparison is always equal, which degrades to
- * "the earlier-indexed document keeps its units and the byte-identical
- * later one is recorded without them" -- a safety net against an accidental
- * duplicate file, not a layout feature.
+ * `home` outranks `wiki`: a byte-identical document in the wiki corpus never
+ * shadows the memory home's copy, because a memory that also exists as an
+ * imported page should keep the memory's identity and units.
  */
-const ROOT_PRECEDENCE: Record<IndexRoot, number> = { home: 0 };
+const ROOT_PRECEDENCE: Record<IndexRoot, number> = { home: 0, wiki: 1 };
 
 /** Insert or replace one document and its units. */
 export function indexDocument(params: {
@@ -233,7 +238,7 @@ export function indexDocument(params: {
   mtime: number;
 }): DocumentIndex {
   const { db, file, root, project, text, bytes, mtime } = params;
-  const parsed: ParsedDocument = parseMemoryDocument(file, text);
+  const parsed: ParsedDocument = parseMemoryDocument(file, text, root);
   const hash = contentHash(text);
 
   // Which document, if any, already holds these exact bytes. Excluding this
@@ -395,7 +400,7 @@ export function indexAppendedTail(params: {
   mtime: number;
 }): number {
   const { db, file, root, project, text, bytes, mtime } = params;
-  const parsed = parseMemoryDocument(file, text);
+  const parsed = parseMemoryDocument(file, text, root);
   const hash = contentHash(text);
   const doc = db.prepare("SELECT id FROM documents WHERE path = ?").get(file) as
     | { id: number }
@@ -508,6 +513,12 @@ function filtersSql(filters: SearchFilters, currentProject?: string): FilterSql 
   const parts: string[] = [];
   const params: SQLInputValue[] = [];
 
+  // Corpus first and unconditionally: it is the one filter that decides which
+  // half of the corpus a query may see at all, so it must not be skipped by the
+  // project branch below.
+  if (filters.corpus === "memory") parts.push("d.root = 'home'");
+  else if (filters.corpus === "wiki") parts.push("d.root = 'wiki'");
+
   if (filters.currentProjectOnly) {
     if (currentProject) {
       // Home-root documents (the global MEMORY.md) carry the empty project,
@@ -554,6 +565,7 @@ const HIT_COLUMNS = `
   u.id AS unitId,
   d.project AS project,
   d.path    AS path,
+  d.root    AS root,
   d.kind    AS documentKind,
   u.day     AS day,
   u.ts      AS ts,
@@ -628,6 +640,7 @@ function rowToHit(row: Record<string, unknown>): SearchHit {
     score: Number(row["rank"] ?? 0),
     project: String(row["project"] ?? ""),
     path: String(row["path"] ?? ""),
+    root: String(row["root"] ?? "home") as IndexRoot,
     documentKind: String(row["documentKind"] ?? ""),
     day: (row["day"] as string | null) ?? null,
     ts: (row["ts"] as number | null) ?? null,
