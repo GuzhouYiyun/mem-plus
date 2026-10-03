@@ -53,6 +53,8 @@ OpenCode 本身不具备记忆能力：会话中获取的信息（修改过的�
 
 ## 快速开始
 
+两种装法：**克隆**（第 1–6 步，本文默认），或 **npm 安装**（见 [方式 B](#方式-bnpm-安装免-clone)）。npm 方式只带运行时闭包（约 4.2 MB），省去 116 MB 源码下载，适合只使用插件的用户。
+
 ### 1. 克隆到 OpenCode 插件目录
 
 将 mem-plus 克隆到 OpenCode 的全局插件目录 `~/.config/opencode/plugins/`，与其他插件统一管理：
@@ -160,6 +162,36 @@ memory_reindex  {"embed": true}
 
 - 该命令扫描记忆家全部文件并重建索引，幂等，可重复执行。
 - `embed: true` 由嵌入模型为各内容块计算向量，启用 `hybrid` / `vector` 语义检索；仅需全文检索时直接执行 `memory_reindex` 即可。
+
+### 方式 B：npm 安装（免 clone）
+
+不用克隆源码的话，直接装 Release 里的 npm 包即可。安装包只有运行时闭包（约 4.2 MB），依赖由 npm 自动安装；两个 GGUF 模型仍需另行下载（见 [模型](#模型)）。
+
+从本页的 **Releases** 下载最新的 `mem-plus-<版本>.tgz`，然后：
+
+```bash
+npm i <下载到本地的 mem-plus-0.1.0.tgz 路径>
+```
+
+安装产物位于 `node_modules/mem-plus/`。OpenCode 的自动发现只扫全局插件目录的直接子目录，装在 `node_modules/` 里的包需要改走注册路线（第 3 步的对象形式）：
+
+```jsonc
+{
+  "plugins": [
+    {
+      "package": "C:/path/to/node_modules/mem-plus",
+      "options": {}
+    }
+  ]
+}
+```
+
+注意：
+
+- 入口是安装目录的 `index.ts`（根 `package.json` 的 `main`/`exports` 已声明），不要写成内层目录。
+- 记忆家、索引、日志仍在 `~/.config/opencode/mem-plus/`，与安装方式无关。
+- npm 安装目录没有 `models/` 时，插件自动取 `~/.config/opencode/mem-plus/models/`；也可以用 `model.dir` 指定别的位置。
+- 重启与验证同第 5 步。没有 `models/` 时抽取保持禁用、快照照常，见 [故障排除](#故障排除)。
 
 ## 日常使用
 

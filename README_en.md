@@ -51,6 +51,8 @@ OpenCode itself retains no memory: information gained within a session (files mo
 
 ## Getting Started
 
+Two installation routes are available: **clone** (steps 1–6 below, the default in this document) or **npm install** (see [Option B](#option-b-npm-install-no-clone)). The npm route ships only the runtime closure (~4.2 MB) and avoids the ~116 MB source checkout, and suits users who only run the plugin.
+
 ### 1. Clone into the OpenCode plugins directory
 
 Clone mem-plus into OpenCode's global plugins directory `~/.config/opencode/plugins/` so it is managed alongside your other plugins:
@@ -158,6 +160,36 @@ memory_reindex  {"embed": true}
 
 - Scans every file in the memory home and rebuilds the index. Idempotent; safe to repeat.
 - `embed: true` computes a vector for each chunk via the embedding model, enabling `hybrid` / `vector` semantic search. For full-text search only, run `memory_reindex` without options.
+
+### Option B: npm install (no clone)
+
+If you prefer not to clone the source, use the npm package from Releases. The package carries only the runtime closure (~4.2 MB); dependencies are installed by npm automatically. The two GGUF models still need a separate download (see [Model](#model)).
+
+Download the latest `mem-plus-<version>.tgz` from the **Releases** page, then:
+
+```bash
+npm i <path-to-the-downloaded-mem-plus-0.1.0.tgz>
+```
+
+The package lands in `node_modules/mem-plus/`. OpenCode auto-discovery only scans direct children of the global plugins directory, so a package inside `node_modules/` needs explicit registration (the object form from step 3):
+
+```jsonc
+{
+  "plugins": [
+    {
+      "package": "C:/path/to/node_modules/mem-plus",
+      "options": {}
+    }
+  ]
+}
+```
+
+Notes:
+
+- The entry is the package's `index.ts` (declared in its root `package.json` `main`/`exports`), not an inner directory.
+- Memory home, index, and log still live in `~/.config/opencode/mem-plus/`, regardless of how the plugin was installed.
+- When the installed `node_modules/mem-plus/` has no `models/` directory, the plugin falls back to `~/.config/opencode/mem-plus/models/`; or point `model.dir` at a directory of your choice.
+- Restart and verification are the same as step 5; without `models/`, extraction stays disabled while snapshots keep writing — see [Troubleshooting](#troubleshooting).
 
 ## Day-to-day usage
 
