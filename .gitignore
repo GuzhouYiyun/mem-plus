@@ -12,6 +12,14 @@ node_modules/
 # so they must not be committed.
 memory/
 MEMORY.md
+DREAMS.md
+# Workspace bootstrap files the plugin reads/injects into the prompt;
+# never ship them from a repo used as a workspace.
+AGENTS.md
+SOUL.md
+IDENTITY.md
+USER.md
+BOOTSTRAP.md
 
 # Real conversation data used as a retrieval test set. Personal, and specific to
 # this machine's history rather than to the project.
