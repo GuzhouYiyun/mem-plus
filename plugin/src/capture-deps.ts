@@ -4,8 +4,10 @@
 // to know OpenCode exists. `pipeline.ts` calls `loadTurn` and `complete`; everything
 // else (claiming, retrying, rendering, appending) stays in the ported module.
 import fs from "node:fs/promises";
+import path from "node:path";
 import { CAPTURE_LATEST_MEMORY_CHARS, CAPTURE_MAX_TOOL_INPUT_LENGTH } from "../../extensions/memory-core/src/capture/constants.js";
-import { dailyMemoryFile, memoryFile } from "./paths.js";
+import { appendCaptureEntry } from "../../extensions/memory-core/src/capture/write.js";
+import { dailyMemoryFile, homeProjectMemoryDir, memoryFile } from "./paths.js";
 import { asSessionMessage, type PluginContext, type SessionContentPart, type SessionMessageView } from "./opencode.js";
 import type {
   CaptureDependencies,
@@ -153,10 +155,23 @@ export function createCaptureDependencies(
 
     complete,
 
+    /**
+     * The daily file is written into the memory home, not the project:
+     * `<home>/memory/<record's project slug>/<day>.md`. The record's
+     * `workspaceDir` is the landing-zone key -- the project the prompt came
+     * from -- so a capture processed late still lands under the right project.
+     */
+    writeEntry: async ({ record, day, rendered, entryKey }) => {
+      const base = record.workspaceDir || ctx.location.directory;
+      const target = path.join(homeProjectMemoryDir(base), `${day}.md`);
+      await appendCaptureEntry({ absolutePath: target, rendered, entryKey });
+    },
+
     loadLatestMemory: async (record) => {
-      const daily = await readTail(dailyMemoryFile(ctx.location.directory, record.createdAt), CAPTURE_LATEST_MEMORY_CHARS);
+      const base = record.workspaceDir || ctx.location.directory;
+      const daily = await readTail(dailyMemoryFile(base, record.createdAt), CAPTURE_LATEST_MEMORY_CHARS);
       if (daily) return daily;
-      return await readTail(memoryFile(ctx.location.directory), CAPTURE_LATEST_MEMORY_CHARS);
+      return await readTail(memoryFile(base), CAPTURE_LATEST_MEMORY_CHARS);
     },
   };
 }

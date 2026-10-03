@@ -7,13 +7,18 @@
 //      `inboxID` that makes re-delivery idempotent).
 //   2. After each turn (`session.execution.succeeded`) runs the ported capture
 //      pipeline: claim -> slice the assistant turn -> bounded markdown context ->
-//      LLM structured extraction -> filter `type="skip"` -> append
-//      `memory/YYYY-MM-DD.md`.
-//   3. Re-renders the whole session as `memory/<YYYY-MM-DD>-<slug>.md` and mirrors
-//      it into `~/.config/opencode/mem-plus/archive/<project>/`, which is the
-//      cross-project copy of every session.
-//   4. Indexes both trees into SQLite + FTS5 and exposes `memory_search`,
-//      `memory_get` and `memory_reindex`, so what was written can be found again.
+//      LLM structured extraction -> filter `type="skip"` -> append the daily
+//      file in the memory home -- openclaw's own workspace, default
+//      `~/.openclaw/workspace/memory/<project-slug>/YYYY-MM-DD.md`. The project
+//      directory is never written.
+//   3. Re-renders the whole session as `<...>/memory/<project-slug>/<YYYY-MM-DD>-
+//      <slug>.md` in the same home, and a once-a-day global dreaming sweep
+//      distills the home into `MEMORY.md` and `DREAMS.md` at its root --
+//      openclaw's single-agent-workspace model, with projects as directory
+//      labels rather than separate stores.
+//   4. Indexes the home tree into SQLite + FTS5 and exposes `memory_search`,
+//      `memory_get` and `memory_reindex`, so what was written can be found
+//      again from every project on the machine.
 //
 // WHY THE INDEX IS SEPARATE FROM THE WRITE PATH
 //   Writes land as plain markdown first and the index is a projection of those
@@ -23,6 +28,7 @@
 //   direction also holds -- a broken or deleted index is repaired by
 //   `memory_reindex`, and no memory is ever lost with it.
 import path from "node:path";
+import { readFile } from "node:fs/promises";
 import { Plugin } from "@opencode/plugin";
 import {
   createMemoryCapture,
@@ -44,7 +50,11 @@ import { createLogger } from "./log.js";
 import { indexPath, openIndex } from "./memory-index.js";
 import { indexWrittenFile, indexTail } from "./memory-scan.js";
 import { buildMemoryTools } from "./memory-tools.js";
-import { archiveProjectSlug, logFile, projectSlug, stateRoot } from "./paths.js";
+import { dreamingMarker, homeProjectMemoryDir, homeProjectSlug, logFile, memoryHomeDir } from "./paths.js";
+import {
+  DEFAULT_MEMORY_FILENAME,
+  WORKSPACE_BOOTSTRAP_FILENAMES,
+} from "../../src/agents/workspace-bootstrap-policy.js";
 import {
   eventBelongsToWorkspace,
   isExecutionEnded,
@@ -210,9 +220,6 @@ export default Plugin.define({
       );
     }
 
-    // Identity used for the index and for the default "this project" filter.
-    const slug = projectSlug(workspaceDir);
-
     /**
      * Index a file the write path just replaced in full.
      *
@@ -221,28 +228,17 @@ export default Plugin.define({
      * index is derived data, and a failed update is repaired by
      * `memory_reindex` without the user needing to know it happened.
      */
-    const indexReplaced = async (
-      files: readonly string[],
-      root: "project" | "archive",
-    ): Promise<void> => {
+    const indexReplaced = async (files: readonly string[]): Promise<void> => {
       if (!index) return;
       for (const file of files) {
-        // Project identity comes from the file's own location, not from this
-        // window's `slug`. The index is shared by every project on the machine, so
-        // labelling an archive copy with whichever project happened to capture it
-        // made one document carry a different identity in every window that touched
-        // it, and a `project` filter then silently dropped it. The archive layout
-        // already encodes the owning project as a directory name; the project copy
-        // sits under this workspace, which is the one case where they agree.
-        //
-        // Two documents of one snapshot -- the project copy and its archive mirror --
-        // now carry the same identity and the same content hash, which is what lets
-        // the mirror suppression in indexDocument treat the second as a copy.
+        // Project identity comes from where the file sits under the home, not
+        // from this window: the index is shared by every project on the machine,
+        // so a document's project must be readable from its own path.
         const written = await indexWrittenFile({
           db: index,
           file,
-          root,
-          project: root === "archive" ? archiveProjectSlug(file) ?? slug : slug,
+          root: "home",
+          project: homeProjectSlug(file),
           log,
         });
         if (written > 0) log(`indexed ${written} unit(s) from ${file}`);
@@ -257,9 +253,14 @@ export default Plugin.define({
      * the same idempotency openclaw's write path uses -- so a re-run costs one
      * read and inserts nothing.
      */
-    const indexAppended = async (file: string, root: "project" | "archive"): Promise<void> => {
+    const indexAppended = async (file: string): Promise<void> => {
       if (!index) return;
-      const written = await indexTail({ db: index, file, root, project: slug });
+      const written = await indexTail({
+        db: index,
+        file,
+        root: "home",
+        project: homeProjectSlug(file),
+      });
       if (written > 0) log(`indexed ${written} new unit(s) from ${file}`);
     };
 
@@ -267,14 +268,32 @@ export default Plugin.define({
     const settleTimers = new Map<string, ReturnType<typeof setTimeout>>();
     let closed = false;
 
-    // Inject workspace bootstrap files (AGENTS.md, MEMORY.md, SOUL.md, etc.) into
-    // the session system prompt -- the same mechanism openclaw uses for its
-    // embedded agents. The files are read fresh on every model request because the
-    // workspace owner may edit them between turns; openclaw's own bootstrap cache
-    // refreshes per turn for the same reason.
+    // Inject bootstrap files into the session system prompt -- the same mechanism
+    // openclaw uses for its embedded agents. The files are read fresh on every
+    // model request because the owner may edit them between turns.
+    //
+    // The five instruction files are the user's own and stay in the project;
+    // MEMORY.md is openclaw's home file, so it is read from the memory home and
+    // appended last (canonical order). It only exists once dreaming has
+    // promoted something into it, so absence is the normal state and is not a
+    // `[MISSING]` worth showing the model.
+    const instructionFileNames = WORKSPACE_BOOTSTRAP_FILENAMES.filter(
+      (name) => name !== DEFAULT_MEMORY_FILENAME,
+    );
     await ctx.session.hook("context", async (event) => {
       try {
-        const files = await loadWorkspaceBootstrapFiles(workspaceDir);
+        const files = await loadWorkspaceBootstrapFiles(workspaceDir, instructionFileNames);
+        const homeMemoryPath = path.join(memoryHomeDir(), DEFAULT_MEMORY_FILENAME);
+        try {
+          files.push({
+            name: DEFAULT_MEMORY_FILENAME,
+            path: homeMemoryPath,
+            content: await readFile(homeMemoryPath, "utf8"),
+            missing: false,
+          });
+        } catch {
+          // No global long-term memory yet; nothing to inject.
+        }
         const contextFiles = buildBootstrapContextFiles(files);
         const preparedFiles = prepareContextFilesForPrompt(contextFiles);
         const lines = buildProjectContextSection(preparedFiles);
@@ -289,15 +308,21 @@ export default Plugin.define({
     /**
      * Daily dreaming sweep, gated to once per calendar day. openclaw schedules this
      * with its own cron daemon (`dreaming-cron.ts`); mem-plus has no cron host, so
-     * the equivalent trigger is the first settled turn of a new day. The marker
-     * file is the only state -- a day boundary means "run once", and writing the
-     * marker before waiting means a crash mid-sweep re-runs at most once.
+     * the equivalent trigger is the first settled turn of a new day.
+     *
+     * The sweep is global: it runs over the whole memory home (every project's
+     * captures, the one MEMORY.md and DREAMS.md), exactly openclaw's one-agent
+     * one-home model. So the marker is one for the whole home -- any window that
+     * settles first on a new day runs the sweep, and the marker keeps the other
+     * windows out. The marker file is the only state: a day boundary means "run
+     * once", and writing the marker before waiting means a crash mid-sweep
+     * re-runs at most once.
      */
     const maybeRunDreaming = async (): Promise<void> => {
       try {
         const now = Date.now();
         const today = formatMemoryDreamingDay(now);
-        const marker = path.join(stateRoot(), "dreaming", `${slug}.last-day`);
+        const marker = dreamingMarker();
         let last = "";
         try {
           const fs = await import("node:fs/promises");
@@ -330,7 +355,7 @@ export default Plugin.define({
             : undefined;
         const result = await runDreamingSweepPhases({
           agentId: "main",
-          workspaceDir,
+          workspaceDir: memoryHomeDir(),
           pluginConfig: {
             dreaming: {
               enabled: true,
@@ -346,7 +371,7 @@ export default Plugin.define({
           nowMs: now,
         } as unknown as Parameters<typeof runDreamingSweepPhases>[0]);
         log(
-          `dreaming sweep done: light+rem+deep over ${workspaceDir} ` +
+          `dreaming sweep done: light+rem+deep over ${memoryHomeDir()} ` +
             `(degradedPhases=${result?.degradedPhases ?? 0}, pendingNarratives=${result?.pendingNarratives ?? 0})`,
         );
       } catch (error) {
@@ -362,11 +387,10 @@ export default Plugin.define({
       try {
         snapshot = await writeSessionSnapshot(ctx, sessionID);
         if (snapshot) {
-          log(`snapshot ${snapshot.bytes} B -> ${snapshot.projectPath}`);
-          // Both copies, so a cross-project search finds the session under the
-          // project that had it as well as under the global archive.
-          await indexReplaced([snapshot.projectPath], "project");
-          await indexReplaced([snapshot.archivePath], "archive");
+          log(`snapshot ${snapshot.bytes} B -> ${snapshot.path}`);
+          // One file, in the session's own project slice of the home: a
+          // cross-project search finds it under the project that had it.
+          await indexReplaced([snapshot.path]);
         }
       } catch (error) {
         log("snapshot failed", error);
@@ -398,12 +422,15 @@ export default Plugin.define({
         for (const outcome of outcomes) {
           if (outcome.kind === "captured") {
             log(`captured ${outcome.promptId} -> ${outcome.relativePath ?? "?"}`);
-            // `relativePath` is openclaw's own workspace-relative key, so the
-            // file it names is the one to index -- not today's daily file, which
-            // is a guess that would silently miss a capture written for another
-            // day by a change in the pipeline's clock handling.
+            // `relativePath` is the pipeline's own key -- `memory/<day>.md`,
+            // relative to the project it came from. The file itself lives in
+            // this window's slice of the home, so index that path; using the
+            // key rather than today's date keeps a capture written for
+            // another day (a pipeline clock change) indexing the file it
+            // actually wrote.
             if (outcome.relativePath) {
-              await indexAppended(path.join(workspaceDir, outcome.relativePath), "project");
+              const day = path.basename(outcome.relativePath, ".md");
+              await indexAppended(path.join(homeProjectMemoryDir(workspaceDir), `${day}.md`));
             }
           } else if (outcome.kind === "failed" || outcome.kind === "exhausted") {
             log(`${outcome.kind} ${outcome.promptId}`, outcome.error);
@@ -435,10 +462,10 @@ export default Plugin.define({
     };
 
     // `ctx.event.subscribe()` is machine-wide, not this window's. Without the
-    // workspace check below, a session opened in another project is captured here:
-    // its snapshot is written under this workspace, and its memory is attributed to
-    // this project. That is how every project's memories came to be filed under one
-    // slug -- the index is shared, the stream is not per-workspace.
+    // workspace check below, a session that ended in another project settles
+    // here: its captures would land in this window's slice of the home and
+    // carry this project's label. The index is shared, the event stream is not
+    // per-workspace -- only the window that ran the turn may settle it.
     const onEvent = async (raw: unknown): Promise<void> => {
       const event = unwrapEvent(raw);
       const canonicalType = normaliseEventType(event?.type);

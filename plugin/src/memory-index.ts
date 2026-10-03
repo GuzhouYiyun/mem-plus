@@ -9,10 +9,11 @@
 //
 // SHARED ACROSS PROJECTS
 //   The database lives in the config directory, not the workspace, so one index
-//   covers every project on the machine plus the global archive. That is what
-//   makes "what did I do about postgres last month, anywhere" a single query.
-//   Project identity is carried on `documents.project` for filtering, and
-//   `documents.path` is unique because absolute paths are.
+//   covers the whole memory home -- every project's captures and snapshots plus
+//   the global long-term memory. That is what makes "what did I do about postgres
+//   last month, anywhere" a single query. Project identity is carried on
+//   `documents.project` for filtering, and `documents.path` is unique because
+//   absolute paths are.
 //
 // FTS5 IS A PLAIN TABLE, NOT CONTENTLESS
 //   `content=''` would store nothing and break `snippet()`, which is the whole
@@ -37,7 +38,11 @@ export function indexPath(): string {
   return path.join(stateRoot(), "index.db");
 }
 
-export type IndexRoot = "project" | "archive";
+/**
+ * The one searchable tree. There is exactly one -- the memory home -- so the
+ * value exists for schema stability, not for choosing between two.
+ */
+export type IndexRoot = "home";
 
 export type SearchMode = "text" | "vector" | "hybrid";
 
@@ -172,15 +177,10 @@ export function openIndexAt(file: string): DatabaseSync | null {
 }
 
 /**
- * Columns added after the first released schema. Each entry is applied at most
- * once, guarded by a column probe.
- *
- * `documents.content` is the sha256 of the file text. It is the mirror key: the
- * write path copies every snapshot to both the project and the archive, so the
- * same bytes land in two files and used to be indexed twice. Hashing the
- * document rather than the unit is what makes suppression safe -- two sessions
- * that both contain the word "ok" are not duplicates, but two files with
- * identical bytes are the same document by definition.
+ * `documents.content` is the sha256 of the file text. It was added as a mirror
+ * key when snapshots lived in two places; the layout has since collapsed to one
+ * tree, but the hash is still written because the column is part of the
+ * persisted schema and `unchangedDocuments` treats a NULL one as "needs a look".
  */
 const MIGRATIONS: readonly (readonly [string, string, string])[] = [
   ["documents", "content", "content TEXT"],
@@ -215,11 +215,12 @@ function contentHash(text: string): string {
 /**
  * Which root owns a given content when two files hold identical bytes.
  *
- * The project copy wins because it is the one the user's tooling and the model
- * see; the archive is the backup. Ranking `root` as a number keeps the decision
- * a single comparison rather than a special case per caller.
+ * With a single tree the comparison is always equal, which degrades to
+ * "the earlier-indexed document keeps its units and the byte-identical
+ * later one is recorded without them" -- a safety net against an accidental
+ * duplicate file, not a layout feature.
  */
-const ROOT_PRECEDENCE: Record<IndexRoot, number> = { project: 0, archive: 1 };
+const ROOT_PRECEDENCE: Record<IndexRoot, number> = { home: 0 };
 
 /** Insert or replace one document and its units. */
 export function indexDocument(params: {
@@ -507,10 +508,17 @@ function filtersSql(filters: SearchFilters, currentProject?: string): FilterSql 
   const parts: string[] = [];
   const params: SQLInputValue[] = [];
 
-  const project = filters.currentProjectOnly ? currentProject : filters.project;
-  if (project) {
+  if (filters.currentProjectOnly) {
+    if (currentProject) {
+      // Home-root documents (the global MEMORY.md) carry the empty project,
+      // and global long-term memory stays reachable from a project-scoped
+      // search.
+      parts.push("(d.project = ? OR d.project = '')");
+      params.push(currentProject);
+    }
+  } else if (filters.project) {
     parts.push("d.project = ?");
-    params.push(project);
+    params.push(filters.project);
   }
   if (filters.kind) {
     parts.push("u.kind = ?");

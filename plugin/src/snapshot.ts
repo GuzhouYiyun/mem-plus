@@ -1,4 +1,4 @@
-// Session snapshots: `memory/<YYYY-MM-DD>-<slug>.md`.
+// Session snapshots: `<memory home>/memory/<project>/<YYYY-MM-DD>-<slug>.md`.
 //
 // WHAT THIS IS
 //   openclaw has a `session-memory` hook that renders a session into a standalone
@@ -10,6 +10,10 @@
 //   plugin crash can never leave a half-written history behind (the next turn
 //   rewrites it).
 //
+//   The file lands in the memory home under the session's own project slug, so
+//   one home holds every project's conversations and the project directory is
+//   never written.
+//
 // WHAT IT IS NOT
 //   This is not the extraction path. Captured summaries go to
 //   `memory/YYYY-MM-DD.md` via the capture pipeline; this file keeps the words
@@ -17,8 +21,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { formatMemoryDreamingDay } from "../../extensions/memory-core/src/capture/day.js";
-import { appendRegularFile } from "@openclaw/fs-safe/advanced";
-import { archiveProjectDir, memoryDir, projectSlug, titleSlug } from "./paths.js";
+import { memoryDir, titleSlug } from "./paths.js";
 import {
   asSessionMessage,
   type PluginContext,
@@ -173,14 +176,15 @@ async function writeFileAtomicish(filePath: string, content: string): Promise<vo
 }
 
 export type SnapshotResult = {
-  projectPath: string;
-  archivePath: string;
+  path: string;
   bytes: number;
 };
 
 /**
- * Render `sessionID` and upsert the snapshot into both the project memory dir and
- * the global archive. Returns null when the session has nothing worth keeping.
+ * Render `sessionID` and upsert the snapshot into the memory home under the
+ * session's own project: `<home>/memory/<slug>/<day>-<title>.md`. The project
+ * directory itself is never touched. Returns null when the session has nothing
+ * worth keeping.
  */
 export async function writeSessionSnapshot(
   ctx: PluginContext,
@@ -205,34 +209,8 @@ export async function writeSessionSnapshot(
   const day = formatMemoryDreamingDay(createdAt);
   const fileName = `${day}-${titleSlug(session.title, sessionID)}.md`;
 
-  const projectPath = path.join(memoryDir(workspaceDir), fileName);
-  await writeFileAtomicish(projectPath, content);
+  const target = path.join(memoryDir(workspaceDir), fileName);
+  await writeFileAtomicish(target, content);
 
-  const archivePath = path.join(archiveProjectDir(workspaceDir), fileName);
-  await writeFileAtomicish(archivePath, content);
-
-  // The archive is only useful if it stays findable; keep a per-project index of
-  // every snapshot ever written there.
-  await appendArchiveIndex(workspaceDir, fileName, session, content.length);
-
-  return { projectPath, archivePath, bytes: Buffer.byteLength(content, "utf-8") };
+  return { path: target, bytes: Buffer.byteLength(content, "utf-8") };
 }
-
-async function appendArchiveIndex(
-  workspaceDir: string,
-  fileName: string,
-  session: SessionInfoView,
-  bytes: number,
-): Promise<void> {
-  const indexPath = path.join(archiveProjectDir(workspaceDir), "..", "INDEX.md");
-  const line =
-    `- [${session.title?.trim() || fileName}](${fileName}) · \`${session.id ?? "?"}\` · ` +
-    `${iso(session.time?.created)} · ${bytes} B\n`;
-  await fs.mkdir(path.dirname(indexPath), { recursive: true });
-  // appendRegularFile keeps the archive index append-only and refuses to write
-  // through a symlinked parent, matching how openclaw appends its own memory files.
-  await appendRegularFile({ filePath: indexPath, content: line, rejectSymlinkParents: true });
-}
-
-/** Exposed for diagnostics: which project a workspace archives under. */
-export { projectSlug };

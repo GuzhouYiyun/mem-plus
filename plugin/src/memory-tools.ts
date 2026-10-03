@@ -36,12 +36,7 @@ import {
   type SearchHit,
   type SearchMode,
 } from "./memory-index.js";
-import {
-  discoverArchiveFiles,
-  discoverProjectFiles,
-  reindexFiles,
-  type DiscoveredFile,
-} from "./memory-scan.js";
+import { discoverHomeFiles, reindexFiles } from "./memory-scan.js";
 import { projectSlug } from "./paths.js";
 
 /**
@@ -84,7 +79,6 @@ const EMBED_BUDGET = 64;
 
 const SCOPE_ALL = "all";
 const SCOPE_PROJECT = "project";
-const SCOPE_ARCHIVE = "archive";
 
 /**
  * Warn-once latch for the degraded-vector notice, per mode.
@@ -397,7 +391,9 @@ async function runSearch(
         mode === "vector" ? VECTOR_ONLY_NOTICE : VECTOR_DEGRADED_NOTICE)
       : "";
 
-  const projects = new Set(hits.map((hit) => hit.project)).size;
+  // Global home documents carry the empty project; the header counts projects,
+  // not documents, so the global side is excluded from the count.
+  const projects = new Set(hits.map((hit) => hit.project).filter(Boolean)).size;
   const content = [
     renderHits(hits, mode, projects),
     // Stated explicitly, because a silently degraded search teaches the model
@@ -484,16 +480,6 @@ async function runGet(deps: RetrievalDeps, input: RawInput): Promise<{
   };
 }
 
-/** Files in scope for a reindex call. */
-async function filesInScope(
-  deps: RetrievalDeps,
-  scope: string,
-): Promise<{ project: DiscoveredFile[]; archive: DiscoveredFile[] }> {
-  const project = scope === SCOPE_ARCHIVE ? [] : await discoverProjectFiles(deps.workspaceDir);
-  const archive = scope === SCOPE_PROJECT ? [] : await discoverArchiveFiles();
-  return { project, archive };
-}
-
 async function runReindex(
   deps: RetrievalDeps,
   input: RawInput,
@@ -506,16 +492,14 @@ async function runReindex(
   if (!db) {
     return { content: "Reindexing is unavailable: no `node:sqlite` in this runtime.", metadata: {} };
   }
-  const scope = str(input, "scope") ?? SCOPE_ALL;
   const wantVectors = bool(input, "embed", false);
   const started = Date.now();
 
-  const files = await filesInScope(deps, scope);
-  const projectReport = await reindexFiles({ db, files: files.project, root: "project" });
-  const archiveReport =
-    files.archive.length > 0
-      ? await reindexFiles({ db, files: files.archive, root: "archive" })
-      : { scanned: 0, indexed: 0, skipped: 0, pruned: 0, units: 0, mirrored: 0 };
+  // The whole home is the corpus, because it is the only tree. Scanning and
+  // pruning a subset would delete the other projects' documents, and pruning
+  // must always run against the complete set of on-disk files.
+  const files = await discoverHomeFiles();
+  const report = await reindexFiles({ db, files, root: "home" });
 
   // A first reindex has nothing embedded yet, so vector mode would return
   // nothing at all. Filling the budget here means one tool call is enough to
@@ -525,24 +509,11 @@ async function runReindex(
     : 0;
 
   const stats = indexStats(db);
-  const totals = {
-    scanned: projectReport.scanned + archiveReport.scanned,
-    indexed: projectReport.indexed + archiveReport.indexed,
-    skipped: projectReport.skipped + archiveReport.skipped,
-    pruned: projectReport.pruned + archiveReport.pruned,
-    units: projectReport.units + archiveReport.units,
-    mirrored: projectReport.mirrored + archiveReport.mirrored,
-  };
 
   return {
     content: [
-      `Reindexed ${totals.indexed} of ${totals.scanned} file(s) (${totals.skipped} unchanged).`,
-      totals.pruned > 0 ? `Removed ${totals.pruned} document(s) deleted from disk.` : "",
-      // Stated rather than hidden: a non-zero count means the archive mirror was
-      // recognised and skipped, which is the intended behaviour, not lost data.
-      totals.mirrored > 0
-        ? `${totals.mirrored} file(s) were byte-identical copies of an indexed document and were indexed once.`
-        : "",
+      `Reindexed ${report.indexed} of ${report.scanned} file(s) (${report.skipped} unchanged).`,
+      report.pruned > 0 ? `Removed ${report.pruned} document(s) deleted from disk.` : "",
       embedded > 0 ? `Embedded ${embedded} unit(s).` : "",
       "",
       `Index: ${stats.documents} documents, ${stats.units} searchable units, ${stats.vectors} vectors.`,
@@ -553,7 +524,7 @@ async function runReindex(
     ]
       .filter((line) => line !== "")
       .join("\n"),
-    metadata: { scope, ...totals, embedded, ...stats },
+    metadata: { ...report, embedded, ...stats },
   };
 }
 
@@ -565,9 +536,10 @@ const SEARCH_DESCRIPTION = [
   "were given earlier, or when starting work in a repository you have touched before.",
   "Prefer it over asking: the answer is usually already here.",
   "",
-  "Default scope is this project only. Pass scope \"all\" to include every other",
-  "project and the global archive. mode \"hybrid\" (text plus embeddings) is the",
-  "most useful; it needs the local inference service. Dates are YYYY-MM-DD.",
+  "Default scope is this project only, plus the global long-term memory. Pass",
+  "scope \"all\" to include every other project. mode \"hybrid\" (text plus",
+  "embeddings) is the most useful; it needs the local inference service. Dates",
+  "are YYYY-MM-DD.",
 ].join("\n");
 
 const SEARCH_INPUT = {
@@ -580,8 +552,9 @@ const SEARCH_INPUT = {
     },
     scope: {
       type: "string",
-      enum: [SCOPE_PROJECT, SCOPE_ALL, SCOPE_ARCHIVE],
-      description: `"${SCOPE_PROJECT}" (default) is this project only. "${SCOPE_ALL}" covers every project. "${SCOPE_ARCHIVE}" is the global archive alone.`,
+      enum: [SCOPE_PROJECT, SCOPE_ALL],
+      description:
+        `"${SCOPE_PROJECT}" (default) is this project only, plus the global long-term memory. "${SCOPE_ALL}" covers every project and the global long-term memory.`,
     },
     mode: {
       type: "string",
@@ -623,11 +596,6 @@ const REINDEX_DESCRIPTION = [
 const REINDEX_INPUT = {
   type: "object",
   properties: {
-    scope: {
-      type: "string",
-      enum: [SCOPE_ALL, SCOPE_PROJECT, SCOPE_ARCHIVE],
-      description: `Default "${SCOPE_ALL}".`,
-    },
     embed: {
       type: "boolean",
       description:

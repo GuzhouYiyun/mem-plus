@@ -3,22 +3,22 @@
 // WHY SCAN RATHER THAN TRACK
 //   Every event that writes memory would have to remember to notify the index,
 //   and any one of them forgetting leaves a file invisible to search with no
-//   error anywhere -- the worst failure mode for a search tool. Scanning the two
-//   known roots is a few hundred `readdir` calls on a tree that grows by a file
-//   per day, and it is correct regardless of who wrote what. Change detection
+//   error anywhere -- the worst failure mode for a search tool. Scanning the one
+//   known root is a few hundred `readdir` calls on a tree that grows by a file
+//   a day, and it is correct regardless of who wrote what. Change detection
 //   is by size and mtime, so the common case is a stat rather than a read.
 //
-// SCOPE IS THE PROJECT TREE PLUS THE ARCHIVE
-//   Both are indexed into one database, which is what makes a cross-project
-//   question ("what did I do about the postgres migration?") a single query. The
-//   archive copy and the project copy of the same session are separate documents
-//   on purpose: they live at different paths and the project copy is the one the
-//   user edits, so if either is deleted the other still serves the search.
+// SCOPE IS THE MEMORY HOME
+//   Every project's captures and snapshots live under one home
+//   (`<state>/workspace`), so the home tree is the whole searchable corpus and
+//   one index covers every project on the machine. Project identity comes from
+//   the directory the file sits under, so a cross-project question ("what did I
+//   do about the postgres migration?") is a single query.
 import { readdir, readFile, stat } from "node:fs/promises";
 import type { Dirent } from "node:fs";
 import path from "node:path";
 import type { DatabaseSync } from "node:sqlite";
-import { archiveRoot, MEMORY_DIR_NAME, MEMORY_FILE_NAME, projectSlug } from "./paths.js";
+import { homeProjectSlug, memoryFile, MEMORY_DIR_NAME, memoryHomeDir } from "./paths.js";
 import { indexDocument, indexAppendedTail, pruneMissing, type IndexRoot } from "./memory-index.js";
 
 /** Guard against a pathological tree; a memory directory is never this large. */
@@ -58,12 +58,16 @@ async function walk(dir: string, out: string[], depth = 0): Promise<void> {
   }
 }
 
-/** Every markdown file under the workspace's memory directory, plus `MEMORY.md`. */
-export async function discoverProjectFiles(workspaceDir: string): Promise<DiscoveredFile[]> {
+/**
+ * Every markdown file in the memory home: `MEMORY.md` at the root plus the
+ * whole `memory/<project>/` tree. DREAMS.md is deliberately excluded -- it is
+ * a human review surface, not a search corpus.
+ */
+export async function discoverHomeFiles(): Promise<DiscoveredFile[]> {
+  const home = memoryHomeDir();
   const files: string[] = [];
-  const memoryDir = path.join(workspaceDir, MEMORY_DIR_NAME);
-  await walk(memoryDir, files);
-  const longTerm = path.join(workspaceDir, MEMORY_FILE_NAME);
+  await walk(path.join(home, MEMORY_DIR_NAME), files);
+  const longTerm = memoryFile("");
   try {
     await stat(longTerm);
     files.push(longTerm);
@@ -71,62 +75,23 @@ export async function discoverProjectFiles(workspaceDir: string): Promise<Discov
     // Promoted long-term memory only exists once something has been promoted.
   }
 
-  const slug = projectSlug(workspaceDir);
   const found: DiscoveredFile[] = [];
   for (const file of files) {
     try {
       const info = await stat(file);
       found.push({
         file,
-        root: "project",
+        root: "home",
         // The slug rather than the raw path: it is already a stable, readable,
         // filesystem-safe identity, and a search result is more useful naming a
-        // project than naming `C:\Users\...\repos\thing`.
-        project: slug,
+        // project than naming `C:\Users\...\repos\thing`. Home-root files carry
+        // the empty identity, which search treats as "everywhere".
+        project: homeProjectSlug(file),
         bytes: info.size,
         mtime: Math.trunc(info.mtimeMs),
       });
     } catch {
       // Raced with a delete.
-    }
-  }
-  return found;
-}
-
-/** Every project mirrored under the global archive. */
-export async function discoverArchiveFiles(): Promise<DiscoveredFile[]> {
-  const root = archiveRoot();
-  let projects: Dirent[];
-  try {
-    projects = await readdir(root, { withFileTypes: true });
-  } catch {
-    return [];
-  }
-  const found: DiscoveredFile[] = [];
-  for (const project of projects) {
-    if (!project.isDirectory()) continue;
-    const files: string[] = [];
-    await walk(path.join(root, project.name), files);
-    const indexFile = path.join(root, project.name, "INDEX.md");
-    try {
-      await stat(indexFile);
-      files.push(indexFile);
-    } catch {
-      // Not every archived project has an index yet.
-    }
-    for (const file of files) {
-      try {
-        const info = await stat(file);
-        found.push({
-          file,
-          root: "archive",
-          project: project.name,
-          bytes: info.size,
-          mtime: Math.trunc(info.mtimeMs),
-        });
-      } catch {
-        /* raced */
-      }
     }
   }
   return found;
@@ -140,8 +105,9 @@ export type ReindexReport = {
   readonly units: number;
   /**
    * Files skipped because an indexed document already holds their exact bytes.
-   * Non-zero is normal and correct: every capture writes the project copy and
-   * the archive mirror, and only one of them should be searchable.
+   * With one tree a non-zero count means a byte-identical duplicate file exists
+   * on disk; the earlier-indexed one carries the units and the later one is
+   * recorded so pruning knows about it.
    */
   readonly mirrored: number;
 };
@@ -286,6 +252,3 @@ export async function indexWrittenFile(params: {
     return 0;
   }
 }
-
-/** The project slug a workspace maps to; also the identity carried in the index. */
-export { projectSlug };
