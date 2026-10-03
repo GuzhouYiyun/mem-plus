@@ -7,6 +7,9 @@ models/
 # Installed dependencies (type-check toolchain only; see ANALYSIS.txt §7)
 node_modules/
 
+# npm pack build artifacts (regenerable via `npm pack`; never commit)
+*.tgz
+
 # Plugin runtime artifacts. The plugin writes these into whatever workspace it
 # is loaded into -- including this repository, when testing the plugin here --
 # so they must not be committed.

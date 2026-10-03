@@ -30,6 +30,7 @@
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { stateRoot } from "../paths.js";
 
 export type GpuPreference = "auto" | "cuda" | "vulkan";
 
@@ -69,13 +70,23 @@ export type ModelConfig = {
 };
 
 /**
- * `<checkout>/models` -- resolved from this file rather than from `process.cwd()`
- * so it holds no matter which project the plugin is loaded into.
+ * Where the GGUF models live.
+ *
+ * `<root>/models` when the tree ships a `models/` directory of its own (a git
+ * checkout, where the user puts the weights next to the source). An installed
+ * copy -- an npm cache dir or any read-only install -- cannot hold several
+ * GB of weights, so it falls back to the user-writable state root:
+ * `~/.config/opencode/mem-plus/models`, next to the memory home itself.
+ *
+ * Resolved from this file rather than from `process.cwd()` so it holds no
+ * matter which project the plugin is loaded into.
  */
 export function defaultModelDir(): string {
   const here = path.dirname(fileURLToPath(import.meta.url));
-  // plugin/src/model -> plugin/src -> plugin -> <checkout>
-  return path.resolve(here, "..", "..", "..", "models");
+  // plugin/src/model -> plugin/src -> plugin -> <root>
+  const inPackage = path.resolve(here, "..", "..", "..", "models");
+  if (existsSync(inPackage)) return inPackage;
+  return path.join(stateRoot(), "models");
 }
 
 /** Absolute path to the inference server's entry file, for the autostart spawn. */

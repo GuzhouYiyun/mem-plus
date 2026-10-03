@@ -1,86 +1,59 @@
-// mem-plus —— 可直接抄进 opencode.jsonc 的最小配置
+// mem-plus —— 可直接抄进 opencode.jsonc
 //
-// 用法：把下面 plugins 数组里的内容合并进你的 opencode.jsonc，
-//       把 package 的路径改成你 clone mem-plus 的实际位置。
-//
-// 想省事的话，只保留 "package" 一行就够 —— 所有选项都有默认值。
+// 用法：把 plugins 数组里的内容合并进你的 opencode.jsonc，
+//       把 package 改成你 clone mem-plus 的实际位置。
+// 只留 "package" 一行也能跑；下面 options 全是默认值，显式写出是为了标明计费立场。
 
 {
   "$schema": "https://opencode.ai/config.json",
   "plugins": [
     {
-      // 指向仓库根目录（插件入口已声明在根 package.json 的 main/exports）
+      // 指向仓库根目录（插件入口声明在根 package.json 的 main/exports）
       "package": "C:/Users/你的用户名/.config/opencode/plugins/mem-plus",
 
       "options": {
         "model": {
           // "local" = 本地 GGUF（默认）；"opencode" = 主动要求用 OpenCode 计费模型
-          //
-          // 本地推理不可用时（模型没放对、依赖没装、端口被占、服务崩了），
-          // 默认**不会**改用计费模型：快照照写，抽取推迟到服务恢复。
           "content": "local",
 
-          // 若你确实愿意在本地不可用时用计费模型顶替，改成 true。
-          // 保持 false 的话，长期服务故障不会变成计费账单。
-          "allowHostedFallback": false,
+          // 本地推理不可用时（模型没放对、依赖没装、端口被占、服务崩了）是否改用计费模型。
+          // 保持 false：快照照写，抽取推迟到服务恢复，长期故障不会变成账单。
+          "allowHostedFallback": false
 
-          // GGUF 所在目录。默认是 <仓库>/models，也可以指向别处：
+          // GGUF 目录，默认 <仓库>/models；换模型/换目录才需要打开：
           // "dir": "C:/Users/你的用户名/models",
+          // "contentPath": "…/models/Qwen3.5-4B-Q4_K_M.gguf",
+          // "embedPath": "…/models/bge-m3-FP16.gguf",
 
-          // 需要分别指定时再打开这两行
-          // "contentPath": "C:/Users/你的用户名/models/Qwen3.5-4B-Q4_K_M.gguf",
-          // "embedPath":   "C:/Users/你的用户名/models/bge-m3-FP16.gguf",
-
-          // 独显 > 核显 > CPU。默认 "auto" 就是按 cuda -> metal -> vulkan -> cpu 逐个试
-          // 可选：cuda / vulkan / cpu
-          "gpu": "auto",
-
-          // 抽取太慢时先试 "gpuLayers": "auto"（默认值），
-          // 仍然不行就临时把上面的 "content" 改成 "opencode"（会计费）
-          // "logLevel": "info"
+          // GPU：独显 > 核显，无 CPU 回退，无可用 GPU 时服务不启动。
+          // 可选 auto / cuda / vulkan；auto 依次试 cuda → metal → vulkan。
+          // "gpu": "auto",
+          // "gpuLayers": "auto",     // 分配进显存的层数
+          // "logLevel": "warn"       // silent / warn / info / debug
         },
 
         "service": {
-          // 本地推理服务端口。不是 4747 是因为 opencode-mem 占了 4747；
-          // 端口被占用时会自动顺延，最多到 4758。
+          // 起始端口；被占用时自动顺延，最多 4758（4747 留给 opencode-mem）
           "port": 4748,
 
-          // 空闲多久后服务自动退出，0 = 不回收。默认 10 分钟。
-          // 不设的话，关掉 OpenCode 之后模型还会常驻约 4 GB 内存。
+          // 空闲多久后服务自动退出，0 = 不回收
           "idleMinutes": 10,
 
-          // 服务没跑时是否由插件自动拉起。
-          // 想自己常驻服务就设 false，然后手动跑：
+          // 服务没跑时是否由插件自动拉起。想自己常驻就设 false，手动跑：
           //   cd plugin && node serve/server.mjs --port 4748 --idle-minutes 0
           "autostart": true
 
-          // 已经手动起了服务的话，直接写地址，跳过发现和自动拉起：
+          // 已经手动起了服务就直接写地址，跳过发现与自动拉起：
           // "url": "http://127.0.0.1:4748"
         }
-
-        // 检索没有可选项。索引位置固定在
-        //   ~/.config/opencode/mem-plus/index.db
-        // 所有项目共用一个，所以搜一次同时覆盖当前项目和全局档案。
-        //
-        // 插件启动时会自动把已有的记忆文件索引一遍，
-        // 三个工具 memory_search / memory_get / memory_reindex 会自动注册。
-        //
-        // 唯一需要你手动做一次的事：向量通道初始是空的，新克隆的仓库
-        // 每条记忆都要先嵌入才能语义检索。第一次跑一次：
-        //
-        //   memory_reindex  {"scope": "all", "embed": true}
-        //
-        // 之后 hybrid / vector 才有东西可搜。默认的纯文本检索不需要它。
-        //
-        // 想重建索引（比如手改过文件、或者从别的机器拷了记忆）：
-        //
-        //   memory_reindex  {"scope": "all"}
-        //
-        // 索引是可丢弃的重建产物，删掉不会有任何记忆丢失。
-        //
-        // 依赖 node:sqlite（Node 22.5+ 或 Bun）。缺了也不会崩：
-        // 快照和抽取照常，只是这三个工具不注册。
       }
     }
   ]
 }
+
+// 检索三工具 memory_search / memory_get / memory_reindex 启动时自动注册；
+// 索引固定在 ~/.config/opencode/mem-plus/index.db，所有项目共用。
+// 索引是可重建产物，删掉不丢记忆（本体是 markdown）。
+// 语义检索（mode "hybrid" / "vector"）第一次要手动补向量，每条约几秒：
+//   memory_reindex  {"embed": true}
+// 缺 node:sqlite（Node < 22.5）时三工具不注册，快照与抽取照常。
