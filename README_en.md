@@ -19,11 +19,35 @@ OpenCode itself retains no memory: information gained within a session (files mo
 - **Prompt injection** — workspace files such as `AGENTS.md` and `MEMORY.md` are injected into the system prompt before every turn, so their content is always visible to the model
 - **Persona & growth** — `SOUL.md`, `IDENTITY.md`, and `USER.md` define the agent's character, identity, and user profile, and can be edited at any time; together with long-term memory that grows day by day, the agent matures over time into the assistant you expect
 
+## Contents
+
+- [Prerequisites](#prerequisites)
+- [Getting started](#getting-started)
+  - [1. Clone into the OpenCode plugins directory](#1-clone-into-the-opencode-plugins-directory)
+  - [2. Install dependencies](#2-install-dependencies)
+  - [3. Register the plugin (not needed for the default install)](#3-register-the-plugin-not-needed-for-the-default-install)
+  - [4. Download the models](#4-download-the-models)
+  - [5. Restart OpenCode and verify](#5-restart-opencode-and-verify)
+  - [6. Index existing files (optional)](#6-index-existing-files-optional)
+- [Day-to-day usage](#day-to-day-usage)
+  - [The three retrieval tools](#the-three-retrieval-tools)
+  - [Where the data lives](#where-the-data-lives)
+  - [Inference service](#inference-service)
+- [Model](#model)
+- [Configuration](#configuration)
+  - [Model options](#model-options)
+  - [Service](#service)
+- [Dreaming](#dreaming)
+- [Prompt injection](#prompt-injection)
+- [Troubleshooting](#troubleshooting)
+- [Uninstalling](#uninstalling)
+- [License](#license)
+
 ## Prerequisites
 
 - **OpenCode V2** (`@opencode/plugin` 2.0.20 or later; V1 is not supported)
 - **Node 22.5+** (or Bun): the retrieval tools depend on `node:sqlite`. If unavailable, snapshots and extraction continue to work; only the search tools are missing. Check the version with `node -v`; upgrade first if it is below 22.5
-- **Two local GGUF models** (~3.7 GB total, see [Local models](#local-models))
+- **Two local GGUF models** (~3.7 GB total, see [Model](#model))
 
 ## Getting Started
 
@@ -98,7 +122,7 @@ Notes:
 
 - The repositories also host other quantizations; those are not part of the default configuration.
 - To use a different model, note that the two slots are not interchangeable: the extraction slot requires a completion-style (base) language model, and the embedding slot requires a model with an embedding head. To replace without touching the configuration, rename the new model to the exact file names in the table above (`Qwen3.5-4B-Q4_K_M.gguf` / `bge-m3-FP16.gguf`) and drop it into `models/`; or keep its original name and point `model.contentPath` / `model.embedPath` at the actual paths (see [Configuration](#configuration)).
-- See [Local models](#local-models).
+- See [Model](#model).
 
 ### 5. Restart OpenCode and verify
 
@@ -193,7 +217,13 @@ GPU priority: **dedicated GPU > integrated GPU > CPU**, falling back to the next
 [mem-plus] [mem-plus:serve] llama backend = vulkan (gpu) build=prebuilt
 ```
 
-## Local models
+## Model
+
+By default, mem-plus uses two local GGUF models: the extraction model `Qwen3.5-4B-Q4_K_M.gguf` and the embedding model `bge-m3-FP16.gguf`. Switching models is done through the `model.*` options in `opencode.jsonc` (full key table: [Model options](#model-options)):
+
+- Swap in local GGUF files: `model.contentPath` / `model.embedPath` (or change the whole directory with `model.dir`)
+- Use OpenCode's metered model instead: `model.content: "opencode"`
+- Whether to allow falling back to the metered model when local inference is unavailable: `model.allowHostedFallback` (default `false`, i.e. no silent fallback)
 
 When replacing the models:
 
@@ -201,6 +231,14 @@ When replacing the models:
 - **The embedding model must have an embedding head.** The default `bge-m3-FP16.gguf` satisfies this; a language model placed in the embedding slot fails on first use.
 - If only full-text search is used, the embedding model (`bge-m3`) may be omitted.
 - After swapping the embedding model, run `memory_reindex {"scope": "all", "embed": true}` to rebuild the vectors. Vectors computed by the previous model are in a different space; mixing them produces wrong hybrid / vector results.
+
+**Billing principle**: all inference in this plugin is fully local. When local inference is unavailable (missing models, missing dependencies, a busy port, a crashed service), the plugin does **not** silently fall back to a metered model:
+
+1. Snapshots keep writing (no cost incurred)
+2. Extraction is deferred; pending records are retained
+3. When the service recovers, pending extractions run automatically: on every settled turn the plugin probes the local service first and only runs extraction when it is reachable; otherwise the turn is skipped and the pending records are left intact, so the next turn after the service comes back picks them up — no manual action needed
+
+To opt into a metered fallback, set `model.allowHostedFallback: true` or `model.content: "opencode"` explicitly.
 
 ## Configuration
 
@@ -223,7 +261,7 @@ All options are optional. To pass options, use the object form in `opencode.json
 
 Full example: [`opencode.example.jsonc`](./opencode.example.jsonc).
 
-### Model
+### Model options
 
 | Key | Default | Description |
 |---|---|---|
@@ -249,16 +287,6 @@ Full example: [`opencode.example.jsonc`](./opencode.example.jsonc).
 | `service.idleMinutes` | `10` | auto-exit after this many idle minutes; `0` disables auto-exit |
 | `service.startTimeoutMs` | `30000` | maximum wait time for the service to become ready |
 | `service.url` | — | use a service already running at this URL |
-
-## No silent billing
-
-The design principle of this plugin is fully local inference. When local inference is unavailable (missing models, missing dependencies, a busy port, a crashed service), the plugin does **not** silently fall back to a metered model:
-
-1. Snapshots keep writing (no cost incurred)
-2. Extraction is deferred; pending records are retained
-3. When the service recovers, pending extractions run automatically: on every settled turn the plugin probes the local service first and only runs extraction when it is reachable; otherwise the turn is skipped and the pending records are left intact, so the next turn after the service comes back picks them up — no manual action needed
-
-To opt into a metered fallback, set `model.allowHostedFallback: true` or `model.content: "opencode"` explicitly.
 
 ## Dreaming
 
@@ -288,7 +316,7 @@ The log file is at `~/.config/opencode/mem-plus/mem-plus.log`; consult it first 
 | `extraction DISABLED (GGUF not found)` | the model is not in `models/`. Snapshot writing is unaffected |
 | `service did not become healthy ... within 30s` | the service did not start. Start it manually: `cd plugin && node serve/server.mjs --port 4748` |
 | `local service unavailable; deferring the sweep` | the service is temporarily unavailable; records are retained and retried automatically |
-| empty extraction output (`summary=0 chars`) | the extraction model is Instruct-style; see [Local models](#local-models) |
+| empty extraction output (`summary=0 chars`) | the extraction model is Instruct-style; see [Model](#model) |
 | `Index: 0 documents` | run `memory_reindex` |
 | `hybrid` / `vector` returns 0 | run `memory_reindex {"embed": true}` and wait for it to complete |
 | the `memory/` directory never appears | it is created after one full turn (settled + 2 s debounce) |

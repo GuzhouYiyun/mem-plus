@@ -21,11 +21,35 @@ OpenCode 本身不具备记忆能力：会话中获取的信息（修改过的�
 
 
 
+## 目录
+
+- [环境要求](#环境要求)
+- [快速开始](#快速开始)
+  - [1. 克隆到 OpenCode 插件目录](#1-克隆到-opencode-插件目录)
+  - [2. 安装依赖](#2-安装依赖)
+  - [3. 注册插件（默认安装无需操作）](#3-注册插件默认安装无需操作)
+  - [4. 下载模型](#4-下载模型)
+  - [5. 重启 OpenCode 并验证](#5-重启-opencode-并验证)
+  - [6. 索引已有文件（可选）](#6-索引已有文件可选)
+- [日常使用](#日常使用)
+  - [三个检索工具](#三个检索工具)
+  - [数据位置](#数据位置)
+  - [推理服务](#推理服务)
+- [模型](#模型)
+- [配置](#配置)
+  - [模型选项](#模型选项)
+  - [服务](#服务)
+- [睡眠整理](#睡眠整理)
+- [提示词注入](#提示词注入)
+- [故障排除](#故障排除)
+- [卸载](#卸载)
+- [许可证](#许可证)
+
 ## 环境要求
 
 - **OpenCode V2**（`@opencode/plugin` 2.0.20 及以上；不支持 V1）
 - **Node 22.5+**（或 Bun）：检索工具依赖 `node:sqlite`。若缺失，快照与抽取功能正常运行，仅检索工具不可用。`node -v` 查看版本，低于 22.5 请先升级
-- **两个本地 GGUF 模型**（共约 3.7 GB，见 [本地模型](#本地模型)）
+- **两个本地 GGUF 模型**（共约 3.7 GB，见 [模型](#模型)）
 
 ## 快速开始
 
@@ -100,7 +124,7 @@ npm install                  # 插件目录
 
 - 仓库中还托管有其他量化版本，它们不属于默认配置。
 - 如想使用其他模型，两个槽位的类型不可互换：抽取槽位须为 completion 风格（base）语言模型，嵌入槽位须为带 embedding 头的模型。不经配置直接替换时，须将新模型重命名为与上表文件名相同（`Qwen3.5-4B-Q4_K_M.gguf` / `bge-m3-FP16.gguf`）后放入 `models/`；或保留原文件名，用 `model.contentPath` / `model.embedPath` 指向实际路径（见[配置](#配置)）。
-- 详见 [本地模型](#本地模型)。
+- 详见 [模型](#模型)。
 
 ### 5. 重启 OpenCode 并验证
 
@@ -195,7 +219,13 @@ GPU 优先级：**独显 > 核显 > CPU**，某级不可用时自动回退至下
 [mem-plus] [mem-plus:serve] llama backend = vulkan (gpu) build=prebuilt
 ```
 
-## 本地模型
+## 模型
+
+mem-plus 默认使用两个本地 GGUF 模型：抽取模型 `Qwen3.5-4B-Q4_K_M.gguf` 与嵌入模型 `bge-m3-FP16.gguf`。切换模型通过 `opencode.jsonc` 中的 `model.*` 选项完成（完整键值表见 [模型选项](#模型选项)）：
+
+- 换本地 GGUF 文件：`model.contentPath` / `model.embedPath`（或 `model.dir` 整体换目录）
+- 改用 OpenCode 计费模型：`model.content: "opencode"`
+- 本地不可用时是否允许回退至计费模型：`model.allowHostedFallback`（默认 `false`，即不静默回退）
 
 替换模型时须注意：
 
@@ -203,6 +233,14 @@ GPU 优先级：**独显 > 核显 > CPU**，某级不可用时自动回退至下
 - **嵌入模型须带 embedding 头**。默认的 `bge-m3-FP16.gguf` 满足此要求；嵌入槽位放入语言模型会在首次使用时报错。
 - 若仅使用文本检索，可省略嵌入模型（`bge-m3`）。
 - 更换嵌入模型后须执行 `memory_reindex {"scope": "all", "embed": true}` 重建向量。旧向量由旧模型计算，空间混杂会导致 hybrid / vector 检索结果错误。
+
+**计费原则**：本插件推理全程本地化。本地推理不可用时（模型缺失、依赖未安装、端口被占用、服务异常），插件**不会**静默回退至计费模型：
+
+1. 快照继续写入（不产生费用）
+2. 抽取暂缓执行，待处理记录保留
+3. 服务恢复后自动补做抽取：每个完成 turn 时插件先探测本地服务，可用才执行抽取；不可用时本轮跳过，待处理记录原样保留——服务恢复后的下一个 turn 自动补做，无需手动操作
+
+如需启用计费模型回退，请显式设置 `model.allowHostedFallback: true` 或 `model.content: "opencode"`。
 
 ## 配置
 
@@ -225,7 +263,7 @@ GPU 优先级：**独显 > 核显 > CPU**，某级不可用时自动回退至下
 
 完整示例见 [`opencode.example.jsonc`](./opencode.example.jsonc)。
 
-### 模型
+### 模型选项
 
 | 键 | 默认值 | 说明 |
 |---|---|---|
@@ -251,16 +289,6 @@ GPU 优先级：**独显 > 核显 > CPU**，某级不可用时自动回退至下
 | `service.idleMinutes` | `10` | 空闲多少分钟后自动退出；`0` 表示不退出 |
 | `service.startTimeoutMs` | `30000` | 等待服务就绪的最长时间 |
 | `service.url` | — | 使用已在该地址运行的服务 |
-
-## 无静默计费
-
-本插件的设计原则为推理全程本地化。本地推理不可用时（模型缺失、依赖未安装、端口被占用、服务异常），插件**不会**静默回退至计费模型：
-
-1. 快照继续写入（不产生费用）
-2. 抽取暂缓执行，待处理记录保留
-3. 服务恢复后自动补做抽取：每个完成 turn 时插件先探测本地服务，可用才执行抽取；不可用时本轮跳过，待处理记录原样保留——服务恢复后的下一个 turn 自动补做，无需手动操作
-
-如需启用计费模型回退，请显式设置 `model.allowHostedFallback: true` 或 `model.content: "opencode"`。
 
 ## 睡眠整理
 
@@ -290,7 +318,7 @@ GPU 优先级：**独显 > 核显 > CPU**，某级不可用时自动回退至下
 | `extraction DISABLED (GGUF not found)` | 模型未放置于 `models/` 目录。快照写入不受影响 |
 | `service did not become healthy ... within 30s` | 服务未启动。手动执行：`cd plugin && node serve/server.mjs --port 4748` |
 | `local service unavailable; deferring the sweep` | 服务暂不可用；记录保留，恢复后自动重试 |
-| 抽取输出为空（`summary=0 chars`） | 抽取模型为 Instruct 风格，参见 [本地模型](#本地模型) |
+| 抽取输出为空（`summary=0 chars`） | 抽取模型为 Instruct 风格，参见 [模型](#模型) |
 | `Index: 0 documents` | 执行 `memory_reindex` |
 | `hybrid` / `vector` 返回 0 条 | 执行 `memory_reindex {"embed": true}` 并等待完成 |
 | `memory/` 目录不出现 | 需完成一个完整 turn（结算 + 2 秒防抖）后生成 |
