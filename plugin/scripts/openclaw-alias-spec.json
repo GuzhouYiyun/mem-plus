@@ -11,6 +11,7 @@
       "/agent-id": "packages/normalization-core/src/agent-id.ts",
       "/home-dir": "packages/normalization-core/src/home-dir.ts",
       "/error-coercion": "packages/normalization-core/src/error-coercion.ts",
+      "/mountinfo-path": "packages/normalization-core/src/mountinfo-path.ts",
       "/cjk-chars": "packages/normalization-core/src/cjk-chars.ts",
       "/node-crypto": "packages/normalization-core/src/node-crypto.ts",
       "/boolean-coercion": "packages/normalization-core/src/boolean-coercion.ts",
@@ -18,12 +19,11 @@
       "/grapheme": "packages/normalization-core/src/grapheme.ts",
       "/promise-like": "packages/normalization-core/src/promise-like.ts",
       "/result": "packages/normalization-core/src/result.ts",
+      "/json-schema": "packages/normalization-core/src/json-schema.ts",
       "/stable-stringify": "packages/normalization-core/src/stable-stringify.ts",
       "/agent-run-terminal-outcome": "packages/normalization-core/src/agent-run-terminal-outcome.ts",
       "/expect": "packages/normalization-core/src/expect.ts",
-      "/json-coercion": "packages/normalization-core/src/json-coercion.ts",
-      "/mountinfo-path": "packages/normalization-core/src/mountinfo-path.ts",
-      "/json-schema": "packages/normalization-core/src/json-schema.ts"
+      "/json-coercion": "packages/normalization-core/src/json-coercion.ts"
     },
     "@openclaw/session-url-contract": {
       ".": "packages/session-url-contract/src/index.ts",

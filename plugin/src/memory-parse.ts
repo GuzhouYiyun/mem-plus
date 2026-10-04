@@ -390,7 +390,19 @@ function parseWiki(text: string, fallbackTitle: string): ParsedDocument {
       : [];
   const entryType = typeof meta["sourceType"] === "string" ? meta["sourceType"] : null;
 
-  const { matches } = splitOn(body, /^##\s+(.+)$/);
+  const { head, matches } = splitOn(body, /^##\s+(.+)$/);
+
+  // Content before the first `##` is its own unit rather than being dropped.
+  // A wiki page typically opens with a title and an intro paragraph, and that
+  // intro is often the answer to the question being asked ("the connection
+  // string is in the vault, port 6543"); indexing only the sections below would
+  // lose it. The H1 itself is metadata -- `title` already carries it.
+  const headText = flatten(head.replace(/^[^\S\n]*#[^\S\n]+.*$/m, "")).trim();
+  const headUnit: MemoryUnit[] =
+    headText.length > 0
+      ? [{ kind: "wiki", ts: null, day: null, entryType, tags, marker: null, heading: title, text: headText }]
+      : [];
+
   const sectionUnits = matches.map(({ match, body: sectionBody }) => {
     const flat = flatten(sectionBody);
     return {
@@ -405,7 +417,8 @@ function parseWiki(text: string, fallbackTitle: string): ParsedDocument {
     };
   });
 
-  if (sectionUnits.length > 0) return { kind: "wiki", title, units: sectionUnits };
+  const units = [...headUnit, ...sectionUnits];
+  if (units.length > 0) return { kind: "wiki", title, units };
 
   const flat = flatten(body);
   return {

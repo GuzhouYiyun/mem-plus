@@ -211,9 +211,40 @@ function extractSpecs(code) {
         continue;
       }
       if (code.startsWith("type", j) && !isIdent(code[j + 4] ?? "")) {
-        // `import type ...` -- erased, never force-loads the target.
-        found.push({ spec: null, kind: "type", at: i });
-        i = findFrom(j + 4) ? findFrom(j + 4).end + 1 : j + 4;
+        // `import type ...` -- erased at runtime, but the tarball ships .ts
+        // sources with no build step, so the target is still needed for the
+        // types to resolve in an install. Follow it (kind "type" keeps it
+        // distinguishable); skipping it shipped modules that import a file the
+        // package did not contain.
+        let k = j + 4;
+        while (k < n && (code[k] === " " || code[k] === "\t")) k++;
+        if (code[k] === "{") {
+          // Consume the named clause first. findFrom stops at the first
+          // newline, so a multi-line binding list would otherwise look like a
+          // statement with no `from` clause and the spec would be lost.
+          let depth = 0;
+          let m = k;
+          while (m < n) {
+            const d = code[m];
+            if (d === '"') {
+              m = pastString(m);
+              continue;
+            }
+            if (d === "{") depth++;
+            else if (d === "}") {
+              depth--;
+              if (depth === 0) {
+                m++;
+                break;
+              }
+            }
+            m++;
+          }
+          k = m;
+        }
+        const f = findFrom(k);
+        found.push({ spec: f ? f.spec : null, kind: "type", at: i });
+        i = f ? f.end + 1 : k;
         continue;
       }
       if (code[j] === '"' || code[j] === "'") {
@@ -303,7 +334,9 @@ function extractSpecs(code) {
             k++;
           }
           const f = findFrom(k);
-          // type-only: do NOT follow
+          // type-only re-export: same reasoning as `import type` -- the file
+          // has to ship for the exported types to resolve.
+          if (f) found.push({ spec: f.spec, kind: "type" });
           i = f ? f.end + 1 : k;
         } else {
           i = j;
@@ -361,7 +394,7 @@ function extractSpecs(code) {
 
     i++;
   }
-  return found.filter((x) => x.spec !== null && x.kind !== "type");
+  return found.filter((x) => x.spec !== null);
 }
 
 // Returns [{ spec, kind }] for one file.
@@ -430,6 +463,28 @@ function tsconfigTarget(spec) {
 const externalName = (spec) =>
   spec.startsWith("@") ? spec.split("/").slice(0, 2).join("/") : spec.split("/")[0];
 
+/**
+ * `openclaw/*` and `@openclaw/*` specifiers resolve at runtime through the
+ * generated alias packages (link-openclaw-alias.mjs writes one re-export file
+ * per module), not through tsconfig paths alone. When the paths table has no
+ * entry, read the alias file and follow its `export * from "<repo path>"`
+ * target -- otherwise the spec was dropped without a record and its target
+ * never entered the closure, so the tarball shipped code importing a file it
+ * did not contain.
+ */
+function aliasTarget(spec) {
+  const parts = spec.split("/").filter(Boolean);
+  const base = path.join(ROOT, "node_modules", ...parts);
+  for (const c of [base + ".ts", base + ".mts", path.join(base, "index.ts")]) {
+    if (!existsSync(c) || !statSync(c).isFile()) continue;
+    const m = readFileSync(c, "utf8").match(/export\s+\*\s+from\s+["']([^"']+)["']/);
+    if (!m) continue;
+    const abs = path.resolve(path.dirname(c), m[1]);
+    if (existsSync(abs) && statSync(abs).isFile() && abs.startsWith(ROOT + path.sep)) return abs;
+  }
+  return null;
+}
+
 const closure = new Set(entries.filter(existsSync));
 const missingEntries = entries.filter((e) => !existsSync(e));
 if (missingEntries.length) unresolvable.push({ file: "-", spec: "", why: "missing entry " + missingEntries.map(relPosix).join(",") });
@@ -452,6 +507,20 @@ while (queue.length) {
   if (file.endsWith(".d.ts")) continue;
   for (const { spec, kind } of scan(file)) {
     if (spec.startsWith("node:") || spec.startsWith("bun:") || spec.startsWith("data:") || spec.startsWith("file:")) continue;
+
+    // Type-only edges (`import type`, `export type ... from`). These are erased
+    // at runtime, but the tarball ships .ts sources with no build step, so a
+    // missing target means the shipped code references a file the package does
+    // not contain. They are followed for our own code (plugin/, extensions/):
+    // that is what the type-check gates read, and what a consumer resolving
+    // mem-plus types needs. Vendored openclaw files are transpiled, never
+    // type-checked, and chasing their type graph drags in entire unused
+    // packages (agent-core, gateway-protocol, gateway-client, acp-core), so
+    // their type-only edges stay out of the closure.
+    if (kind === "type") {
+      const owner = relPosix(file);
+      if (!owner.startsWith("plugin/") && !owner.startsWith("extensions/")) continue;
+    }
 
     // Dynamic imports: do NOT extend the static closure (they are lazy, and in
     // the mem-plus use case most openclaw provider/cli paths behind them never
@@ -482,7 +551,7 @@ while (queue.length) {
         target = null;
       }
     } else if (spec.startsWith("@openclaw/") || spec.startsWith("openclaw/")) {
-      target = tsconfigTarget(spec);
+      target = tsconfigTarget(spec) ?? aliasTarget(spec);
       if (target) {
         // Record the @openclaw/* ones for the postinstall stub generator.
         // The unscoped `openclaw/*` alias is already handled by the existing
@@ -491,7 +560,15 @@ while (queue.length) {
           const raw = relPosix(target);
           const pkgDir = raw.split("/").slice(0, 2).join("/");
           const pkgJson = path.join(ROOT, pkgDir, "package.json");
-          const pkgName = existsSync(pkgJson) ? JSON.parse(readFileSync(pkgJson, "utf8")).name : null;
+          // The workspace manifests are not shipped in the tarball, so in a
+          // trimmed checkout they are absent. Fall back to the directory name:
+          // every internal package is `@openclaw/<dir>` (packages/ai ->
+          // @openclaw/ai), which is exactly what the manifest declares. Guessing
+          // wrong here would silently empty the stub list that postinstall
+          // generates the packages from, so the name is never left unresolved.
+          const pkgName = existsSync(pkgJson)
+            ? JSON.parse(readFileSync(pkgJson, "utf8")).name
+            : `@openclaw/${path.basename(pkgDir)}`;
           if (pkgName) {
             if (!internalSpecs.has(pkgName)) internalSpecs.set(pkgName, new Set());
             internalSpecs.get(pkgName).add(spec);
@@ -621,9 +698,24 @@ for (const pkg of externals) {
 // --- files allowlist -------------------------------------------------------------
 // Fixed files (only those that exist), whole plugin dirs, and every closure
 // file outside of plugin/.
-const fixedFiles = ["index.ts", "bootstrap.ts", "LICENSE", "README.md", "README_en.md", "plugin/package.json", "plugin/scripts/openclaw-alias-spec.json"].filter((f) =>
-  existsSync(path.join(ROOT, f)),
-);
+//
+// `tsconfig.json` is not optional decoration: bun (the runtime OpenCode loads
+// plugins with) resolves `openclaw/plugin-sdk/*` and `@openclaw/*` through
+// tsconfig `paths`, and npm >= 11 does not run a dependency's postinstall by
+// default, so the generated `node_modules/openclaw` alias and the `@openclaw/*`
+// stubs may be absent in a real install. Shipping the paths mapping is what
+// makes the tarball load without them; without this file a fresh
+// `npm i mem-plus-*.tgz` dies on the first `@openclaw/...` import.
+const fixedFiles = [
+  "index.ts",
+  "bootstrap.ts",
+  "tsconfig.json",
+  "LICENSE",
+  "README.md",
+  "README_en.md",
+  "plugin/package.json",
+  "plugin/scripts/openclaw-alias-spec.json",
+].filter((f) => existsSync(path.join(ROOT, f)));
 const pluginDirs = ["plugin/src", "plugin/serve", "plugin/scripts"];
 const closureFiles = [...closure]
   .filter((f) => !f.startsWith(path.join(ROOT, "plugin") + path.sep))
@@ -664,6 +756,34 @@ console.log(`externals: ${[...externals].sort().join(", ") || "(none)"}`);
 console.log(`dynamic-only externals (NOT deps): ${[...dynamicExternals].sort().join(", ") || "(none)"}`);
 if (dynamicTargets.size) console.log(`dynamic-only targets (${dynamicTargets.size}, not shipped): ${[...dynamicTargets].slice(0, 12).join(", ")}`);
 console.log(`internal stubs: ${Object.keys(aliasSpec).sort().join(", ") || "(none)"}`);
+/** Key-order-independent comparison of two stub maps. */
+function sortObjectDeep(value) {
+  if (Array.isArray(value)) return value.map(sortObjectDeep);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.keys(value)
+        .sort()
+        .map((k) => [k, sortObjectDeep(value[k])]),
+    );
+  }
+  return value;
+}
+// The stub list is what postinstall materializes the `@openclaw/*` packages
+// from, so a mismatch here is as breaking as a wrong `files` list: `--check` has
+// to see it, or a `--write` run in a checkout whose workspace manifests are gone
+// would quietly empty it.
+const specRel = "plugin/scripts/openclaw-alias-spec.json";
+const specOnDisk = existsSync(path.join(ROOT, specRel))
+  ? (JSON.parse(readFileSync(path.join(ROOT, specRel), "utf8")).stubs ?? {})
+  : null;
+const specDrift = specOnDisk !== null && JSON.stringify(sortObjectDeep(specOnDisk)) !== JSON.stringify(sortObjectDeep(aliasSpec));
+if (specDrift) {
+  const onDiskNames = Object.keys(specOnDisk).sort();
+  const computedNames = Object.keys(aliasSpec).sort();
+  console.log(
+    `alias spec drift: on disk [${onDiskNames.join(", ") || "none"}] vs computed [${computedNames.join(", ") || "none"}]`,
+  );
+}
 const sourceless = [...externals].filter((e) => !externalSources.has(e));
 if (sourceless.length) console.log(`externals with NO recorded source (scanner noise?): ${sourceless.join(", ")}`);
 if (trace) {
@@ -703,7 +823,8 @@ if (writeMode) {
   console.log("wrote package.json (files+dependencies) and plugin/scripts/openclaw-alias-spec.json");
 }
 
-const drift = missingFiles.length || extraFiles.length || missingDeps.length || unresolvable.length;
+const drift =
+  missingFiles.length || extraFiles.length || missingDeps.length || unresolvable.length || specDrift;
 if (checkMode) {
   if (drift) {
     console.error("DRIFT detected (run: node scripts/audit-npm-pack.mjs --write)");
