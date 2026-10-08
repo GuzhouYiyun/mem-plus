@@ -1,5 +1,5 @@
 import type { MouseEvent } from "react";
-import { FileCog, FileText, Moon, Sparkles, Sun, X } from "lucide-react";
+import { FileCog, FileJson, FileText, Moon, Sparkles, Sun, X } from "lucide-react";
 import { GithubIcon } from "$lib/components/icons/GithubIcon";
 import { Button } from "$lib/components/ui/button";
 import { Separator } from "$lib/components/ui/separator";
@@ -13,6 +13,7 @@ type Props = {
   brand: string;
   promptFilesLabel: string;
   configLabel: string;
+  configFileLabel: string;
   dreamsLabel: string;
   themeLabel: string;
   closeLabel: string;
@@ -25,6 +26,7 @@ export function AppSidebar({
   brand,
   promptFilesLabel,
   configLabel,
+  configFileLabel,
   dreamsLabel,
   themeLabel,
   closeLabel,
@@ -130,6 +132,18 @@ export function AppSidebar({
           >
             <FileCog className="size-4 shrink-0" />
             <span className="truncate text-start">{configLabel}</span>
+          </a>
+          {/* After 设置, not beside it by accident: this is the same settings with
+              the file taking shape on the left, which reads as the more verbose
+              take on the same thing. */}
+          <a
+            href={ROUTES.configFile}
+            className={navClass(currentView === "configFile")}
+            aria-current={currentView === "configFile" ? "page" : undefined}
+            onClick={(e) => onNavClick(e, ROUTES.configFile)}
+          >
+            <FileJson className="size-4 shrink-0" />
+            <span className="truncate text-start">{configFileLabel}</span>
           </a>
         </nav>
 

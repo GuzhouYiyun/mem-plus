@@ -4,18 +4,20 @@ import { AppSidebar } from "$lib/components/explorer/AppSidebar";
 import { PromptFilesView } from "$lib/components/explorer/PromptFilesView";
 import { DreamsView } from "$lib/components/explorer/DreamsView";
 import { ConfigView } from "$lib/components/explorer/ConfigView";
+import { ConfigFileView } from "$lib/components/explorer/ConfigFileView";
 import { Button } from "$lib/components/ui/button";
 import { Toaster } from "$lib/components/ui/sonner";
 import { useI18n } from "$lib/i18n";
 import { initRouter, navigate, ROUTES, useAppView } from "$lib/router";
 
-// Three tabs: the two surfaces openclaw writes for a person to read (the injected
-// prompt files, the dream diary) and the plugin's own settings, edited where they
-// already live. The transcript view is gone -- openclaw has no browsable session
-// record by design, and a page built on the capture snapshots was showing something
-// openclaw never meant to expose. The read-only status page went too: it was four
-// rows of counters, and the settings page is where a person goes looking for what
-// this thing is doing.
+// Four tabs: the two surfaces openclaw writes for a person to read (the injected
+// prompt files, the dream diary) and two takes on the plugin's own settings --
+// 设置 is the form, 配置文件 is the same form beside a live preview of the JSON
+// it writes. The transcript view is gone -- openclaw has no browsable session
+// record by design, and a page built on the capture snapshots was showing
+// something openclaw never meant to expose. The read-only status page went too:
+// it was four rows of counters, and the settings page is where a person goes
+// looking for what this thing is doing.
 export default function App() {
   const { t } = useI18n();
   const currentView = useAppView();
@@ -27,7 +29,13 @@ export default function App() {
   }, []);
 
   const viewTitle =
-    currentView === "dreams" ? t("tab-dreams") : currentView === "config" ? t("cfg-title") : t("tab-prompt-files");
+    currentView === "dreams"
+      ? t("tab-dreams")
+      : currentView === "config"
+        ? t("cfg-title")
+        : currentView === "configFile"
+          ? t("tab-config-file")
+          : t("tab-prompt-files");
 
   function onHomeClick(event: MouseEvent) {
     if (
@@ -63,6 +71,7 @@ export default function App() {
           promptFilesLabel={t("tab-prompt-files")}
           dreamsLabel={t("tab-dreams")}
           configLabel={t("cfg-title")}
+          configFileLabel={t("tab-config-file")}
           themeLabel={t("nav-theme")}
           closeLabel={t("nav-close")}
         />
@@ -96,6 +105,8 @@ export default function App() {
                 <DreamsView />
               ) : currentView === "config" ? (
                 <ConfigView />
+              ) : currentView === "configFile" ? (
+                <ConfigFileView />
               ) : (
                 <PromptFilesView />
               )}

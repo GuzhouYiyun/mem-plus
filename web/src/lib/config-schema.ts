@@ -97,7 +97,7 @@ export function isAction(item: ConfigItem): item is ConfigAction {
 
 export const CONFIG_SECTIONS: readonly ConfigSection[] = [
   {
-    id: "model",
+    id: "settings",
     // Ordered by what you have to decide before what: what does the extraction
     // run on, which files is that, and only then how the machine runs it. The
     // hardware settings used to sit above the file paths, which reads backwards --
@@ -236,14 +236,131 @@ export const CONFIG_SECTIONS: readonly ConfigSection[] = [
         choices: ["silent", "warn", "info", "debug"],
         defaultValue: "warn",
       },
+      // The other three namespaces, in the same form. They were config-file-only
+      // edits for as long as the page drew one section, but there was never a
+      // structural reason for that: a save merges per key, so a key this table
+      // does not draw has always been *writable*, just un-formatted. What the
+      // page adds is the same thing it added for `model.*` -- the reader's own
+      // default and bounds, an is-default badge, and no way to typo a key name
+      // into the file and have it silently mean nothing.
+      { heading: "服务" },
+      {
+        key: "service.url",
+        label: "服务地址",
+        kind: "text",
+        defaultValue: "",
+        help: "留空 = 发现端口上的推理服务，没有就自己启动一个。填了它 = 用你自己起的服务，插件不再启动。",
+      },
+      {
+        key: "service.host",
+        label: "监听地址",
+        kind: "text",
+        defaultValue: "127.0.0.1",
+      },
+      {
+        key: "service.port",
+        label: "端口",
+        kind: "number",
+        defaultValue: 4748,
+        min: 1,
+        max: 65535,
+        help: "推理服务的起始端口，被占用时递增。网页占 4747，两者不会撞。",
+      },
+      {
+        key: "service.autostart",
+        label: "自动启动",
+        kind: "boolean",
+        defaultValue: true,
+        help: "关掉后，没有服务在听时插件不会自己拉起推理进程。",
+      },
+      {
+        key: "service.idleMinutes",
+        label: "空闲退出",
+        kind: "number",
+        defaultValue: 10,
+        min: 0,
+        max: 1440,
+        help: "空闲多少分钟后推理进程退出，0 = 不退出。",
+      },
+      {
+        key: "service.startTimeoutMs",
+        label: "启动超时",
+        kind: "number",
+        defaultValue: 30000,
+        min: 1000,
+        max: 300000,
+        help: "等新启动的服务报健康的最长时间，毫秒。超时日志报 `service did not become healthy`。",
+      },
+      { heading: "网页" },
+      {
+        key: "web.enabled",
+        label: "启用网页",
+        kind: "boolean",
+        defaultValue: true,
+        help: "关掉 = 不开记忆浏览器。agent 用不到它，端口随之关闭。",
+      },
+      {
+        key: "web.port",
+        label: "端口",
+        kind: "number",
+        defaultValue: 4747,
+        min: 1,
+        max: 65535,
+        help: "被占用时自动往上找，实际端口见日志 `memory browser at` 一行。",
+      },
+      {
+        key: "web.host",
+        label: "监听地址",
+        kind: "text",
+        defaultValue: "127.0.0.1",
+        help: "只听本机即可。改成非回环地址必须同时设密码，否则任何能连上这个端口的人都能读记忆、改注入文件。",
+      },
+      {
+        key: "web.dir",
+        label: "前端目录",
+        kind: "text",
+        defaultValue: "",
+        help: "留空 = 插件目录旁的 web/dist。",
+      },
+      {
+        key: "web.authUser",
+        label: "登录名",
+        kind: "text",
+        defaultValue: "",
+        help: "留空 = 系统账户名。只在设置了密码时生效。",
+      },
+      {
+        key: "web.authPassword",
+        label: "密码",
+        kind: "secret",
+        defaultValue: "",
+        help: "留空 = 不认证（仅在本机收听时安全）。支持 env://NAME 与 file:///path。值不会回传到页面，只显示「已设置」。",
+      },
+      { heading: "文档语料" },
+      {
+        key: "wiki.enabled",
+        label: "启用语料",
+        kind: "boolean",
+        defaultValue: true,
+        help: "关掉 = wiki 目录的文件不进索引，memory_wiki_import 不再注册。",
+      },
+      {
+        key: "wiki.dir",
+        label: "目录",
+        kind: "text",
+        defaultValue: "",
+        help: "留空 = ~/.config/opencode/mem-plus/wiki。",
+      },
     ],
   },
 ];
 
-// The form shows one section. The other three namespaces still work, still have
-// real defaults, and are still preserved on save -- they are simply not editable
-// here, which is a choice about this page, not about the plugin. `web.*` in
-// particular: the port, bind address and password are config-file edits now.
+// One section, six groups. The form used to draw `model.*` only: the other three
+// namespaces still worked, still had real defaults, and were still preserved on
+// save -- they were simply not editable here, and `web.*` in particular was
+// config-file-only. They are in the form now. The section id stays a single
+// React-key prefix (`${section.id}:${item.key}`); it is not a namespace symbol
+// and is not persisted anywhere, so it names the form, not the fields under it.
 
 /** Every key the form knows, for the "no such key" check on save. */
 export const CONFIG_KEYS: readonly string[] = CONFIG_SECTIONS.flatMap((s) =>
