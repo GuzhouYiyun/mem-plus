@@ -1,28 +1,37 @@
 // Configuration for the local GGUF inference the plugin drives.
 //
-// WHY LOCAL INFERENCE
+// WHY LOCAL INFERENCE EXISTS AT ALL
 //   openclaw does not ship a GGUF runtime: it reaches one through either the
 //   `@openclaw/llama-cpp-provider` plugin (a managed llama-server) or an Ollama
-//   endpoint. mem-plus does neither -- the models are loaded from disk by
-//   `node-llama-cpp` in a separate Node process (see `serve/server.mjs` for why
-//   the plugin process cannot host them), so extraction and embedding never
-//   leave the machine.
+//   endpoint. mem-plus offers the same thing itself -- the models are loaded from
+//   disk by `node-llama-cpp` in a separate Node process (see `serve/server.mjs`
+//   for why the plugin process cannot host them) -- so a `model.content: "local"`
+//   install never sends anything off the machine.
 //
-// COST OF FAILURE IS THE POINT OF `allowHostedFallback`
-//   When local inference is unavailable, the alternative transport is
-//   `ctx.generate.text` -- the user's own paid OpenCode model. Defaulting to it
-//   means a missing GGUF, an uninstalled dependency or a busy port quietly
-//   converts a free local pipeline into metered API calls, with nothing but a
-//   log line to show for it. That is the opposite of what this plugin promises,
-//   so the fallback is opt-in (`model.allowHostedFallback`). The default is to
-//   skip extraction, keep the snapshot, and let the landing zone retry when the
-//   service is back -- a lost summary is recoverable, silent billing is not.
+// WHICH MODEL SUMMARISES, BY DEFAULT
+//   `opencode`. The alternative is `ctx.generate.text`, which runs the prompt on
+//   whichever OpenCode model the user has configured: no GGUF to download, no GPU
+//   to have, and the summary comes from a model that is usually better at
+//   following the extraction schema than a 4B local one. Someone who wants the
+//   local path says `"local"` and gets a machine-local pipeline.
+//
+//   Note what this default does *not* decide: whether the requests cost anything.
+//   That depends entirely on which provider the user's OpenCode model is pointed
+//   at, which is not this plugin's business to characterise.
+//
+// FALLBACK IS STILL OPT-IN
+//   `model.allowHostedFallback` is about the *local* path failing, and it defaults
+//   to false: a missing GGUF, an uninstalled dependency or a busy port would
+//   otherwise silently change which model is answering, with nothing but a log
+//   line to show for it. Off means extraction is skipped, the snapshot is kept,
+//   and the landing zone retries when the service is back.
 //
 // BACKEND PRIORITY
-//   discrete GPU > integrated GPU; CPU is not a supported backend. The chain
-//   is resolved explicitly rather than handed to `gpu: "auto"`, so which one
-//   won is observable in the log instead of guessed at. When no GPU works the
-//   service refuses to start and the failure lands in the log.
+//   discrete GPU > integrated GPU; CPU is not a supported backend. This option
+//   names the class of card you have, not a backend: `GPU_PRIORITY` in
+//   plugin/serve/server.mjs resolves it to a backend chain, tried in order, so
+//   which backend actually won is observable in the log instead of guessed at.
+//   When no GPU works the service refuses to start and the failure lands in the log.
 //
 // EVERYTHING IS OVERRIDABLE THROUGH `ctx.options`, because the model directory
 // in particular is machine-local: it lives next to the checkout by default and
@@ -32,15 +41,48 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { stateRoot } from "../paths.js";
 
-export type GpuPreference = "auto" | "cuda" | "vulkan";
+/**
+ * Which class of GPU the inference service may drive.
+ *
+ * These name the *hardware*, not the backend, because that is the only thing a
+ * user can answer without reading a driver list: "do I have a discrete card" is
+ * knowable at a glance, "is this machine CUDA or Vulkan" is not. Each value is
+ * resolved to a backend chain by `GPU_PRIORITY` in `plugin/serve/server.mjs`.
+ *
+ *   auto        - 独显优先，最后兜底核显
+ *   discrete    - 只试独显后端（NVIDIA 的 cuda、Apple 的 metal），两条都不行就
+ *                 拒绝启动，不回落
+ *   integrated  - 只试 vulkan，核显只有它一个后端
+ *
+ * The asymmetry to know about: an AMD or Intel *discrete* card is driven by
+ * vulkan, not by cuda, so it is served by `auto` and by `integrated` but not by
+ * `discrete` -- which offers exactly the two backends whose vendors ship no
+ * integrated GPU. That is why `discrete` is narrower than its name suggests, and
+ * why `auto` is the default.
+ */
+export type GpuPreference = "auto" | "discrete" | "integrated";
+
+/**
+ * Values this option used to take, when it named a backend instead of a class of
+ * card. They keep working so a config file written against the old spelling means
+ * what it meant: `"cuda"` asked for exactly one backend and `"vulkan"` asked for
+ * exactly one backend, which is what `discrete` and `integrated` ask for too.
+ *
+ * Kept in step with the same map in `plugin/serve/server.mjs`, which needs it
+ * because `--gpu` is also a flag you can type by hand.
+ */
+const LEGACY_GPU: Readonly<Record<string, GpuPreference>> = {
+  cuda: "discrete",
+  vulkan: "integrated",
+};
 
 /** Which model produces capture summaries. `opencode` routes to `ctx.generate.text`. */
 export type ContentBackend = "local" | "opencode";
 
 /**
- * An OpenCode model reference: the metered model that produces capture summaries
- * when `model.content` is `"opencode"`. Optional on purpose -- leaving it unset
- * keeps OpenCode's own model choice, which is the behavior without this option.
+ * An OpenCode model reference: the model that produces capture summaries when
+ * `model.content` is `"opencode"` (the default). Optional on purpose -- leaving it
+ * unset keeps OpenCode's own model choice, which is the behavior without this option.
  *
  * Field names match `@opencode/client`'s `ModelRef` (`providerID` + `id`) so it
  * can be handed to `ctx.generate.text` without reshaping. Users still write the
@@ -50,22 +92,20 @@ export type HostedModelRef = { readonly providerID: string; readonly id: string 
 
 export type ModelConfig = {
   /**
-   * `"opencode"` sends extraction to `ctx.generate.text` on purpose, by explicit
-   * configuration. This is an opt-in, not a failure mode.
+   * `"opencode"` (the default) sends extraction to `ctx.generate.text`. `"local"`
+   * runs it on the GGUF through the inference service instead.
    */
   readonly contentBackend: ContentBackend;
   /**
    * Which OpenCode model `ctx.generate.text` should use. `undefined` = OpenCode's
-   * default choice. Only reachable through `contentBackend: "opencode"` or an
-   * enabled `allowHostedFallback`.
+   * default choice.
    */
   readonly hostedModel?: HostedModelRef;
   /**
-   * Whether an *unavailable local service* may be covered by the user's paid
-   * OpenCode model. Defaults to `false`: with it off, a local failure skips the
-   * extraction for that turn and leaves the record pending for retry, which
-   * costs nothing, whereas falling back spends money on every turn for as long
-   * as the problem lasts.
+   * Whether an *unavailable local service* may be covered by the OpenCode model.
+   * Defaults to `false`: with it off, a local failure skips the extraction for that
+   * turn and leaves the record pending for retry, rather than silently switching
+   * which model is answering for as long as the problem lasts.
    */
   readonly allowHostedFallback: boolean;
   readonly gpu: GpuPreference;
@@ -174,7 +214,8 @@ function readBoolean(value: unknown): boolean | undefined {
 }
 
 function readGpu(value: unknown): GpuPreference {
-  if (value === "auto" || value === "cuda" || value === "vulkan") return value;
+  if (value === "auto" || value === "discrete" || value === "integrated") return value;
+  if (typeof value === "string" && LEGACY_GPU[value] !== undefined) return LEGACY_GPU[value];
   // CPU inference was removed (discrete > integrated, no fallback to CPU): a
   // legacy "cpu" value or anything else is demoted to "auto".
   return "auto";
@@ -270,8 +311,10 @@ export function readModelConfig(options: unknown): ModelConfig {
       ? (root["model"] as Record<string, unknown>)
       : {};
 
+  // `opencode` is the default: no GGUF to fetch, no GPU to need, and the model the
+  // user already configured. `"local"` opts into the on-machine pipeline.
   const rawBackend = readString(nested["content"]) ?? readString(root["contentModel"]);
-  const contentBackend: ContentBackend = rawBackend === "opencode" ? "opencode" : "local";
+  const contentBackend: ContentBackend = rawBackend === "local" ? "local" : "opencode";
 
   const modelDir = readString(nested["dir"]) ?? readString(root["modelDir"]) ?? defaultModelDir();
 

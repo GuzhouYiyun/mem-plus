@@ -1,0 +1,44 @@
+# npm's ignore list. Present so npm does NOT fall back to .gitignore.
+#
+# The rules below mirror .gitignore on purpose: npm-packlist uses .gitignore only
+# when this file is absent, so dropping it in without copying the rules would
+# start shipping anything .gitignore was keeping out (local notes, scratch
+# scripts, model weights). Keep the two files in sync when editing either.
+#
+# The one addition is `!web/dist`: the built memory-browser bundle. Git ignores it
+# (see .gitignore) but the tarball has to carry it -- the plugin serves it on
+# 127.0.0.1:4747 and a package without it installs fine and then has no page.
+
+ANALYSIS.txt
+models/
+node_modules/
+*.tgz
+memory/
+MEMORY.md
+DREAMS.md
+AGENTS.md
+SOUL.md
+IDENTITY.md
+USER.md
+BOOTSTRAP.md
+training/
+serve-test.log
+serve-test.err
+*.log
+probe-binding.mjs
+diag.mjs
+meta.mjs
+raw.mjs
+fewshot.mjs
+t.mjs
+t2.mjs
+t3.mjs
+m2.mjs
+m3.mjs
+*.txt
+TODO.md
+VERIFY.md
+
+# Built page bundle: gitignored, shipped.
+!web/dist
+!web/dist/**

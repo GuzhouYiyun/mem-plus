@@ -501,6 +501,39 @@ const BUILTINS = new Set(
   "assert async_hooks buffer child_process cluster console crypto dgram diagnostics_channel dns domain events fs http http2 https inspector module net os path perf_hooks process punycode querystring readline repl stream string_decoder sys timers tls trace_events tty url util vm worker_threads zlib".split(" "),
 );
 
+// --- spawned entrypoints: seed BEFORE the walk ------------------------------------
+// A worker entrypoint is named by a string and spawned by path, so no import edge
+// points at it and the scanner below cannot see it. Missing one loads cleanly, passes
+// every gate, and then fails in a background task -- `state/openclaw-state.worker.ts`
+// was absent for the whole trim (2026-10-04) and the symptom was one log line per
+// dreaming round (`ENOENT ... openclaw-state.worker.ts`).
+//
+// Seeding has to happen *here*, before the queue is built. Adding to `closure` after
+// the walk leaves the entrypoint's own imports unscanned, so the entrypoint ships and
+// its dependencies do not -- which is how the first version of this pass managed to
+// add 1 of the 7 files the fix actually needed.
+const SPAWNED = new Map(); // entrypoint name -> resolved absolute path | null
+const ENTRYPOINT_TABLE = path.join(ROOT, "src", "infra", "runtime-process-entrypoints.ts");
+if (existsSync(ENTRYPOINT_TABLE)) {
+  for (const m of readFileSync(ENTRYPOINT_TABLE, "utf8").matchAll(/(\w+):\s*runtimeProcessEntrypoint\(\s*"([^"]+)"/g)) {
+    const [, name, spec] = m;
+    // `foo.worker` is the dist name; in this source tree the same module is
+    // `foo-worker.ts`. Upstream ships both spellings, so try both before giving up.
+    const dir = path.dirname(spec);
+    const stem = path.basename(spec).replace(/\.worker$/, "");
+    const hit = [
+      path.join(ROOT, "src", spec),
+      path.join(ROOT, "src", dir, `${stem}-worker.ts`),
+      path.join(ROOT, "src", `${spec}.ts`),
+      path.join(ROOT, "src", spec, "index.ts"),
+    ]
+      .map((p) => (p.endsWith(".js") && !existsSync(p) ? p.slice(0, -3) + ".ts" : p))
+      .find((p) => existsSync(p));
+    SPAWNED.set(name, hit ?? null);
+    if (hit && !closure.has(hit)) closure.add(hit);
+  }
+}
+
 const queue = [...closure];
 while (queue.length) {
   const file = queue.shift();
@@ -522,15 +555,43 @@ while (queue.length) {
       if (!owner.startsWith("plugin/") && !owner.startsWith("extensions/")) continue;
     }
 
-    // Dynamic imports: do NOT extend the static closure (they are lazy, and in
-    // the mem-plus use case most openclaw provider/cli paths behind them never
-    // fire). Record them for review; their externals stay out of dependencies.
+    // Dynamic imports. Two different questions, and they had been answered as one.
+    //
+    // Bare specifiers (`node-llama-cpp`, `esbuild`, `file-type`) stay out of the
+    // closure and stay out of dependencies: they are lazily required dev tooling, and
+    // the mem-plus use case never reaches most of them.
+    //
+    // Relative specifiers used to be recorded and dropped, on the theory that a lazy
+    // edge does not need its target shipped. That is wrong in a way only a run can
+    // show. `src/state/openclaw-state.worker.ts` lazily imports
+    // `../plugin-state/plugin-state.worker.js`; the package shipped the first file,
+    // the audit said "no drift", every gate passed, and dreaming died at runtime with
+    // ERR_MODULE_NOT_FOUND -- and then, once that was restored, moved to the next one.
+    // Three layers deep is how it became clear this was a rule and not an accident.
+    //
+    // So a relative dynamic target that EXISTS in the tree now joins the closure.
+    // The bound that keeps this cheap: only files already here are followed. That is
+    // what separates it from following the edge upstream, which reaches
+    // `gateway-run-argv.mjs` and 6467 files of trimmed-away CLI.
     if (kind === "dynamic") {
-      const nm = spec.startsWith("@") ? spec.split("/").slice(0, 2).join("/") : spec.startsWith("./") || spec.startsWith("../") ? null : spec.split("/")[0];
-      if (nm) dynamicExternals.add(nm);
-      else if (spec.startsWith("./") || spec.startsWith("../")) {
-        const t = resolveRelative(path.dirname(file), spec.replace(/\\/g, "/"));
-        if (t && t.startsWith(ROOT + path.sep)) dynamicTargets.add(relPosix(t));
+      const relative = spec.startsWith("./") || spec.startsWith("../");
+      const nm = spec.startsWith("@")
+        ? spec.split("/").slice(0, 2).join("/")
+        : relative
+          ? null
+          : spec.split("/")[0];
+      if (nm) {
+        dynamicExternals.add(nm);
+        continue;
+      }
+      if (!relative) continue;
+      const target = resolveRelative(path.dirname(file), spec.replace(/\\/g, "/"));
+      if (!target || !target.startsWith(ROOT + path.sep)) continue;
+      if (!existsSync(target)) continue; // trimmed away upstream: nothing to ship
+      dynamicTargets.add(relPosix(target));
+      if (!closure.has(target)) {
+        closure.add(target);
+        queue.push(target);
       }
       continue;
     }
@@ -652,6 +713,38 @@ for (const file of [...closure]) {
 }
 if (dataFiles.length) console.log(`data files added: ${dataFiles.join(", ")}`);
 
+// --- path-spawned entrypoint report -----------------------------------------------
+// The seeding happened before the walk; the *warning* has to wait until after it,
+// because "reachable" means some closure file asks for the entrypoint by name.
+//
+// Scoped to reachable entrypoints on purpose. The table also lists ~40 workers for
+// subsystems the 2026-10-04 trim deleted (gateway, cron/store, channel extensions);
+// those are expected to be absent, and a warning that fires 40 times for the normal
+// state is a warning nobody reads. Reachability is read from the closure, not from a
+// hand-kept list, so it cannot go stale the way a list would.
+if (SPAWNED.size) {
+  const referenced = new Set();
+  for (const file of [...closure]) {
+    if (!CODE_FILE.test(file)) continue;
+    let text;
+    try {
+      text = readFileSync(file, "utf8");
+    } catch {
+      continue;
+    }
+    for (const m of text.matchAll(/resolveRuntimeProcessEntrypointUrl\(\s*"(\w+)"/g)) referenced.add(m[1]);
+    for (const m of text.matchAll(/registerSealedRuntimeProcessEntrypoint\(\s*"(\w+)"/g)) referenced.add(m[1]);
+  }
+  const unreachable = [...referenced].filter((n) => SPAWNED.get(n) === null);
+  console.log(
+    `entrypoint table: ${SPAWNED.size} entries, ${referenced.size} reachable from the closure, ` +
+      `${SPAWNED.size - referenced.size} dormant, ${[...SPAWNED.values()].filter(Boolean).length} resolvable`,
+  );
+  for (const name of unreachable) {
+    warnings.push(`spawned entrypoint is referenced but has no source file: ${name} -- the trim removed it or the table is stale`);
+  }
+}
+
 // --- dependency assembly ---------------------------------------------------------
 const mergedDeps = {};
 const depNotes = {};
@@ -706,17 +799,31 @@ for (const pkg of externals) {
 // stubs may be absent in a real install. Shipping the paths mapping is what
 // makes the tarball load without them; without this file a fresh
 // `npm i mem-plus-*.tgz` dies on the first `@openclaw/...` import.
+//
+// `web/dist` is the built memory-browser bundle that the plugin's web server
+// (plugin/src/web/server.ts) hands out on 127.0.0.1:4747. It is a whole
+// directory rather than a list of files, so it joins `pluginDirs`. A missing
+// bundle counts as drift on purpose: a tarball without it installs fine and
+// then has no page to serve, which is exactly the kind of breakage the audit
+// exists to prevent. prepack builds it (see scripts/build-web.mjs).
+//
+// `THIRD_PARTY_NOTICES.md` is here for the same reason `LICENSE` is, and npm-packlist
+// does not make that decision for us: it always includes README and LICENSE files under
+// any name pattern, but nothing else. A vendored MIT copy has to carry its notices
+// wherever the copy is installed from, and the README links to this file -- a package
+// that ships the README and not this has a licence claim with no text behind it.
 const fixedFiles = [
   "index.ts",
   "bootstrap.ts",
   "tsconfig.json",
   "LICENSE",
+  "THIRD_PARTY_NOTICES.md",
   "README.md",
   "README_en.md",
   "plugin/package.json",
   "plugin/scripts/openclaw-alias-spec.json",
 ].filter((f) => existsSync(path.join(ROOT, f)));
-const pluginDirs = ["plugin/src", "plugin/serve", "plugin/scripts"];
+const pluginDirs = ["plugin/src", "plugin/serve", "plugin/scripts", "web/dist"];
 const closureFiles = [...closure]
   .filter((f) => !f.startsWith(path.join(ROOT, "plugin") + path.sep))
   .filter((f) => f !== path.join(ROOT, "index.ts") && f !== path.join(ROOT, "bootstrap.ts"))
@@ -754,7 +861,11 @@ const missingDeps = Object.keys(mergedDeps).filter((d) => !currentDeps.has(d));
 console.log(`closure (static): ${closure.size} files (${closureFiles.length} outside plugin/)`);
 console.log(`externals: ${[...externals].sort().join(", ") || "(none)"}`);
 console.log(`dynamic-only externals (NOT deps): ${[...dynamicExternals].sort().join(", ") || "(none)"}`);
-if (dynamicTargets.size) console.log(`dynamic-only targets (${dynamicTargets.size}, not shipped): ${[...dynamicTargets].slice(0, 12).join(", ")}`);
+if (dynamicTargets.size) {
+  // "shipped" is now accurate: a relative dynamic target that exists in the tree joins
+  // the closure, because the tree file exists precisely so that branch can run.
+  console.log(`dynamic import targets (${dynamicTargets.size}, shipped if present in the tree): ${[...dynamicTargets].slice(0, 12).join(", ")}`);
+}
 console.log(`internal stubs: ${Object.keys(aliasSpec).sort().join(", ") || "(none)"}`);
 /** Key-order-independent comparison of two stub maps. */
 function sortObjectDeep(value) {

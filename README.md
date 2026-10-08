@@ -4,22 +4,24 @@
 
 </div>
 
-使用 OpenClaw 与 opencode-mem 源码开发的 OpenCode 持久记忆系统。全部推理在本地 GGUF 模型上运行，也可使用 OpenCode 模型。
+使用 OpenClaw 与 opencode-mem 源码开发的 OpenCode 持久记忆系统。抽取默认交给你在 OpenCode 里已配好的模型，需要离线或可控时再切到本地 GGUF。
 不仅仅只是能记忆，在 `SOUL.md` / `IDENTITY.md` 文件里写入人设，也可以让它扮演角色（见[提示词注入](#提示词注入)）。
 
-- **会话快照** — 每轮对话自动归档为 `memory/YYYY-MM-DD-标题.md`
-- **LLM 抽取** — 本地模型将每轮工作内容提炼为结构化条目（请求 / 结果 / 标签），写入 `memory/YYYY-MM-DD.md`
+- **会话快照** — 每轮对话自动归档为 `memory/YYYY-MM-DD-标题.md`，不需要模型
+- **LLM 抽取** — 把每轮工作内容提炼为结构化条目（请求 / 结果 / 标签），写入 `memory/YYYY-MM-DD.md`
 - **混合检索** — 全文与向量双通道，模型可自动检索历史记忆
 - **文档语料** — ChatGPT 导出或自备 markdown 页面编入同一索引，用 `corpus: "wiki"` 单独检索
 - **睡眠整理** — 每日将当日条目汇编写入 `MEMORY.md`（长期记忆）与 `DREAMS.md`（洞察日志）
 - **提示词注入** — `AGENTS.md`、`MEMORY.md` 等工作区文件在每轮对话前注入系统提示词，其内容对模型始终可见
 - **人设与成长** — `SOUL.md`、`IDENTITY.md`、`USER.md` 等文件定义 agent 的性格、身份与用户画像，可随时修改；与逐日沉淀的长期记忆一起，agent 随使用慢慢"长成"你期望的助手
+- **记忆浏览器** — `http://127.0.0.1:4747` 三个标签页：读注入文件与梦境日记、编辑设置、一键重建向量索引
 
 ## 目录
 
 - [运行要求](#运行要求)
 - [安装](#安装)
 - [日常使用](#日常使用)
+- [记忆浏览器](#记忆浏览器)
 - [配置](#配置)
 - [模型与推理](#模型与推理)
 - [数据位置](#数据位置)
@@ -35,8 +37,8 @@
 |---|---|
 | OpenCode | V2，`@opencode/plugin` 2.0.20 及以上（不支持 V1）。`opencode --version` 查看 |
 | Node.js | 22.5 及以上，或 Bun。检索工具依赖内置的 `node:sqlite`。`node -v` 查看 |
-| GPU | 需可用显卡，优先级为独显 > 核显，不使用 CPU 推理 |
-| 磁盘 | 插件约 4 MB；本地模型约 3.7 GB（可选，见[模型与推理](#模型与推理)） |
+| GPU | 仅本地推理需要。抽取走 OpenCode 端模型且不放嵌入模型时不需要显卡；本地推理要求独显 > 核显，不使用 CPU |
+| 磁盘 | 安装包约 4.3 MB；本地模型约 3.9 GB（可选，见[模型与推理](#模型与推理)） |
 
 Node.js 低于 22.5 时插件仍可加载，会话快照与抽取正常进行，仅检索工具不注册。
 
@@ -48,20 +50,30 @@ Node.js 低于 22.5 时插件仍可加载，会话快照与抽取正常进行，
 
 ### 2. 安装
 
-在终端执行。安装目录可自行指定，仅影响插件代码的存放位置，不影响记忆数据的位置（见[数据位置](#数据位置)）。
+安装包解出来的顶层目录就叫 `mem-plus`，所以解压即得到下面的目录结构；依赖仍需装一次。安装目录可自行指定，仅影响插件代码的存放位置，不影响记忆数据的位置（见[数据位置](#数据位置)）。
+
+```bash
+# 解压，得到 plugins/mem-plus/
+tar -xzf mem-plus-0.1.0.tgz -C ~/.config/opencode/plugins
+
+# 装依赖（含 node-llama-cpp 的平台预编译二进制）
+cd ~/.config/opencode/plugins/mem-plus && npm install
+```
+
+```powershell
+# Windows
+tar -xzf mem-plus-0.1.0.tgz -C "$env:USERPROFILE\.config\opencode\plugins"
+Set-Location "$env:USERPROFILE\.config\opencode\plugins\mem-plus"; npm install
+```
+
+也可以让 npm 代劳，它会把插件装成 `<目录>/node_modules/mem-plus`：
 
 ```bash
 cd ~/.config/opencode/plugins        # 或任意其他目录
 npm i "<mem-plus-0.1.0.tgz 的完整路径>"
 ```
 
-```powershell
-# Windows
-cd "$env:USERPROFILE\.config\opencode\plugins"
-npm i "<mem-plus-0.1.0.tgz 的完整路径>"
-```
-
-安装后插件目录为 `mem-plus/`，内含 `package.json`、`index.ts`、`plugin/`。依赖由 npm 自动安装，包含 `node-llama-cpp` 的平台预编译二进制。
+两种方式得到的插件目录都含 `package.json`、`index.ts`、`plugin/`。方式 A（自动发现）要求它位于 `~/.config/opencode/plugins/mem-plus`，解压式安装天然满足；npm 式安装则得到 `plugins/node_modules/mem-plus`，此时需自行把目录移到 `plugins/mem-plus`，否则改走[方式 B](#3-选择一种加载方式)。
 
 若安装时跳过了 npm 脚本（如使用了 `--ignore-scripts`），运行时模块别名会缺失，需手动生成一次：
 
@@ -73,28 +85,26 @@ node "<插件目录>/plugin/scripts/link-openclaw-alias.mjs"
 
 **mem-plus 只能被加载一次。**以下两种方式任选其一，不可同时使用：自动发现与配置条目指向同一目录时，OpenCode 会将其识别为两个插件，工具重复注册，同一轮对话也会被记录两次。
 
-| 方式 | 安装位置 | 是否写入 `opencode.jsonc` | 能否传入选项 |
-|---|---|---|---|
-| A 自动发现 | 全局插件目录的直接子目录：`~/.config/opencode/plugins/mem-plus` | **不写** | 不能。需要选项请用方式 B |
-| B 显式注册 | 全局插件目录**之外**的任意位置，例如 `~/.config/opencode/mem-plus` | 写一条 | 能 |
+| 方式 | 安装位置 | 是否写入 `opencode.jsonc` |
+|---|---|---|
+| A 自动发现 | 全局插件目录的直接子目录：`~/.config/opencode/plugins/mem-plus` | **不写** |
+| B 显式注册 | 全局插件目录**之外**的任意位置，例如 `~/.config/opencode/mem-plus` | 写一条 |
 
-默认建议使用方式 A；需要配置抽取来源、模型、服务端口或文档语料时，使用方式 B。
+两种方式都能配置抽取来源、模型、服务端口与文档语料 —— 设置写在 mem-plus 自己的
+`~/.config/opencode/mem-plus/config.jsonc` 里，与加载方式无关。默认建议使用方式 A。
 
 方式 B 的配置文件为 `~/.config/opencode/opencode.jsonc`，**Windows：** `%USERPROFILE%\.config\opencode\opencode.jsonc`（不使用 `%APPDATA%`）。也可使用项目目录下的 `opencode.jsonc`。该格式为 JSONC，允许 `//` 注释。
 
 ```jsonc
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugins": [
-    {
-      "package": "C:/Users/你的用户名/.config/opencode/mem-plus",
-      "options": {}
-    }
-  ]
+  "plugins": ["C:/Users/你的用户名/.config/opencode/mem-plus"]
 }
 ```
 
-`package` 为插件目录的绝对路径，即包含 `package.json` 与 `index.ts` 的那一层，不可填写内层 `plugin/` 子目录；Windows 下须使用正斜杠 `/`。不传选项时可简写为字符串：`"plugins": ["C:/path/to/mem-plus"]`。
+`package` 为插件目录的绝对路径，即包含 `package.json` 与 `index.ts` 的那一层，不可填写内层 `plugin/` 子目录；Windows 下须使用正斜杠 `/`。
+
+也可以写成对象并附带 `options`：`{ "package": "...", "options": { ... } }`。该对象形式仍然可用，但**优先级低于** mem-plus 自己的 `config.jsonc`；后者是为了让自动发现的用户也能配置而新增的。
 
 若已按方式 A 安装（插件位于全局插件目录下），却在 `opencode.jsonc` 中也写入了同一条目，OpenCode 会加载两份：日志中出现两条 `plugin loaded`，工具列表中 `memory_search` 等出现两次，同一轮对话生成两份快照。此时删除 `opencode.jsonc` 中的该条目，或将插件目录移出全局插件目录，二者取一即可。
 
@@ -206,6 +216,8 @@ memory_reindex { "embed": true }    // 顺带补齐向量
 
 两条命令均为幂等操作，可重复执行。第二条会为缺少向量的内容各计算一次向量（本地每个约数秒，首次执行耗时较长）；仅使用全文检索时无需第二条。
 
+也可以在记忆浏览器的「设置」页点**「重建并嵌入」**，走的是 `memory_reindex {"embed": true}` 同一条代码路径，结果以中文写在按钮下方。嵌入模型不可用时按钮会被服务端拒绝，并说明是哪一种不可用（未启用 / 路径指向不存在的文件 / 默认目录为空）。
+
 ### 文档语料
 
 文档语料是一个存放 markdown 页面的目录，默认位于 `~/.config/opencode/mem-plus/wiki/`。它对应 OpenClaw 的 `memory-wiki`，按其活跃分支判定、风险分诊与页面结构移植而来，与记忆共用同一套索引与同一组工具。
@@ -226,72 +238,92 @@ memory_reindex { "embed": true }    // 顺带补齐向量
 
 可在不删除文件的前提下停用文档语料：在 `options.wiki` 中设 `"enabled": false`，此时 `memory_wiki_import` 不再注册。
 
+## 记忆浏览器
+
+插件启动时顺带起一个只监听本机的页面：
+
+```
+http://127.0.0.1:4747/
+```
+
+4747 被占用时自动往后找，最多到 4757；具体端口在日志里那一行 `memory browser at` 后面。页面与 agent 无关，纯给人看，关掉（`web.enabled: false`）不影响记忆功能。
+
+三个标签页：
+
+| 标签页 | 内容 | 可写 |
+|---|---|---|
+| 提示词文件 | `AGENTS.md`、`SOUL.md`、`IDENTITY.md`、`USER.md`、`BOOTSTRAP.md`、`MEMORY.md` | 前五个改的是当前工作目录里的文件；`MEMORY.md` 改的是记忆库里的全局长期记忆 |
+| 梦境日记 | `DREAMS.md`，按每条日记分开显示 | 只读 |
+| 设置 | 见[配置](#配置) | 写入 `config.jsonc` |
+
+改完文件不必重启，下一轮对话即生效；「设置」页改完需要 `opencode service restart`。
+
+页面另有两个身份验证层，都默认开启且本地可用：HTTP Basic Auth（`web.authPassword`，不设即不启用）与一个 CSRF token。Basic Auth 的密码支持 `env://变量名` 与 `file://绝对路径`。
+
+> **端口是先到先得的。**同一台机器上多个 OpenCode 窗口各自加载一份插件，只有一个能拿到 4747，其余记 `already served` 并共享同一个页面。所以页面上看到的记忆属于「抢到端口的那个窗口的工作区」——换窗口可能看到不同的项目名。若 `web.host` 改成非回环地址又不设 `web.authPassword`，日志会明确警告：能访问该端口的人就能读你的记忆并改注入文件。
+
 ## 配置
 
 ### 配置文件
 
-全部可调项均写入 `opencode.jsonc` 中 mem-plus 条目的 `options` 字段，即[方式 B](#3-选择一种加载方式)所注册的同一个文件。使用方式 A（自动发现）时没有可写入的条目，任何选项都无法设置；需配置选项请改用方式 B。
+全部可调项均写入 mem-plus 自己的配置文件：
 
 ```
-~/.config/opencode/opencode.jsonc            # 全局，对所有项目生效
+~/.config/opencode/mem-plus/config.jsonc      # 全局，对所有项目生效
 ```
 
-```powershell
-# Windows
-%USERPROFILE%\.config\opencode\opencode.jsonc
+**Windows：** `%USERPROFILE%\.config\opencode\mem-plus\config.jsonc`（不使用 `%APPDATA%`）。
+
+该文件由 mem-plus 在首次运行时自动生成，内含一份带注释的模板；格式为 JSONC，允许 `//` 注释。它与加载方式无关，因此[方式 A（自动发现）](#3-选择一种加载方式)与方式 B 都能配置。
+
+优先级为 `内置默认值 < opencode.jsonc 中 plugins[] 的 options < 本文件`。中间那一层仍然可用（避免既有条目失效），但不再是该写的地方。
+
+记忆浏览器的「设置」页（http://127.0.0.1:4747/config）可视化编辑同一个文件，改动同样需要 `opencode service restart` 生效。该页只覆盖 `model.*`；`service.*`、`web.*`、`wiki.*` 仍为配置文件编辑。
+
+键的位置如下。本文所有选项名（如 `model.content`、`wiki.enabled`）均相对于本文件的顶层：
+
 ```
-
-也可在项目目录下放置 `opencode.jsonc`，仅对该项目生效（同名文件两处都存在时，项目级的键覆盖全局的同名键）。
-
-键的位置如下。本文所有选项名（如 `model.content`、`wiki.enabled`）均相对于 `options`：
-
-```
-opencode.jsonc
-└── plugins                    插件列表
-    └── [0]                    第 3 步注册的 mem-plus 条目
-        ├── package            插件安装路径
-        └── options            ← 所有可调项写在这里
-            ├── model          抽取与嵌入模型
-            ├── service        推理服务
-            └── wiki           文档语料
+config.jsonc
+├── model          抽取与嵌入模型
+├── service        推理服务
+├── web            记忆浏览器
+└── wiki           文档语料
 ```
 
 注意事项：
 
-- **`plugins` 数组中 mem-plus 只应存在一条**。第 3 步的注册与本节的 `options` 是同一条目：若已按第 3 步注册，请在该条目内补充 `options`，不要再新增一条。同一插件出现两条时会被加载两次，表现为工具重复注册、同一轮对话可能被写两次记忆
-- 若第 3 步使用的是字符串形式（`"plugins": ["C:/path/to/mem-plus"]`），则无法传入任何选项。**凡需设置选项，必须在原位置改为对象形式**（`{ "package": ..., "options": { ... } }`），其余项目保持不变
-- `options` 中的未知键会被忽略，不产生报错；键名拼写错误亦无提示，修改后请以启动日志为准核对
+- **`plugins` 数组中 mem-plus 只应存在一条**。同一插件出现两条时会被加载两次，表现为工具重复注册、同一轮对话可能被写两次记忆
+- 本文件中的未知键会被忽略，不产生报错；键名拼写错误亦无提示，修改后请以启动日志为准核对
 - 该文件为 JSONC，允许 `//` 与 `/* */` 注释；修改后需执行 `opencode service restart` 生效
+- 页面保存时**逐个键**写入，因此你写的注释不会因为改一个数字而丢失
 
 ### 完整示例
 
+`config.jsonc` 的顶层就是下面这四个命名空间，没有 `plugins` 数组 —— `plugins[]` 是 `opencode.jsonc` 的结构，两处不要混：
+
 ```jsonc
+// ~/.config/opencode/mem-plus/config.jsonc
 {
-  "$schema": "https://opencode.ai/config.json",
-  "plugins": [
-    {
-      "package": "C:/Users/你的用户名/.config/opencode/plugins/mem-plus",
-      "options": {
-        "model": {
-          "content": "local",
-          "hostedModel": "anthropic/claude-sonnet-4-5",
-          "allowHostedFallback": false,
-          "dir": "C:/Users/你的用户名/models",
-          "gpu": "auto",
-          "logLevel": "warn"
-        },
-        "service": {
-          "port": 4748,
-          "idleMinutes": 10,
-          "autostart": true
-        },
-        "wiki": {
-          "enabled": true,
-          "dir": "C:/Users/你的用户名/.config/opencode/mem-plus/wiki"
-        }
-      }
-    }
-  ]
+  "model": {
+    "content": "local",                          // 抽取走本地 GGUF；删掉这一行 = 用 OpenCode 端模型
+    "hostedModel": "anthropic/claude-sonnet-4-5",
+    "allowHostedFallback": false,
+    "dir": "C:/Users/你的用户名/models",
+    "gpu": "auto",
+    "logLevel": "warn"
+  },
+  "service": {
+    "port": 4748,
+    "idleMinutes": 10,
+    "autostart": true
+  },
+  "web": {
+    "port": 4747
+  },
+  "wiki": {
+    "enabled": true,
+    "dir": "C:/Users/你的用户名/.config/opencode/mem-plus/wiki"
+  }
 }
 ```
 
@@ -301,15 +333,15 @@ opencode.jsonc
 
 | 键 | 默认值 | 说明 |
 |---|---|---|
-| `model.content` | `"local"` | 抽取来源。`"local"` = 本地 GGUF；`"opencode"` = 由 OpenCode 侧模型完成推理 |
+| `model.content` | `"opencode"` | 抽取来源。`"opencode"` = 由 OpenCode 侧模型完成推理；`"local"` = 本地 GGUF |
 | `model.hostedModel` | — | 使用 OpenCode 端模型时指定哪一个，格式 `"providerID/modelID"`。不设置则沿用 OpenCode 默认模型 |
 | `model.allowHostedFallback` | `false` | 本地推理不可用时是否改用 OpenCode 端模型。默认 `false`，即抽取延后而不改用 |
 | `model.dir` | 插件目录下的 `models/`，不存在时回落 `~/.config/opencode/mem-plus/models` | GGUF 文件所在目录 |
 | `model.contentPath` | `model.dir/Qwen3.5-4B-Q4_K_M.gguf` | 抽取模型文件路径 |
 | `model.embedPath` | `model.dir/bge-m3-FP16.gguf` | 嵌入模型文件路径 |
 | `model.embed` | `true` | `false` = 停用嵌入槽位，仅使用全文检索 |
-| `model.gpu` | `"auto"` | `"auto"`（独显 > 核显，无 CPU 回退）/ `"cuda"` / `"vulkan"`。CPU 推理已移除，旧的 `"cpu"` 值按 `"auto"` 处理 |
-| `model.gpuLayers` | `"auto"` | 分配至显存的层数 |
+| `model.gpu` | `"auto"` | `"auto"`（独显 > 核显，无 CPU 回退）/ `"discrete"`（仅 NVIDIA·Apple 独显）/ `"integrated"`（vulkan 后端）。AMD/Intel 的独显走 vulkan，请用 `"auto"`。旧的 `"cuda"` / `"vulkan"` 值按 `"discrete"` / `"integrated"` 处理，旧的 `"cpu"` 按 `"auto"` 处理 |
+| `model.gpuLayers` | `"auto"` | 分配至显存的层数。`"auto"` 按当前显存算，也可写 0–999 的整数 |
 | `model.contextSize` | `16384` | 抽取上下文窗口 |
 | `model.maxNewTokens` | `512` | 单次抽取的最大 token 数 |
 | `model.threads` | `0` | 宿主侧运算使用的 CPU 线程数，推理本身在 GPU 上运行 |
@@ -328,6 +360,17 @@ opencode.jsonc
 | `service.startTimeoutMs` | `30000` | 等待服务就绪的最长时间 |
 | `service.url` | — | 使用已在该地址运行的服务，跳过自动启动 |
 
+### 记忆浏览器选项
+
+| 键 | 默认值 | 说明 |
+|---|---|---|
+| `web.enabled` | `true` | `false` = 不启动页面，不影响记忆与检索 |
+| `web.port` | `4747` | 起始端口；被占用时自动递增，上限 4757 |
+| `web.host` | `"127.0.0.1"` | 绑定地址。改为非回环地址务必同时设 `web.authPassword`，否则日志会警告 |
+| `web.dir` | 插件旁的 `web/dist` | 前端产物目录，一般不改 |
+| `web.authUser` | 系统账户名 | Basic Auth 用户名 |
+| `web.authPassword` | — | Basic Auth 密码。支持字面量、`env://变量名`、`file://绝对路径` |
+
 ### 文档语料选项
 
 | 键 | 默认值 | 说明 |
@@ -345,26 +388,19 @@ mem-plus 仅在两处使用模型，且两者相互独立：抽取使用语言�
 
 | 抽取来源 | 在 `options.model` 中设置 | 推理位置 | 说明 |
 |---|---|---|---|
-| 本地 GGUF | 保持默认（`content` 为 `local`），放好 `Qwen3.5-4B-Q4_K_M.gguf` | 本机 | 默认。本地模型不可用时抽取延后，不会自动改用其他来源 |
-| OpenCode 端模型 | `"content": "opencode"` | 由 OpenCode 侧决定 | 抽取请求交由 OpenCode 发出，无需本地抽取模型 |
+| OpenCode 端模型 | 保持默认（`content` 为 `opencode`） | 由 OpenCode 侧决定 | 默认。抽取请求交由 OpenCode 发出，无需本地抽取模型 |
+| 本地 GGUF | `"content": "local"`，放好 `Qwen3.5-4B-Q4_K_M.gguf` | 本机 | 全程不出机器。本地模型不可用时抽取延后，不会自动改用其他来源 |
 | 本地失败时改用 OpenCode 端模型 | `"allowHostedFallback": true` | 由 OpenCode 侧决定（仅失败的轮次） | 平时使用本地模型；本地服务不可用时该轮改由 OpenCode 侧完成 |
 
-例如改为由 OpenCode 端模型抽取，并指定模型（方式 B，需写入 `opencode.jsonc`）：
+例如改为由 OpenCode 端模型抽取，并指定模型（写入 `mem-plus/config.jsonc`）：
 
 ```jsonc
-// ~/.config/opencode/opencode.jsonc
+// ~/.config/opencode/mem-plus/config.jsonc
 {
-  "plugins": [
-    {
-      "package": "C:/Users/你的用户名/.config/opencode/plugins/mem-plus",
-      "options": {
-        "model": {
-          "content": "opencode",
-          "hostedModel": "anthropic/claude-sonnet-4-5"
-        }
-      }
-    }
-  ]
+  "model": {
+    "content": "opencode",
+    "hostedModel": "anthropic/claude-sonnet-4-5"
+  }
 }
 ```
 
@@ -387,7 +423,7 @@ mem-plus ──> ctx.generate.text ──> OpenCode 侧 provider 与模型 ─�
 可用 `opencode models` 查询可用的模型 id。`options.model.hostedModel` 的格式为 `"providerID/modelID"`，按第一个斜杠分隔，`openrouter/anthropic/claude-sonnet-4` 这类包含斜杠的 id 可正确解析；provider 与模型须为 OpenCode 中已配置可用者。
 
 ```
-[mem-plus] extraction model = opencode (options.model.content = "opencode") -- metered, by request (model = anthropic/claude-sonnet-4-5)
+[mem-plus] extraction model = opencode (model = anthropic/claude-sonnet-4-5)
 ```
 
 ### 嵌入模型
@@ -403,9 +439,9 @@ mem-plus ──> ctx.generate.text ──> OpenCode 侧 provider 与模型 ─�
 
 ### 本地推理的降级行为
 
-默认全程本地运行。本地推理不可用时（模型缺失、依赖未安装、端口被占用、服务异常、GPU 不可用），插件不会静默改用 OpenCode 端模型：会话快照继续写入，抽取延后执行且待处理记录保留；每个完成 turn 先探测本地服务，可用时执行抽取，不可用时跳过该轮，服务恢复后的下一个 turn 自动补做。
+选择本地推理（`model.content: "local"`）后，本地推理不可用时（模型缺失、依赖未安装、端口被占用、服务异常、GPU 不可用），插件不会静默改用 OpenCode 端模型：会话快照继续写入，抽取延后执行且待处理记录保留；每个完成 turn 先探测本地服务，可用时执行抽取，不可用时跳过该轮，服务恢复后的下一个 turn 自动补做。
 
-需要改用 OpenCode 端模型时，须显式设置 `model.allowHostedFallback: true`（仅本地失败时改用）或 `model.content: "opencode"`（始终由 OpenCode 侧完成抽取）。
+需要让插件在本地失败时改用 OpenCode 端模型，须显式设置 `model.allowHostedFallback: true`。
 
 ## 数据位置
 
@@ -470,6 +506,9 @@ markdown 文件为唯一数据源，索引为可再生数据。删除 `index.db`
 | `hybrid` / `vector` 返回 0 条 | 执行 `memory_reindex {"embed": true}` 并等待完成 |
 | 导入后检索不到文档 | `memory_search` 默认仅检索会话记忆，须指定 `corpus: "wiki"` 或 `"all"` |
 | `workspace/memory/` 下无当日文件 | 需完成一次完整对话 turn，写入在结算后约 2 秒发生 |
+| 记忆浏览器打不开 | 日志里找 `memory browser at` 那行看实际端口。4747 被占用时自动往后找（至 4757），多个窗口只有一个能拿到，其余记 `already served` |
+| 页面上是另一个项目的记忆 | 同上：端口先到先得，页面属于抢到端口的那个窗口的工作区。关掉其他窗口的 OpenCode 再刷新 |
+| 页面能开但一直提示未授权 | Basic Auth 用户名/密码。日志里的 `api token required` 是 CSRF 层，属正常 |
 
 ## 更新
 
@@ -505,14 +544,16 @@ opencode service restart           # 重启后生效
 
    需保留记忆时，请先备份其中的 `workspace/` 目录。
 
-3. 删除插件目录（第 2 步 `npm i` 时所在目录下的 `mem-plus`）：
+3. 删除插件目录（按第 2 步的安装方式二选一）：
 
    ```bash
-   rm -rf <npm i 时的目录>/node_modules/mem-plus
+   rm -rf ~/.config/opencode/plugins/mem-plus              # 解压式
+   rm -rf <npm i 时的目录>/node_modules/mem-plus            # npm 式
    ```
 
    ```powershell
    # Windows
+   Remove-Item -Recurse -Force "$env:USERPROFILE\.config\opencode\plugins\mem-plus"
    Remove-Item -Recurse -Force "<npm i 时的目录>\node_modules\mem-plus"
    ```
 
@@ -527,6 +568,6 @@ opencode service restart           # 重启后生效
 | 来源 | 范围 | 许可 | 版权 |
 |---|---|---|---|
 | [openclaw](https://github.com/openclaw/openclaw) | `src/`、`extensions/`、`packages/` 下记忆相关模块的副本 | MIT | Copyright (c) 2026 OpenClaw Foundation |
-| [opencode-mem](https://github.com/tickernelz/opencode-mem) | Web 管理界面布局（计划并入） | MIT | Copyright (c) 2025 Zhafron Adani Kautsar |
+| [opencode-mem](https://github.com/tickernelz/opencode-mem) | 记忆浏览器的界面布局与前端框架 | MIT | Copyright (c) 2025 Zhafron Adani Kautsar |
 
 各来源的完整许可文本见 [LICENSE](./LICENSE) 与 [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md)。

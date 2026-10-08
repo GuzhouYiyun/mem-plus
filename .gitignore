@@ -28,6 +28,10 @@ BOOTSTRAP.md
 # this machine's history rather than to the project.
 training/
 
+# Built memory-browser bundle (see scripts/build-web.mjs). Gitignored, but it
+# ships in the tarball -- that is what .npmignore's `!web/dist` is for.
+web/dist/
+
 # Scratch output from local model / service experiments
 serve-test.log
 serve-test.err

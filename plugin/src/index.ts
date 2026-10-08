@@ -45,12 +45,15 @@ import {
 import { createStorageOpenKeyedStore } from "./kv.js";
 import { missingContentPaths, readModelConfig, readServiceConfig, resolveEmbedAvailability } from "./model/config.js";
 import { readWikiConfig } from "./wiki/config.js";
+import { readWebConfig } from "./web/config.js";
+import { startWebServer } from "./web/server.js";
 import { createServiceClient, type MemPlusService } from "./model/client.js";
 import { createLogger } from "./log.js";
 import { indexPath, openIndex } from "./memory-index.js";
 import { indexWrittenFile, indexTail } from "./memory-scan.js";
 import { buildMemoryTools } from "./memory-tools.js";
-import { dreamingMarker, homeProjectMemoryDir, homeProjectSlug, logFile, memoryHomeDir } from "./paths.js";
+import { resolveOptions } from "./config-file.js";
+import { dreamingMarker, homeProjectMemoryDir, homeProjectSlug, logFile, memoryHomeDir, stateRoot } from "./paths.js";
 import {
   DEFAULT_MEMORY_FILENAME,
   WORKSPACE_BOOTSTRAP_FILENAMES,
@@ -118,12 +121,22 @@ export default Plugin.define({
     // a ~3 s model load in every window, whether or not anything needs extracting.
     //
     // If local inference is unusable, extraction is skipped rather than rerouted
-    // to the user's paid model -- see `allowHostedFallback` in model/config.ts.
+    // to the OpenCode model -- see `allowHostedFallback` in model/config.ts.
     // Snapshots keep working either way, and openclaw's landing zone leaves the
     // record pending so it is retried once the service is back.
-    const modelConfig = readModelConfig(ctx.options);
-    const serviceConfig = readServiceConfig(ctx.options);
-    const wikiConfig = readWikiConfig(ctx.options);
+    // Settings resolution happens once, here, so the precedence
+    // (built-in defaults < `ctx.options` < `~/.config/opencode/mem-plus/config.jsonc`)
+    // is stated in exactly one place and every reader below sees the same object.
+    // Merging it here rather than inside each `read*Config()` is what makes the
+    // settings file work under directory auto-discovery too -- see config-file.ts.
+    const resolved = resolveOptions(ctx.options, stateRoot());
+    if (resolved.error) log(`config file unusable, falling back to plugin options -- ${resolved.error}`);
+    else if (!resolved.hasFile) log(`no settings file yet; created ${resolved.file}`);
+    const options = resolved.options;
+
+    const modelConfig = readModelConfig(options);
+    const serviceConfig = readServiceConfig(options);
+    const wikiConfig = readWikiConfig(options);
     // openclaw treats the two model slots independently
     // (manager-provider-lifecycle.ts): extraction needs the content model, and
     // only extraction. A missing embedding model degrades search to
@@ -135,13 +148,21 @@ export default Plugin.define({
     const hostedLabel = modelConfig.hostedModel
       ? `${modelConfig.hostedModel.providerID}/${modelConfig.hostedModel.id}`
       : "opencode default";
+
+    // The local service answers whichever slots need it, and they are different
+    // slots: `model.content` picks the summarising model, `model.embed` picks the
+    // embedding one. With `content` defaulting to `opencode` the service is no
+    // longer implied by extraction -- but embeddings still need it, so creating it
+    // only on the `local` branch would quietly turn vector search off for everyone
+    // who left `model.content` alone.
+    const wantsLocalContent = modelConfig.contentBackend !== "opencode" && missingContent.length === 0;
     let service: MemPlusService | null = null;
+    if (wantsLocalContent || vectorsUsable) {
+      service = createServiceClient(serviceConfig, modelConfig, log);
+    }
+
     if (modelConfig.contentBackend === "opencode") {
-      // Explicit configuration, not a failure mode.
-      log(
-        'extraction model = opencode (options.model.content = "opencode") -- metered, by request ' +
-          `(model = ${hostedLabel})`,
-      );
+      log(`extraction model = opencode (model = ${hostedLabel})`);
     } else if (missingContent.length > 0) {
       for (const file of missingContent) log(`  missing ${file} -- see README "本地模型"`);
       if (allowHosted) {
@@ -152,12 +173,11 @@ export default Plugin.define({
       } else {
         log(
           "extraction DISABLED (GGUF not found; snapshots still written). " +
-            'Fix the paths, or set options.model.allowHostedFallback = true to ' +
-            "accept metered extraction via the OpenCode model.",
+            'Fix the paths, set options.model.allowHostedFallback = true, or set ' +
+            'options.model.content = "opencode" to summarise on the OpenCode model.',
         );
       }
     } else {
-      service = createServiceClient(serviceConfig, modelConfig, log);
       log(
         `extraction model = local gguf via ${serviceConfig.host}:${serviceConfig.port} ` +
           `(gpu priority ${modelConfig.gpu}, idle ${serviceConfig.idleMinutes} min)`,
@@ -188,18 +208,34 @@ export default Plugin.define({
     const capture = createMemoryCapture(
       createCaptureDependencies(
         ctx,
-        localService
-          ? async ({ systemPrompt, prompt }) => {
+        // `model.content` decides this, and nothing else does.
+        //
+        // It used to be the other way round: the check was "does a service object
+        // exist", and because embeddings and summarising share one service, having
+        // the embedding GGUF installed created that object and handed *extraction*
+        // to the local model as well. So `"content": "opencode"` silently meant
+        // "local, whenever a GGUF happens to be present" -- and it broke the worst
+        // possible way, because the local model was missing on exactly those
+        // machines, so extraction stalled and the records piled up pending. The page's
+        // own help text for the setting ("不需要下载 GGUF、不需要显卡") was false.
+        //
+        // The service is still created when `vectorsUsable`: that is the embedding
+        // slot, a separate need, and it must not depend on the extraction setting.
+        modelConfig.contentBackend === "opencode"
+          ? hostedComplete(ctx, modelConfig.hostedModel)
+          : localService
+            ? async ({ systemPrompt, prompt }) => {
               try {
                 return await localService.extract({ systemPrompt, prompt });
               } catch (error) {
                 if (!allowHosted) {
                   // Throw rather than degrade. The sweep records the failure and
-                  // the record stays pending, so the memory is written later for
-                  // free instead of now at the user's expense.
+                  // the record stays pending, so the memory is written later
+                  // instead of the model silently changing for as long as the
+                  // outage lasts.
                   log(
                     "local service unavailable; skipping extraction and leaving the " +
-                      "record pending (no metered fallback -- " +
+                      "record pending (no OpenCode fallback -- " +
                       'set options.model.allowHostedFallback = true to change this)',
                     error,
                   );
@@ -207,20 +243,17 @@ export default Plugin.define({
                 }
                 log(
                   "local service unavailable, using the OpenCode model for this turn " +
-                    "(model.allowHostedFallback = true -- metered)",
+                    "(model.allowHostedFallback = true)",
                   error,
                 );
                 return await hostedComplete(ctx, modelConfig.hostedModel)({ systemPrompt, prompt });
               }
             }
-          : modelConfig.contentBackend === "opencode"
-            // Explicit opt-in, so this one is not a fallback.
-            ? hostedComplete(ctx, modelConfig.hostedModel)
-            : disabledComplete(
-                missingContent.length > 0
-                  ? `GGUF not found: ${missingContent.join(", ")}`
-                  : "no local service and no hosted opt-in",
-              ),
+          : disabledComplete(
+              missingContent.length > 0
+                ? `GGUF not found: ${missingContent.join(", ")}`
+                : "no local service and no hosted opt-in",
+            ),
       ),
     );
 
@@ -237,20 +270,82 @@ export default Plugin.define({
     const index = openIndex();
     if (index) {
       log(`index ${indexPath()}`);
-      log(
-        wikiConfig.enabled
-          ? `wiki corpus ${wikiConfig.dir} (search it with memory_search corpus "wiki")`
-          : "wiki corpus disabled (options.wiki.enabled = false)",
-      );
+
+      // The memory browser, started here because this is where the index becomes
+      // available: the page's data endpoints read it through the same open
+      // connection the tools use, so there is exactly one reader of index.db.
+      // Fire-and-forget -- static files plus a loopback socket must not delay
+      // plugin loading, and the URL lands in the log either way.
       const retrieval = buildMemoryTools({
         db: index,
         workspaceDir,
         // Null service = vector modes off (see the note above); extraction above
         // keeps its own reference either way.
         service: vectorsUsable ? localService : null,
-        options: ctx.options,
+        options,
         log,
       });
+      void startWebServer(
+        readWebConfig(options),
+        {
+          db: index,
+          workspaceDir,
+          // Read per request rather than snapshotted here: the model list changes
+          // when the user edits providers, and a picker holding a stale list is
+          // worse than one that costs a call.
+          listModels: () => ctx.model.list() as Promise<{ data?: unknown[] }>,
+          // The page's "rebuild with vectors" button runs the *tool's* execute,
+          // not a second implementation of the same walk. The tool object already
+          // carries the db, the embedding service and the report text, so reusing
+          // it is both less code and impossible to drift from what an agent gets.
+          // What the page needs to tell "no model" apart from "nothing to embed",
+          // resolved here because this is where the embedding model and the service
+          // that loads it were already decided. `explicit` separates a path the user
+          // named in settings (a misconfiguration, worth naming) from the default
+          // location simply being empty (nothing installed yet).
+          embedReady: {
+            enabled: modelConfig.embedEnabled,
+            usable: vectorsUsable,
+            ...(embedAvailability.missingPath ? { missingPath: embedAvailability.missingPath } : {}),
+            explicit: modelConfig.embedPathExplicit,
+          },
+          reindex: retrieval.available
+            ? async ({ embed, embedBudget }) => {
+                const tool = retrieval.tools.find((candidate) => candidate.name === "memory_reindex");
+                if (!tool) throw new Error("memory_reindex is not registered");
+                // `execute` returns OpenCode's tool result shape, whose `content` is a
+                // string *or* a list of content blocks. The reindex tool always writes
+                // the string form; normalise anyway rather than handing the page a
+                // union it has to understand.
+                // The reindex tool reads only `context?.signal`, but `execute`'s context type
+                // demands a whole ToolContext whose id fields are branded. An HTTP
+                // request has no agent, session, message or call behind it, so the
+                // branded fields are given the one cast they need and the rest is
+                // spelled out for real -- if the tool ever starts reading a field it
+                // does not have, the compiler says so here rather than at runtime.
+                const result = await tool.execute(
+                  { embed, embedBudget },
+                  {
+                    agent: "mem-plus-web" as never,
+                    signal: new AbortController().signal,
+                    progress: async () => {},
+                    sessionID: "web" as never,
+                    messageID: "web" as never,
+                    id: "web" as never,
+                  },
+                );
+                const content = typeof result.content === "string" ? result.content : JSON.stringify(result.content);
+                return { content, metadata: (result.metadata ?? {}) as Record<string, unknown> };
+              }
+            : undefined,
+        },
+        (message) => log(message)
+      );
+      log(
+        wikiConfig.enabled
+          ? `wiki corpus ${wikiConfig.dir} (search it with memory_search corpus "wiki")`
+          : "wiki corpus disabled (options.wiki.enabled = false)",
+      );
       if (retrieval.available) {
         await ctx.tool.transform((editor) => {
           for (const tool of retrieval.tools) editor.add(tool);

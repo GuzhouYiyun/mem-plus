@@ -30,14 +30,38 @@ import { fileURLToPath } from "node:url";
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PLUGIN_ROOT = path.resolve(HERE, "..");
 
-/** 独显 > 核显，CPU 不参与。cuda 是 NVIDIA 独显；metal 是 Apple GPU；
- *  vulkan 覆盖 AMD/Intel 独显和所有核显。没有可用 GPU 时服务拒绝启动
- *  （CPU 推理已移除），而不是回落到 CPU 慢速运行。 */
+/**
+ * The `--gpu` value names a class of card, not a backend. Each maps to the
+ * backends to try, in order; the ones this machine does not support are filtered
+ * out against what node-llama-cpp reports, and if nothing is left the service
+ * refuses to start rather than falling back to the CPU (which was removed).
+ *
+ *   auto        - 独显优先，最后兜底核显
+ *   discrete    - 只试独显后端：NVIDIA 走 cuda，Apple 走 metal。这两家都不做核显，
+ *                 所以对它们来说"独显"是唯一的可能。两条都不可用就拒绝启动。
+ *                 注意：AMD/Intel 的独显走 vulkan，不在这条链上，那种卡用 auto。
+ *   integrated  - 只试 vulkan。核显只有它一个后端。
+ *
+ * `describeGpu` still names the backend that actually won, because that -- not
+ * the preference -- is what belongs in the log.
+ */
 const GPU_PRIORITY = {
   auto: ["cuda", "metal", "vulkan"],
-  cuda: ["cuda"],
-  vulkan: ["vulkan"],
+  discrete: ["cuda", "metal"],
+  integrated: ["vulkan"],
 };
+
+/** Values `--gpu` used to take, when it named a backend. Same map as in
+ *  plugin/src/model/config.ts, because this file is also run by hand. */
+const LEGACY_GPU = {
+  cuda: "discrete",
+  vulkan: "integrated",
+};
+
+function normalizeGpu(value) {
+  if (Object.hasOwn(GPU_PRIORITY, value)) return value;
+  return LEGACY_GPU[value] ?? "auto";
+}
 
 const LOG_LEVELS = (mod) => ({
   silent: mod.LlamaLogLevel.disabled,
@@ -134,7 +158,8 @@ async function openLlama() {
   const mod = await loadNodeLlama();
   const levels = LOG_LEVELS(mod);
   const supported = new Set(await mod.getLlamaGpuTypes("supported"));
-  const order = GPU_PRIORITY[config.gpu] ?? GPU_PRIORITY.auto;
+  const preference = normalizeGpu(config.gpu);
+  const order = GPU_PRIORITY[preference];
   const candidates = order.filter((gpu) => supported.has(gpu));
 
   const failures = [];
@@ -152,12 +177,27 @@ async function openLlama() {
     } catch (error) {
       const reason = error instanceof Error ? error.message.split("\n")[0] : String(error);
       failures.push(`${describeGpu(gpu)}: ${reason}`);
-      log(`backend ${describeGpu(gpu)} unavailable, trying next (discrete > integrated, no CPU)`, reason);
+      log(`backend ${describeGpu(gpu)} unavailable, trying next (CPU is not an option)`, reason);
     }
   }
-  throw new Error(
-    `no usable GPU backend (priority ${config.gpu}; discrete > integrated, CPU is not allowed) :: ${failures.join(" | ")}`,
-  );
+
+  // Two different dead ends need two different sentences. When the chain was
+  // emptied by the *filter* there is no failure text at all -- that is the
+  // `discrete` preference on an AMD or Intel card, which offers only cuda and
+  // metal and this machine supports neither -- and a message listing an empty
+  // failure list explains nothing. So name what was wanted, and name the way out.
+  const wanted = order.join(" → ");
+  if (candidates.length === 0) {
+    // `false` is node-llama-cpp's CPU pseudo-value and it is always in the
+    // supported set. Listing it reads as an offer, and it is not one -- the CPU
+    // backend was removed -- so it is named as excluded rather than shown.
+    const real = [...supported].filter((gpu) => gpu !== false);
+    throw new Error(
+      `gpu "${preference}" wants [${wanted}] and this machine supports none of them ` +
+        `(available: ${real.join(", ") || "none"}; CPU is not an option; try "auto")`,
+    );
+  }
+  throw new Error(`no usable GPU backend (gpu "${preference}" tried [${wanted}]) :: ${failures.join(" | ")}`);
 }
 
 async function getContentModel() {
@@ -503,7 +543,7 @@ function tryListen(port) {
     listeningPort = port;
     log(`listening on http://127.0.0.1:${port}`);
     log(`models: content=${config.contentPath} embed=${config.embedPath}`);
-    log(`idle timeout = ${config.idleMinutes} min; gpu priority = ${config.gpu}`);
+    log(`idle timeout = ${config.idleMinutes} min; gpu priority = ${normalizeGpu(config.gpu)}`);
   });
 }
 

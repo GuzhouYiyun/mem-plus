@@ -1,59 +1,29 @@
-// mem-plus —— 可直接抄进 opencode.jsonc
+// mem-plus 注册示例 —— 可直接抄进 opencode.jsonc
 //
-// 用法：把 plugins 数组里的内容合并进你的 opencode.jsonc，
-//       把 package 改成你 clone mem-plus 的实际位置。
-// 只留 "package" 一行也能跑；下面 options 全是默认值，显式写出是为了标明计费立场。
+// 这里只管"怎么让 OpenCode 加载插件"。mem-plus 的设置不在这里，写在
+// ~/.config/opencode/mem-plus/config.jsonc（首次运行时自动生成，带注释模板），
+// 那样自动发现和显式注册两种方式都能配置。
+//
+// 只留 "plugins": ["路径"] 一行也能跑。
 
 {
   "$schema": "https://opencode.ai/config.json",
   "plugins": [
-    {
-      // 指向仓库根目录（插件入口声明在根 package.json 的 main/exports）
-      "package": "C:/Users/你的用户名/.config/opencode/plugins/mem-plus",
-
-      "options": {
-        "model": {
-          // "local" = 本地 GGUF（默认）；"opencode" = 主动要求用 OpenCode 计费模型
-          "content": "local",
-
-          // 本地推理不可用时（模型没放对、依赖没装、端口被占、服务崩了）是否改用计费模型。
-          // 保持 false：快照照写，抽取推迟到服务恢复，长期故障不会变成账单。
-          "allowHostedFallback": false
-
-          // GGUF 目录，默认 <仓库>/models；换模型/换目录才需要打开：
-          // "dir": "C:/Users/你的用户名/models",
-          // "contentPath": "…/models/Qwen3.5-4B-Q4_K_M.gguf",
-          // "embedPath": "…/models/bge-m3-FP16.gguf",
-
-          // GPU：独显 > 核显，无 CPU 回退，无可用 GPU 时服务不启动。
-          // 可选 auto / cuda / vulkan；auto 依次试 cuda → metal → vulkan。
-          // "gpu": "auto",
-          // "gpuLayers": "auto",     // 分配进显存的层数
-          // "logLevel": "warn"       // silent / warn / info / debug
-        },
-
-        "service": {
-          // 起始端口；被占用时自动顺延，最多 4758（4747 留给 opencode-mem）
-          "port": 4748,
-
-          // 空闲多久后服务自动退出，0 = 不回收
-          "idleMinutes": 10,
-
-          // 服务没跑时是否由插件自动拉起。想自己常驻就设 false，手动跑：
-          //   cd plugin && node serve/server.mjs --port 4748 --idle-minutes 0
-          "autostart": true
-
-          // 已经手动起了服务就直接写地址，跳过发现与自动拉起：
-          // "url": "http://127.0.0.1:4748"
-        }
-      }
-    }
+    // 指向插件目录（含 package.json 与 index.ts 的那一层），不可填内层 plugin/。
+    // Windows 下用正斜杠 /。
+    "C:/Users/你的用户名/.config/opencode/plugins/mem-plus"
   ]
 }
 
-// 检索三工具 memory_search / memory_get / memory_reindex 启动时自动注册；
-// 索引固定在 ~/.config/opencode/mem-plus/index.db，所有项目共用。
-// 索引是可重建产物，删掉不丢记忆（本体是 markdown）。
-// 语义检索（mode "hybrid" / "vector"）第一次要手动补向量，每条约几秒：
-//   memory_reindex  {"embed": true}
-// 缺 node:sqlite（Node < 22.5）时三工具不注册，快照与抽取照常。
+// ⚠️ mem-plus 只能被加载一次。上面这条与"把目录放在 ~/.config/opencode/plugins/
+//    下让 OpenCode 自动发现"是两种加载方式，选一种即可。同时用会让 OpenCode 加载
+//    两份：日志出现两条 plugin loaded，工具重复注册，同一轮对话写两份快照。
+//
+// 也可写成对象并附带 options（仍然可用，但优先级低于 config.jsonc）：
+//
+//   "plugins": [
+//     {
+//       "package": "C:/path/to/mem-plus",
+//       "options": { "model": { "content": "opencode" } }
+//     }
+//   ]

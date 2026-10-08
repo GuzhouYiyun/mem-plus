@@ -1,0 +1,172 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "@fontsource-variable/jetbrains-mono";
+
+@custom-variant dark (&:is(.dark *));
+
+/* Light tokens — matrix-adjacent green accent */
+:root {
+  --background: #f3f5f3;
+  --foreground: #141814;
+  --card: #ffffff;
+  --card-foreground: #141814;
+  --popover: #ffffff;
+  --popover-foreground: #141814;
+  --primary: #0a8a0a;
+  --primary-foreground: #f5fff5;
+  --secondary: #e6ebe6;
+  --secondary-foreground: #141814;
+  --muted: #e6ebe6;
+  --muted-foreground: #5c665c;
+  --accent: #e6ebe6;
+  --accent-foreground: #0a8a0a;
+  --destructive: #d32f2f;
+  --border: #c9d0c9;
+  --input: #dce2dc;
+  --ring: #0a8a0a;
+  --chart-1: #0a8a0a;
+  --chart-2: #2aa02a;
+  --chart-3: #4caf50;
+  --chart-4: #087008;
+  --chart-5: #055505;
+  --radius: 0.45rem;
+  --sidebar: #e9eee9;
+  --sidebar-foreground: #141814;
+  --sidebar-primary: #0a8a0a;
+  --sidebar-primary-foreground: #f5fff5;
+  --sidebar-accent: #dce4dc;
+  --sidebar-accent-foreground: #0a8a0a;
+  --sidebar-border: #c9d0c9;
+  --sidebar-ring: #0a8a0a;
+  color-scheme: light;
+}
+
+/* Matrix / dark-terminal tokens (OpenCode-adjacent) */
+.dark {
+  --background: #0a0a0a;
+  --foreground: #e0e0e0;
+  --card: #111111;
+  --card-foreground: #e0e0e0;
+  --popover: #111111;
+  --popover-foreground: #e0e0e0;
+  --primary: #00ff00;
+  --primary-foreground: #0a0a0a;
+  --secondary: #1a1a1a;
+  --secondary-foreground: #e0e0e0;
+  --muted: #1a1a1a;
+  --muted-foreground: #888888;
+  --accent: #1a1a1a;
+  --accent-foreground: #00ff00;
+  --destructive: #ff4444;
+  --border: #333333;
+  --input: #222222;
+  --ring: #00ff00;
+  --chart-1: #00ff00;
+  --chart-2: #33ff66;
+  --chart-3: #66ff99;
+  --chart-4: #00cc00;
+  --chart-5: #009900;
+  --radius: 0.45rem;
+  --sidebar: #111111;
+  --sidebar-foreground: #e0e0e0;
+  --sidebar-primary: #00ff00;
+  --sidebar-primary-foreground: #0a0a0a;
+  --sidebar-accent: #1a1a1a;
+  --sidebar-accent-foreground: #00ff00;
+  --sidebar-border: #333333;
+  --sidebar-ring: #00ff00;
+  color-scheme: dark;
+}
+
+@theme inline {
+  --font-mono: "JetBrains Mono Variable", "JetBrains Mono", "Fira Code", ui-monospace, monospace;
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --color-foreground: var(--foreground);
+  --color-background: var(--background);
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-3xl: calc(var(--radius) * 2.2);
+  --radius-4xl: calc(var(--radius) * 2.6);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground font-mono text-sm antialiased;
+    margin: 0;
+  }
+  html {
+    @apply font-mono;
+  }
+}
+
+.markdown-content {
+  line-height: 1.6;
+  word-break: break-word;
+}
+.markdown-content pre {
+  overflow-x: auto;
+  padding: 0.75rem;
+  background: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.markdown-content code {
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+}
+.markdown-content p {
+  margin: 0.4em 0;
+}
+
+.confidence-ring {
+  --p: 0;
+  width: 2.25rem;
+  height: 2.25rem;
+  border-radius: 9999px;
+  display: grid;
+  place-items: center;
+  font-size: 0.65rem;
+  background: conic-gradient(var(--primary) calc(var(--p) * 1%), #333 0);
+}
+.confidence-ring span {
+  background: var(--card);
+  width: 1.75rem;
+  height: 1.75rem;
+  border-radius: 9999px;
+  display: grid;
+  place-items: center;
+}

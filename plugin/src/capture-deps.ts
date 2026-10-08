@@ -94,18 +94,21 @@ async function readTail(filePath: string, maxChars: number): Promise<string | nu
 /**
  * Extraction transport: one prompt in, one completion out.
  *
- * There is deliberately no default. The only implementation that costs money is
- * `ctx.generate.text`, so an implicit default of "use the OpenCode model" turns
- * every configuration mistake -- GGUF in the wrong directory, dependencies not
- * installed, port busy -- into metered API calls that the user never asked for
- * and cannot see. The caller must name the transport it wants.
+ * Two implementations, and the caller names which one it wants rather than
+ * inheriting one. `ctx.generate.text` is the default (`model.content`) because it
+ * needs nothing installed; the GGUF path needs a service that can be absent for
+ * reasons the user never sees -- wrong directory, missing dependency, busy port.
+ * So when the *local* path is chosen and then fails, the OpenCode fallback is
+ * opt-in (`model.allowHostedFallback`): without it, extraction is skipped, the
+ * snapshot is kept, and the landing zone retries when the service is back, rather
+ * than the model silently changing for as long as the outage lasts.
  */
 export type CaptureCompleteOverride = (params: {
   systemPrompt: string;
   prompt: string;
 }) => Promise<string>;
 
-/** Raised by `disabledComplete`; carries no paid request behind it. */
+/** Raised by `disabledComplete`; no model request was made behind it. */
 export class ExtractionDisabledError extends Error {
   constructor(reason: string) {
     super(`extraction disabled: ${reason}`);
@@ -126,8 +129,9 @@ export function disabledComplete(reason: string): CaptureCompleteOverride {
 }
 
 /**
- * Metered transport via the user's own OpenCode model. Only reachable through an
- * explicit `model.content: "opencode"` or `model.allowHostedFallback: true`.
+ * Transport via the user's own OpenCode model. The default for `model.content`,
+ * and also reachable from `model.allowHostedFallback: true` when the local GGUF
+ * path is the one that was asked for but cannot run.
  *
  * `model` pins which OpenCode model runs the extraction (`model.hostedModel`).
  * Omitted, `ctx.generate.text` uses OpenCode's own default -- unchanged behavior.
