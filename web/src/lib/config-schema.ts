@@ -292,13 +292,11 @@ export const CONFIG_SECTIONS: readonly ConfigSection[] = [
         help: "等新启动的服务报健康的最长时间，毫秒。超时日志报 `service did not become healthy`。",
       },
       { heading: "网页" },
-      {
-        key: "web.enabled",
-        label: "启用网页",
-        kind: "boolean",
-        defaultValue: true,
-        help: "关掉 = 不开记忆浏览器。agent 用不到它，端口随之关闭。",
-      },
+      // `web.enabled` is deliberately not a field. The memory browser is where the
+      // settings are edited, so a switch that turns off the page it lives on is a
+      // way to lose the only surface that can turn it back on. `readWebConfig` still
+      // honours a hand-written `web.enabled: false`, and the form preserves the key
+      // either way -- it just does not offer it.
       {
         key: "web.port",
         label: "端口",
