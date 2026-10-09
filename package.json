@@ -1,6 +1,6 @@
 {
   "name": "mem-plus",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "description": "OpenCode plugin giving coding agents persistent local memory.",
   "license": "MIT",
