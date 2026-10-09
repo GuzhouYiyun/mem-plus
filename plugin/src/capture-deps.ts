@@ -6,7 +6,8 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { CAPTURE_LATEST_MEMORY_CHARS, CAPTURE_MAX_TOOL_INPUT_LENGTH } from "../../extensions/memory-core/src/capture/constants.js";
-import { appendCaptureEntry } from "../../extensions/memory-core/src/capture/write.js";
+import { appendCaptureEntry, readCaptureTargetText } from "../../extensions/memory-core/src/capture/write.js";
+import { captureEntryMarker } from "../../extensions/memory-core/src/capture/render.js";
 import { dailyMemoryFile, homeProjectMemoryDir, memoryFile } from "./paths.js";
 import type { HostedModelRef } from "./model/config.js";
 import { asSessionMessage, type PluginContext, type SessionContentPart, type SessionMessageView } from "./opencode.js";
@@ -176,6 +177,14 @@ export function createCaptureDependencies(
       const base = record.workspaceDir || ctx.location.directory;
       const target = path.join(homeProjectMemoryDir(base), `${day}.md`);
       await appendCaptureEntry({ absolutePath: target, rendered, entryKey });
+      return target;
+    },
+
+    /** Same file, same marker, read instead of written. */
+    hasEntry: async ({ record, day, entryKey }) => {
+      const base = record.workspaceDir || ctx.location.directory;
+      const target = path.join(homeProjectMemoryDir(base), `${day}.md`);
+      return (await readCaptureTargetText(target)).includes(captureEntryMarker(entryKey));
     },
 
     loadLatestMemory: async (record) => {

@@ -41,6 +41,7 @@ import {
   createCaptureDependencies,
   disabledComplete,
   hostedComplete,
+  type CaptureCompleteOverride,
 } from "./capture-deps.js";
 import { createStorageOpenKeyedStore } from "./kv.js";
 import { missingContentPaths, readModelConfig, readServiceConfig, resolveEmbedAvailability } from "./model/config.js";
@@ -64,7 +65,7 @@ import {
   normaliseEventType,
   unwrapEvent,
 } from "./event-compat.js";
-import type { PluginContext } from "./opencode.js";
+import { asSessionMessage, type PluginContext, type SessionMessageView } from "./opencode.js";
 import { writeSessionSnapshot } from "./snapshot.js";
 import { loadWorkspaceBootstrapFiles } from "../../src/agents/workspace.js";
 import { buildBootstrapContextFiles } from "../../src/agents/embedded-agent-helpers/bootstrap.js";
@@ -72,12 +73,42 @@ import {
   prepareContextFilesForPrompt,
   buildProjectContextSection,
 } from "../../src/agents/system-prompt-context-files.js";
+import {
+  readFlushConfig,
+  resolveContextWindow,
+  shouldFlushForOccupancy,
+} from "./flush-config.js";
+import { runFlush, type FlushTrigger } from "./flush-run.js";
 
 /** Settle time after a turn completes before snapshot + sweep run. */
 const TURN_SETTLE_MS = 2_000;
 
 /** Pending prompts older than this are stale (session deleted or never answered). */
 const PROMPT_MAX_AGE_MS = 7 * 24 * 60 * 60_000;
+
+/**
+ * The context window of the model that produced a message, or 0 when unknown.
+ *
+ * `limit.context` is the same number the TUI's percentage is computed from, so the
+ * occupancy the flush gates on is the occupancy the user is looking at. The model
+ * catalog (`ctx.model.list`) is the source: the provider payload carries provider
+ * settings only and has no model list, so a lookup through it always returns 0.
+ */
+async function resolveFlushWindow(
+  ctx: PluginContext,
+  model: { id?: string; providerID?: string } | undefined,
+): Promise<number> {
+  if (!model?.id || !model.providerID) return 0;
+  const response = await ctx.model.list().catch(() => null);
+  const models = response?.data;
+  if (!Array.isArray(models)) return 0;
+  for (const entry of models) {
+    if (entry.providerID === model.providerID && entry.modelID === model.id) {
+      return resolveContextWindow(entry.limit);
+    }
+  }
+  return 0;
+}
 
 /** `listPendingCapturePrompts` filters by attempts; pass a huge ceiling to see them all. */
 const NO_RETRY_LIMIT = Number.MAX_SAFE_INTEGER;
@@ -115,15 +146,6 @@ export default Plugin.define({
     // Landing zone storage: the pipeline's only remaining host dependency.
     configureMemoryCoreDreamingState(createStorageOpenKeyedStore(ctx));
 
-    // Extraction goes through the local inference service (see serve/server.mjs
-    // for why it cannot run inside OpenCode's own process). The service is
-    // contacted lazily: probing it during setup would stall plugin loading behind
-    // a ~3 s model load in every window, whether or not anything needs extracting.
-    //
-    // If local inference is unusable, extraction is skipped rather than rerouted
-    // to the OpenCode model -- see `allowHostedFallback` in model/config.ts.
-    // Snapshots keep working either way, and openclaw's landing zone leaves the
-    // record pending so it is retried once the service is back.
     // Settings resolution happens once, here, so the precedence
     // (built-in defaults < `ctx.options` < `~/.config/opencode/mem-plus/config.jsonc`)
     // is stated in exactly one place and every reader below sees the same object.
@@ -184,6 +206,59 @@ export default Plugin.define({
       );
     }
 
+    // The extraction transport, named once because the pre-compaction flush reuses it.
+    //
+    // `model.content` decides this, and nothing else does. It used to be the other
+    // way round: the check was "does a service object exist", and because embeddings
+    // and summarising share one service, having the embedding GGUF installed created
+    // that object and handed *extraction* to the local model as well. So
+    // `"content": "opencode"` silently meant "local, whenever a GGUF happens to be
+    // present" -- and it broke the worst possible way, because the local model was
+    // missing on exactly those machines, so extraction stalled and the records piled
+    // up pending. The page's own help text for the setting ("不需要下载 GGUF、不需要
+    // 显卡") was false.
+    //
+    // The service is still created when `vectorsUsable`: that is the embedding slot,
+    // a separate need, and it must not depend on the extraction setting. It is also
+    // contacted lazily -- probing during setup would stall plugin loading behind a
+    // ~3 s model load in every window, whether or not anything needs extracting.
+    const complete: CaptureCompleteOverride =
+      modelConfig.contentBackend === "opencode"
+        ? hostedComplete(ctx, modelConfig.hostedModel)
+        : service
+          ? async ({ systemPrompt, prompt }) => {
+            try {
+              return await service.extract({ systemPrompt, prompt });
+            } catch (error) {
+              if (!allowHosted) {
+                // Throw rather than degrade. The sweep records the failure and the
+                // record stays pending, so the memory is written later instead of the
+                // model silently changing for as long as the outage lasts.
+                log(
+                  "local service unavailable; skipping extraction and leaving the " +
+                    "record pending (no OpenCode fallback -- " +
+                    'set options.model.allowHostedFallback = true to change this)',
+                  error,
+                );
+                throw error;
+              }
+              log(
+                "local service unavailable, using the OpenCode model for this turn " +
+                  "(model.allowHostedFallback = true)",
+                error,
+              );
+              return await hostedComplete(ctx, modelConfig.hostedModel)({ systemPrompt, prompt });
+            }
+          }
+          : disabledComplete(
+              missingContent.length > 0
+                ? `GGUF not found: ${missingContent.join(", ")}`
+                : "no local service and no hosted opt-in",
+            );
+
+    const captureDeps = createCaptureDependencies(ctx, complete);
+    const capture = createMemoryCapture(captureDeps);
+
     // Vector search degrades on its own: openclaw's `optional` embed requirement
     // ("Semantic memory recall is degraded..."), not a subsystem failure. The
     // retrieval tools take a null service as "vector modes disabled", so text
@@ -205,58 +280,18 @@ export default Plugin.define({
     }
 
     const localService = service;
-    const capture = createMemoryCapture(
-      createCaptureDependencies(
-        ctx,
-        // `model.content` decides this, and nothing else does.
-        //
-        // It used to be the other way round: the check was "does a service object
-        // exist", and because embeddings and summarising share one service, having
-        // the embedding GGUF installed created that object and handed *extraction*
-        // to the local model as well. So `"content": "opencode"` silently meant
-        // "local, whenever a GGUF happens to be present" -- and it broke the worst
-        // possible way, because the local model was missing on exactly those
-        // machines, so extraction stalled and the records piled up pending. The page's
-        // own help text for the setting ("不需要下载 GGUF、不需要显卡") was false.
-        //
-        // The service is still created when `vectorsUsable`: that is the embedding
-        // slot, a separate need, and it must not depend on the extraction setting.
-        modelConfig.contentBackend === "opencode"
-          ? hostedComplete(ctx, modelConfig.hostedModel)
-          : localService
-            ? async ({ systemPrompt, prompt }) => {
-              try {
-                return await localService.extract({ systemPrompt, prompt });
-              } catch (error) {
-                if (!allowHosted) {
-                  // Throw rather than degrade. The sweep records the failure and
-                  // the record stays pending, so the memory is written later
-                  // instead of the model silently changing for as long as the
-                  // outage lasts.
-                  log(
-                    "local service unavailable; skipping extraction and leaving the " +
-                      "record pending (no OpenCode fallback -- " +
-                      'set options.model.allowHostedFallback = true to change this)',
-                    error,
-                  );
-                  throw error;
-                }
-                log(
-                  "local service unavailable, using the OpenCode model for this turn " +
-                    "(model.allowHostedFallback = true)",
-                  error,
-                );
-                return await hostedComplete(ctx, modelConfig.hostedModel)({ systemPrompt, prompt });
-              }
-            }
-          : disabledComplete(
-              missingContent.length > 0
-                ? `GGUF not found: ${missingContent.join(", ")}`
-                : "no local service and no hosted opt-in",
-            ),
-      ),
-    );
 
+    // The extraction transport. `model.content` decides this, and nothing else does.
+    //
+    // It used to be the other way round: the check was "does a service object
+    // exist", and because embeddings and summarising share one service, having
+    // the embedding GGUF installed created that object and handed *extraction*
+    // to the local model as well. So `"content": "opencode"` silently meant
+    // "local, whenever a GGUF happens to be present" -- and it broke the worst
+    // possible way, because the local model was missing on exactly those
+    // machines, so extraction stalled and the records piled up pending. The page's
+    // own help text for the setting ("不需要下载 GGUF、不需要显卡") was false.
+    //
     // --- retrieval -----------------------------------------------------------
     //
     // The index opens once and is shared by every turn and every project window:
@@ -407,6 +442,144 @@ export default Plugin.define({
     const settleTimers = new Map<string, ReturnType<typeof setTimeout>>();
     let closed = false;
 
+    // --- pre-compaction flush ------------------------------------------------
+    //
+    // openclaw's fourth write path, ported from `extensions/memory-core/src/
+    // flush-plan.ts` and `src/auto-reply/reply/memory-flush.ts`. The gap it fills:
+    // mem-plus writes memory at *turn* boundaries (snapshot on settle, extraction
+    // in the sweep, dreaming once a day). A single long turn that compacts halfway
+    // through loses everything between its last settle and the compaction -- and
+    // the extractor cannot even recover it afterwards, because
+    // `ctx.session.context()` returns the post-compaction view and
+    // `loadAssistantTurn` then finds no reply to work from.
+    //
+    // Two triggers, because one is not enough:
+    //   occupancy -- the context hook below, on the last observed token usage.
+    //     This is the one that runs *before* the compaction, which is the whole
+    //     point of the upstream mechanism.
+    //   compaction -- `session.compaction.started`, as the backstop for a
+    //     compaction the hook did not see coming (a manual `/compact`, or a turn
+    //     that outgrew the window without ever returning to the hook).
+    const flushConfig = readFlushConfig(options);
+
+    /** Token usage of the newest assistant message, and that model's window. */
+    const readOccupancy = async (
+      sessionID: string,
+    ): Promise<{ used: number; window: number } | null> => {
+      const messages = await ctx.session
+        .context({ sessionID } as Parameters<typeof ctx.session.context>[0])
+        .catch(() => null);
+      if (!messages) return null;
+      let newest: {
+        created: number;
+        used: number;
+        model?: { id?: string; providerID?: string };
+      } | null = null;
+      for (const raw of messages) {
+        const message = asSessionMessage(raw) as SessionMessageView & {
+          readonly tokens?: {
+            readonly input?: number;
+            readonly output?: number;
+            readonly reasoning?: number;
+            readonly cache?: { readonly read?: number; readonly write?: number };
+          };
+        };
+        if (message.type !== "assistant" || !message.tokens) continue;
+        const usage = message.tokens;
+        const used =
+          (usage.input ?? 0) +
+          (usage.output ?? 0) +
+          (usage.reasoning ?? 0) +
+          (usage.cache?.read ?? 0) +
+          (usage.cache?.write ?? 0);
+        const created = message.time?.created ?? 0;
+        if (!newest || created > newest.created) {
+          newest = { created, used, model: message.model };
+        }
+      }
+      if (!newest) return null;
+      const window = await resolveFlushWindow(ctx, newest.model);
+      return { used: newest.used, window };
+    };
+
+    /**
+     * The conversation a flush distils: the most recent assistant text, newest
+     * last. A compaction discards the tail, and the tail is what an earlier
+     * capture has not already extracted, so the budget is spent on the newest
+     * exchanges and `buildCaptureMarkdownContext` does the bounding.
+     */
+    const loadRecentTurn = async (
+      sessionID: string,
+    ): Promise<{ textResponses: string[]; toolCalls: never[] } | null> => {
+      const messages = await ctx.session
+        .context({ sessionID } as Parameters<typeof ctx.session.context>[0])
+        .catch(() => null);
+      if (!messages) return null;
+      const textResponses: string[] = [];
+      for (const raw of messages) {
+        const message = asSessionMessage(raw);
+        if (message.type !== "assistant") continue;
+        for (const part of message.content ?? []) {
+          if (
+            part?.type === "text" &&
+            typeof part.text === "string" &&
+            part.text.trim().length > 0
+          ) {
+            textResponses.push(part.text);
+          }
+        }
+      }
+      if (textResponses.length === 0) return null;
+      return { textResponses, toolCalls: [] };
+    };
+
+    /**
+     * One flush at a time. The gate can fire from two places within milliseconds of
+     * each other (the hook and a compaction), and two concurrent flushes would run
+     * the same extraction twice and race on the same daily file -- the marker makes
+     * the second append a no-op, but only after both models have answered.
+     */
+    let flushInFlight = false;
+    const maybeFlush = async (
+      sessionID: string,
+      trigger: FlushTrigger,
+      options?: { readonly compactionID?: string; readonly note?: string },
+    ): Promise<void> => {
+      if (!flushConfig.enabled || closed || flushInFlight) return;
+      flushInFlight = true;
+      const note = options?.note ? ` (${options.note})` : "";
+      try {
+        const result = await runFlush({
+          deps: captureDeps,
+          trigger,
+          compactionID: options?.compactionID,
+          loadRecentTurn: () => loadRecentTurn(sessionID),
+          log,
+        });
+        if (result.kind === "captured" && result.path) {
+          log(`flush ${trigger}: appended -> ${result.path}${note}`);
+          // The daily file only grows, so only its new block needs indexing -- the
+          // same tail path the ordinary capture uses.
+          await indexAppended(result.path);
+        } else if (result.kind === "failed") {
+          log(`flush ${trigger}: failed -- ${result.detail ?? "?"}${note}`);
+        } else if (result.kind !== "already") {
+          log(`flush ${trigger}: skipped (${result.detail ?? "?"})`);
+        }
+        // `already` stays silent on purpose: the occupancy gate is re-evaluated on
+        // every turn for as long as the session runs above the threshold, and a
+        // marker hit is the expected answer to all but the first of them.
+      } catch (error) {
+        log(`flush ${trigger}: threw`, error);
+      } finally {
+        flushInFlight = false;
+      }
+    };
+
+    if (!flushConfig.enabled) {
+      log("pre-compaction flush off (flush.enabled = false)");
+    }
+
     // Inject bootstrap files into the session system prompt -- the same mechanism
     // openclaw uses for its embedded agents. The files are read fresh on every
     // model request because the owner may edit them between turns.
@@ -420,6 +593,29 @@ export default Plugin.define({
       (name) => name !== DEFAULT_MEMORY_FILENAME,
     );
     await ctx.session.hook("context", async (event) => {
+      // Occupancy first, and off the critical path. A flush costs a model request,
+      // so it must never delay the turn that noticed the threshold -- started and
+      // not awaited, the same rule as `scheduleSettle`.
+      const sessionID = (event as { sessionID?: string }).sessionID;
+      if (typeof sessionID === "string" && sessionID.length > 0 && flushConfig.enabled) {
+        void (async () => {
+          const occupancy = await readOccupancy(sessionID);
+          if (!occupancy || occupancy.window <= 0) return;
+          if (
+            shouldFlushForOccupancy({
+              totalTokens: occupancy.used,
+              contextWindowTokens: occupancy.window,
+              contextRatio: flushConfig.contextRatio,
+            })
+          ) {
+            await maybeFlush(sessionID, "occupancy", {
+              note:
+                `context ${Math.round((occupancy.used / occupancy.window) * 100)}% of ` +
+                `${occupancy.window} tokens`,
+            });
+          }
+        })();
+      }
       try {
         const files = await loadWorkspaceBootstrapFiles(workspaceDir, instructionFileNames);
         const homeMemoryPath = path.join(memoryHomeDir(), DEFAULT_MEMORY_FILENAME);
@@ -622,6 +818,17 @@ export default Plugin.define({
         void capture
           .onUserPrompt({ sessionId: sessionID, messageId: inboxID, content: text })
           .catch((error: unknown) => log("landing failed", error));
+        return;
+      }
+
+      if (canonicalType === "session.compaction.started") {
+        // The backstop trigger. The context hook normally gets there first; this
+        // covers a manual `/compact` and a turn that outgrew the window without
+        // returning to the hook. The event's own id is what keeps two compactions
+        // in one day from sharing a marker.
+        void maybeFlush(sessionID, "compaction", {
+          compactionID: event.data?.inputID ?? event.id,
+        });
         return;
       }
 

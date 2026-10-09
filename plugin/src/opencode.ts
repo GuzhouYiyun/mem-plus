@@ -50,9 +50,13 @@ export type SessionInfoView = {
 /** `ctx.event.subscribe` yields `OpenCodeEvent`; we only need type + session payload. */
 export type EventView = {
   readonly type?: string;
+  /** Envelope id (`evt_...`). A compaction event's own identity when it carries no `inputID`. */
+  readonly id?: string;
   readonly data?: {
     readonly sessionID?: string;
     readonly inboxID?: string;
+    /** `session.compaction.started` names the message the compaction will produce. */
+    readonly inputID?: string;
     readonly item?: {
       readonly type?: string;
       readonly payload?: { readonly text?: string; readonly files?: readonly unknown[] };

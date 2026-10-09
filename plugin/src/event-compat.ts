@@ -29,6 +29,11 @@ import type { EventView, PluginContext } from "./opencode.js";
  */
 const EVENT_ALIASES: Readonly<Record<string, string>> = {
   "session.inbox.enqueued": "session.inbox.enqueued",
+  // `started` is the pre-compaction signal the flush hangs off; `ended` keeps its
+  // own name rather than collapsing into `session.compacted`, because "the
+  // compaction finished" and "the compaction is about to start" are different
+  // moments and the two are read differently.
+  "session.compaction.started": "session.compaction.started",
   "session.compaction.ended": "session.compacted",
   "session.compacted": "session.compacted",
   "session.execution.succeeded": "session.execution.succeeded",
@@ -86,6 +91,7 @@ export function unwrapEvent(raw: unknown): EventView | undefined {
 
   return {
     type: typeof source.type === "string" ? source.type : undefined,
+    id: typeof source.id === "string" ? source.id : undefined,
     data: {
       sessionID:
         (typeof data.sessionID === "string" && data.sessionID) ||
@@ -96,6 +102,9 @@ export function unwrapEvent(raw: unknown): EventView | undefined {
           ? ((data.info as Record<string, unknown>).id as string)
           : undefined),
       inboxID: typeof data.inboxID === "string" ? data.inboxID : undefined,
+      // Optional in the event's own schema, so both this and the envelope id are
+      // read: the flush needs one stable id per compaction and either will do.
+      inputID: typeof data.inputID === "string" ? data.inputID : undefined,
       item: data.item as EventView["data"] extends { item?: infer I } ? I : never,
     },
   };

@@ -75,7 +75,8 @@ export type CaptureDependencies = {
   loadLatestMemory?: (record: CapturePromptRecord) => Promise<string | null>;
   /**
    * Persists one rendered capture. Must be idempotent per `record.id`.
-   * Defaults to appending `memory/YYYY-MM-DD.md` (see write.ts).
+   * Defaults to appending `memory/YYYY-MM-DD.md` (see write.ts). Returns the
+   * absolute path it wrote so callers can index/report the real location.
    */
   writeEntry?: (params: {
     record: CapturePromptRecord;
@@ -83,7 +84,17 @@ export type CaptureDependencies = {
     relativePath: string;
     rendered: string;
     entryKey: string;
-  }) => Promise<void>;
+  }) => Promise<string>;
+  /**
+   * Reports whether the day's file already carries `entryKey`, so a caller that
+   * would otherwise pay for an extraction to find out can ask first. `writeEntry`
+   * makes a repeated write a no-op, but by then the expensive half has run.
+   */
+  hasEntry?: (params: {
+    record: CapturePromptRecord;
+    day: string;
+    entryKey: string;
+  }) => Promise<boolean>;
   /** Workspace the capture lands in. */
   workspaceDir: string;
   /** Overrides the day used for `memory/YYYY-MM-DD.md`. */
