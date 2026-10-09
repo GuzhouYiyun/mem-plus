@@ -45,6 +45,14 @@ mem-plus 是 OpenCode 的持久记忆插件。记忆内容跨会话、跨项目�
 
 ### 2. 安装
 
+先停止正在运行的 OpenCode 服务。插件目录一解压出来就可被自动发现，而依赖尚未安装，此时的加载尝试必然失败，且失败后不会自动重试。
+
+```bash
+opencode service stop
+```
+
+再解压并安装依赖：
+
 ```bash
 tar -xzf 此处用文件名替换 -C ~/.config/opencode/plugins
 cd ~/.config/opencode/plugins/mem-plus
@@ -358,9 +366,10 @@ markdown 文件为唯一数据源，索引为可再生数据。
 
 ## 更新
 
-无自动更新。更新方式为下载新版本压缩包后覆盖安装：
+无自动更新。更新方式为下载新版本压缩包后覆盖安装。与安装同理，先停止服务再覆盖文件：
 
 ```bash
+opencode service stop                    # 覆盖期间服务若在运行，会加载到半旧半新的插件
 npm i "<新版本 tgz 的完整路径>"    # 覆盖安装，依赖自动更新
 opencode service restart           # 重启后生效
 ```
