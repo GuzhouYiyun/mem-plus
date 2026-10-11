@@ -91,14 +91,27 @@ VIAddVersionKey /LANG=2052 "LegalCopyright"  "MIT"
 ; Recorded so this is not re-attempted from scratch: the blocker is MUI2's, not NSIS's, and
 ; the first thing to try next time is a self-contained NSIS page with no MUI2 in it at all.
 !define MUI_FINISHPAGE_TITLE "安装完成"
-!define MUI_FINISHPAGE_TEXT "mem-plus ${MEMPLUS_VERSION} 已安装到：$\r$\n$\r$\n$INSTDIR$\r$\n$\r$\n如果 OpenCode 之前开着，它已经被重启，记忆功能现在就可以用了。如果没有开过，请手动启动它。$\r$\n$\r$\n验证：浏览器打开 http://127.0.0.1:4747/ ，能看到记忆浏览器即为正常。$\r$\n$\r$\n要卸载：Windows 设置 → 应用 → 已安装的应用 → mem-plus → 卸载。记忆数据不受影响。$\r$\n$\r$\n提示：没有装向量检索组件，搜索按全文检索工作（这是没有可用 GPU 时的正常回退方式）。"
+; Two things only, because that is all a user can act on at this point: it
+; finished, and one file is still theirs to fetch. The earlier version of this
+; also listed the install path, how to verify the memory browser, how to uninstall,
+; and a fallback note about vector search -- none of which the person clicking
+; "完成" needed at that moment, and together they filled the page.
+;
+; The vector note in particular had become false: the runtime is installed on
+; every install now, so there is no "component not installed" case left to
+; explain. Its replacement is the model, which the installer never bundles.
+; "安装成功。" is the wording the owner asked for. An earlier revision opened with
+; "mem-plus 已安装。" to pair with the uninstaller's "mem-plus 已卸载。"; that was
+; solving for symmetry nobody asked for, and "口语化严重" was about the welcome
+; page's opening, not this one.
+!define MUI_FINISHPAGE_TEXT "安装成功。$\r$\n$\r$\n向量模型未随本安装包分发。请另行下载 bge-m3（约 2.2 GB），并放置于：$\r$\n$PROFILE\.config\opencode\mem-plus\models\"
 
 ; Not an instruction any more. The installer stops OpenCode itself with
 ; `opencode service stop` before writing and starts it again afterwards, so the
 ; only thing worth saying here is that an in-progress session will be
 ; interrupted -- which the user should know before clicking through, not after.
 !define MUI_WELCOMEPAGE_TITLE "安装 mem-plus"
-!define MUI_WELCOMEPAGE_TEXT "这个安装程序会覆盖：$\r$\n$\r$\n$INSTDIR$\r$\n$\r$\n安装过程中 OpenCode 如果开着，会短暂记录几次加载失败，这是正常的。$\r$\n$\r$\n装完最后会自动重启一次，那时读到的就是完整的插件。安装程序不会主动去动你正在进行的对话。$\r$\n$\r$\n你的记忆数据在另一个目录，不受影响。"
+!define MUI_WELCOMEPAGE_TEXT "本安装程序将覆盖以下目录：$\r$\n$\r$\n$INSTDIR$\r$\n$\r$\n安装期间，若 OpenCode 正在运行，其日志中可能出现少量加载失败记录，属正常现象。$\r$\n$\r$\n安装结束后将自动重启 OpenCode 一次。进行中的对话不会因此中断。$\r$\n$\r$\n记忆数据保存在其他目录，不受影响。"
 
 ; The uninstaller is a normal MUI2 wizard, not a bare "are you sure" box. It says
 ; what it is about to delete, because the line it runs is RMDir /r and the user
@@ -107,7 +120,7 @@ VIAddVersionKey /LANG=2052 "LegalCopyright"  "MIT"
 ; OPENCODE_CONFIG_DIR or XDG_CONFIG_HOME set the plugin is not under the profile
 ; and a literal here would name a directory that is not the one being touched.
 !define MUI_UNCONFIRMPAGE_TEXT_TOP "将删除 mem-plus 插件文件：$\r$\n$\r$\n$INSTDIR$\r$\n$\r$\n你的记忆数据保存在另一个目录（与上面这个不同名），不会被删除。"
-!define MUI_UNFINISHPAGE_TEXT_TOP "mem-plus 已卸载。$\r$\n$\r$\n$\r$\n你的记忆数据仍然保存在原来的位置，不会被删除。$\r$\n$\r$\n如果 OpenCode 之前开着，它已经被重启，记忆功能不再加载。$\r$\n$\r$\n如果之后还想用，重新运行安装程序即可；记忆会立刻回来。"
+!define MUI_UNFINISHPAGE_TEXT_TOP "mem-plus 已卸载。$\r$\n$\r$\n$\r$\n记忆数据仍保存在原位置，未被删除。$\r$\n$\r$\n若 OpenCode 此前正在运行，现已完成重启。$\r$\n$\r$\n如需重新启用，重新运行安装程序即可，已有记忆将一并恢复。"
 
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_DIRECTORY
@@ -299,17 +312,21 @@ SectionEnd
 ; owner's request: with no choice left to make, there is no component page at all
 ; (see the page list), and the runtime comes with every install.
 ;
-; The consequence worth stating plainly: an install now also brings node-llama-cpp,
-; ~690 MB. That is the point of the change, not a side effect of it.
+; Size, measured on this machine after a real install (2026-10-12):
+; node-llama-cpp is 971 files / 37.8 MB, NOT the ~690 MB the old component
+; description claimed. That number came from a 705000 AddSize written back when
+; the component was optional, and it was never checked against what npm actually
+; puts on disk. The bulk of an install is elsewhere: node_modules totals 29482
+; files / 858.3 MB, of which node-llama-cpp is 37.8 MB.
 Section "本地向量检索依赖" SecVectors
 SectionIn RO
   ; /o is unchecked by default, so .onInit no longer has to clear it -- which
   ; removes the last place a wrong section index could silently skip a step.
   ;
-  ; AddSize is what makes the page's "所需空间" line honest. Without it the page
-  ; reports only the ~19 MB payload and never mentions the 690 MB this row adds,
-  ; so the one number a user is judging the choice by is the one number missing.
-  AddSize 705000
+  ; No AddSize here on purpose. This row's disk cost lands inside npm's tree, which
+  ; SecDeps declares as a whole; counting it twice is one way the installer's
+  ; "所需空间" line ends up wrong.
+  ;
   ; The flag is set here, not read from a Var the user never touches: a section
   ; only runs when it is selected, so its presence *is* the answer.
   StrCpy $Vectors "1"
@@ -317,30 +334,46 @@ SectionEnd
 
 Section "安装依赖" SecDeps
 SectionIn RO
+  ; Measured on this machine after a real install (2026-10-12): 29482 files /
+  ; 858.3 MB for the whole npm tree. That is the honest number for "所需空间" on a
+  ; machine that has nothing yet -- the old 705000 AddSize (688 MB) was attached to
+  ; the vector row and described neither this nor that.
+  ;
+  ; An update over an existing install needs almost none of this: npm reconciles
+  ; against what is already on disk and leaves satisfied packages alone. Measured
+  ; with `npm install --dry-run` on the live install, the only changes npm planned
+  ; were the nine generated @openclaw/* aliases, which postinstall rewrites anyway.
+  ; node-llama-cpp did not appear at all.
+  AddSize 879000
+
   DetailPrint "正在安装依赖，请稍候……"
-  ; `--omit=optional` is the whole 690 MB: node-llama-cpp pulls per-platform GPU
-  ; binaries (win-x64, win-arm64, cuda, vulkan, cuda-ext all at once).
+  ; `--omit=optional` is the dangerous flag here, and not because of its size.
+  ; npm reconciles $INSTDIR against an ideal tree built without optional deps, so
+  ; this flag PRUNES node-llama-cpp if it is already there. Measured 2026-10-11: an
+  ; install that had the vector component was updated with that row left unticked,
+  ; and node-llama-cpp was deleted -- vector search then refused to start, with
+  ; nothing anywhere saying the feature had been removed. An update silently
+  ; downgraded the product.
   ;
-  ; It is also not merely a "skip". npm reconciles $INSTDIR against an ideal
-  ; tree built without optional deps, so this flag PRUNES node-llama-cpp if it is
-  ; already there. Measured 2026-10-11: an install that had the vector component
-  ; was updated with this row left unticked, and node-llama-cpp was deleted --
-  ; vector search then refused to start, with nothing anywhere saying the feature
-  ; had been removed. An update silently downgraded the product.
+  ; The flag is now unreachable: there is no row to leave unticked and $Vectors is
+  ; 1 unconditionally. The branch below is kept rather than deleted because it is
+  ; the only code that knows about this failure, and the failure is a property of
+  ; npm rather than of the choice that used to reach it.
   ;
-  ; So unticked now means "do not add", never "take away what is already here".
-  ; Ticking is how you add it; nothing in this installer removes it, which also
-  ; matches the uninstaller, where nothing the user did not ask for is touched.
-  ; This is the branch a silent install lands on: /S shows no component page, so
-  ; $Vectors is 0 by definition, and an update must not be able to strip a
-  ; working install just because nobody was there to tick a box.
-  ;
-  ; The same reasoning kept this out of .onInit, where pre-checking the row would
-  ; have needed SectionSetFlags by index -- the exact mechanism that already cost
-  ; this script one silent, exit-code-0 bug (see the note there).
+  ; What an update does instead of reinstalling the runtime: nothing, on purpose.
+  ; npm skips packages already present at a satisfying version, so node-llama-cpp
+  ; is not fetched again -- measured with `npm install --dry-run` against the live
+  ; install, which planned no change to it at all. That is the behaviour the owner
+  ; asked for on 2026-10-12, and it is npm's own rather than something this script
+  ; performs. The already-installed branch exists to say so out loud, so the
+  ; DetailPrint does not read like a fresh download every time.
   StrCpy $KeptVectors "0"
   ${If} $Vectors == "1"
-    DetailPrint "安装全部依赖（含向量检索组件）……"
+    ${If} ${FileExists} "$INSTDIR\node_modules\node-llama-cpp\package.json"
+      DetailPrint "已装有向量检索运行库，本次跳过重装……"
+    ${Else}
+      DetailPrint "安装全部依赖（含向量检索组件）……"
+    ${EndIf}
     StrCpy $InstallFlags ""
   ${ElseIf} ${FileExists} "$INSTDIR\node_modules\node-llama-cpp\package.json"
     DetailPrint "检测到已安装的向量检索组件，本次保留……"

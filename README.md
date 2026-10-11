@@ -17,7 +17,8 @@ mem-plus 是 OpenCode 的持久记忆插件。记忆内容跨会话、跨项目�
 ## 目录
 
 - [运行要求](#运行要求)
-- [快速开始](#快速开始)
+- [安装](#安装)
+- [配置](#配置)
 - [模型](#模型)
 - [日常使用](#日常使用)
 - [数据位置](#数据位置)
@@ -36,15 +37,26 @@ mem-plus 是 OpenCode 的持久记忆插件。记忆内容跨会话、跨项目�
 
 抽取默认使用 OpenCode 侧的模型，无需 API key、provider 或 endpoint，认证与计费由 OpenCode 负责。
 
-## 快速开始
+## 安装
 
-### 1. 下载压缩包
+### 下载
 
-在仓库的 **Releases** 页面下载 `.tgz` 文件。
+在 [Releases](https://github.com/GuzhouYiyun/mem-plus/releases) 页面下载：
 
-### 2. 安装
+| 文件 | 适用 |
+|---|---|
+| `mem-plus-installer-<版本号>.exe` | Windows x64。双击安装，无需命令行 |
+| `mem-plus-<版本号>.tgz` | 任意系统。手动安装，见下文 |
 
-先停止正在运行的 OpenCode 服务。插件目录一解压出来就可被自动发现，而依赖尚未安装，此时的加载尝试必然失败，且失败后不会自动重试。
+### 用安装器安装（Windows）
+
+双击 `.exe`，按提示完成。安装位置默认取 OpenCode 实际扫描的插件目录，通常无需修改。
+
+安装器不包含向量模型，见[向量模型](#向量模型)。
+
+### 用压缩包安装（任意系统）
+
+先停止正在运行的 OpenCode 服务，否则它会在依赖装完之前就开始加载插件。
 
 ```bash
 opencode service stop
@@ -67,11 +79,11 @@ Set-Location "$env:USERPROFILE\.config\opencode\plugins\mem-plus"
 npm install
 ```
 
-### 3. 放置向量模型
+### 向量模型
 
-本步骤启用语义检索，为可选项。未放置向量模型时，`memory_search` 使用关键词检索，会话快照、条目抽取与记忆注入均不受影响。
+安装器不包含向量模型，需自行下载并放置。下载地址、格式与后端要求见[模型](#模型)。
 
-在 `~/.config/opencode/mem-plus/models/` 下放置向量模型文件，该目录需自行创建：
+放置位置：
 
 ```bash
 mkdir -p ~/.config/opencode/mem-plus/models
@@ -82,32 +94,19 @@ mkdir -p ~/.config/opencode/mem-plus/models
 New-Item -ItemType Directory -Force "$env:USERPROFILE\.config\opencode\mem-plus\models"
 ```
 
-该目录即默认值，保持默认位置时无需修改配置。
-抽取用 OpenCode 侧模型，向量模型在本机运行。装好向量模型即完成配置，缺失时的行为见[模型](#模型)。
+未放置向量模型时，`memory_search` 使用关键词检索，会话快照、条目抽取与记忆注入均不受影响。
 
-### 4. 验证
+### 验证
 
 ```bash
 opencode service restart
 ```
 
-日志位于 `~/.config/opencode/mem-plus/mem-plus.log`，应包含：
-
-```
-[mem-plus] plugin loaded, workspace ...
-[mem-plus] retrieval tools ready: memory_search, memory_get, memory_reindex, memory_wiki_import
-[mem-plus] memory browser at http://127.0.0.1:4747/
-```
-
-- `plugin loaded`：插件已加载。缺失时核对第 2 步的安装路径后重启
-- `retrieval tools ready`：检索工具已注册
-- `memory browser at`：记忆浏览器地址。端口被占用时自动递增，实际端口以日志为准
-
-访问 `http://127.0.0.1:4747`，页面正常显示即安装完成。
+日志位于 `~/.config/opencode/mem-plus/mem-plus.log`，其中 `plugin loaded` 一行表示插件已加载。访问 `http://127.0.0.1:4747`，页面正常显示即安装完成。其它情况见[故障排查](#故障排查)。
 
 在任意项目内向 agent 提出一个具体任务（例如「创建 test-memplus.txt，内容为 hello 并读取确认」），完成一轮对话后，全局记忆目录下应出现当日文件。该写入发生在对话结算约 2 秒后。
 
-### 选项
+## 配置
 
 | 键 | 默认值 | 说明 |
 |---|---|---|
@@ -270,7 +269,7 @@ memory_reindex { "embed": true }    // 同时补齐向量
 |---|---|---|
 | 提示词文件 | `AGENTS.md`、`SOUL.md`、`IDENTITY.md`、`USER.md`、`BOOTSTRAP.md`、`MEMORY.md` | 前五个为当前工作目录内的文件；`MEMORY.md` 为全局记忆目录文件，所有项目共用 |
 | 梦境日记 | `DREAMS.md`，按日记条目分条显示 | 只读 |
-| 设置 | 配置项见[选项](#选项)，模型相关项见[模型](#模型) | 写入 `config.jsonc` |
+| 设置 | 配置项见[配置](#配置)，模型相关项见[模型](#模型) | 写入 `config.jsonc` |
 
 文件类标签页修改后下一轮对话生效，无需重启。设置页修改后需重启。
 
@@ -334,6 +333,8 @@ markdown 文件为唯一数据源，索引为可再生数据。
 |---|---|
 | 工具重复注册，日志出现两条 `plugin loaded`，同一轮对话两份快照 | 自动发现与 `opencode.jsonc` 指向同一目录，插件加载两次。保留一种 |
 | 日志无 `plugin loaded` | 核对安装路径是否指向含 `package.json` 与 `index.ts` 的目录、是否为绝对路径、Windows 下是否使用正斜杠，然后重启 |
+| 有 `plugin loaded` 但无 `retrieval tools ready` | 检索工具注册失败，`memory_search` 等不可用。检查日志中紧随其后的错误 |
+| 浏览器打不开默认端口 | 端口被占用时自动递增，实际端口以日志中 `memory browser at` 一行为准 |
 | 模块解析失败 | 运行时模块别名未生成。执行 `node "<插件目录>/plugin/scripts/link-openclaw-alias.mjs"` 后重启 |
 | `index unavailable (no node:sqlite ...)` | Node.js 低于 22.5，检索工具不注册。会话快照与条目抽取不受影响 |
 | `no embedding model at ... vector search off` | 未放置向量模型，或路径不正确。仅语义检索不可用 |
@@ -358,26 +359,42 @@ opencode service restart           # 重启后生效
 
 覆盖安装会替换插件目录内的全部文件。记忆、索引与日志位于 `~/.config/opencode/mem-plus/`，不在插件目录内，不受影响。各版本号与安装包见 Releases 页面。
 
-安装器（Windows `.exe`）每次都会安装向量检索的 GPU 运行库，不再提供勾选框（0.1.1 起取消了「本地向量检索依赖」这个可选项）。因此覆盖更新会带上 `node-llama-cpp`（约 690 MB）。向量**模型**仍然需要你自己下载放置，见上文「放置向量模型」。
+安装器（Windows `.exe`）每次都会安装向量检索的 GPU 运行库，不再提供勾选框（0.2.0 起取消了「本地向量检索依赖」这个可选项）。
+
+实测体积（2026-10-12，一次真实安装）：`node-llama-cpp` 971 个文件 / **37.8 MB**。整棵依赖树 29482 个文件 / 858.3 MB，它只占其中一小部分。覆盖更新时 npm 不会重装它——`npm install --dry-run` 在已装好的树上对 `node-llama-cpp` 没有任何动作。
+
+向量**模型**仍然需要你自己下载放置，约 2.2 GB，见上文「放置向量模型」。
 
 > 早期版本的安装器在不勾选该项时会传入 `--omit=optional`，npm 会顺带把已安装的 `node-llama-cpp` 一并剪掉，于是更新后向量检索静默失效——日志只提示显卡不可用，与真实原因无关。现在该分支已不可达：运行库每次都装，且报错信息会直接说明是包缺失而非显卡问题。
 
 ## 卸载
 
+### 用安装器卸载（Windows）
+
+**Windows 设置 → 应用 → 已安装的应用 → mem-plus → 卸载。**
+
+卸载器仅删除安装器自身写入的文件。放在插件目录内的其他文件（例如你下载的向量模型）不在删除范围内，会保留在原处。记忆数据目录不会被触碰。
+
+### 手动卸载（压缩包安装）
+
 ```bash
 opencode service stop
-rm -rf ~/.config/opencode/mem-plus            # 数据目录（含全局记忆目录）
 rm -rf ~/.config/opencode/plugins/mem-plus    # 插件目录
 ```
 
 ```powershell
 # Windows
 opencode service stop
-Remove-Item -Recurse -Force "$env:USERPROFILE\.config\opencode\mem-plus"
 Remove-Item -Recurse -Force "$env:USERPROFILE\.config\opencode\plugins\mem-plus"
 ```
 
-需保留记忆时，先备份数据目录内的 `workspace/`。若使用了显式注册，同时删除 `opencode.jsonc` 中的 `plugins` 条目，最后执行 `opencode service restart`。
+记忆数据目录 `~/.config/opencode/mem-plus/` 默认保留。需要一并清除时再手动删除：
+
+```bash
+rm -rf ~/.config/opencode/mem-plus            # 数据目录（含全局记忆目录）
+```
+
+需保留记忆时，先备份该目录内的 `workspace/`。若使用了显式注册，同时删除 `opencode.jsonc` 中的 `plugins` 条目，最后执行 `opencode service restart`。
 
 ## 许可证
 
