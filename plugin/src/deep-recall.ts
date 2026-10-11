@@ -35,6 +35,7 @@
 //   behaviour it wraps -- which tools, how many rounds, what counts as a usable answer --
 //   follows upstream's settings.
 import { resolveRecallEscalationDecision } from "../../extensions/active-memory/escalation.js";
+import { localiseForRecall } from "./recall-intent.js";
 import { completeThroughHost } from "./llm.js";
 import type { MemoryTool } from "./memory-tools.js";
 import { truncateUtf16Safe } from "../../packages/normalization-core/src/utf16-slice.js";
@@ -401,16 +402,52 @@ export async function runDeepRecall(params: {
 }): Promise<DeepRecallOutcome> {
   const { config } = params;
   if (!config.enabled) return { context: null, reason: "disabled" };
+
+  // Localise first. Upstream's gate is `hasRecallIntent`, and its zh-Hans group matches
+  // 4 of 13 ordinary Chinese recall questions against 13 of 13 for its English patterns
+  // (measured 2026-10-11) -- its lookahead needs the verb phrase to END in 过/了, which
+  // natural "动词+宾语" questions never do. So the message is translated to the script the
+  // patterns were written for, and the SAME unchanged function decides. This happens for
+  // every non-Latin message, not only when the regex missed, so a gate decision never
+  // depends on which patterns happen to cover today's phrasing.
+  const localised = await localiseForRecall({
+    ctx: params.ctx,
+    message: params.message,
+    ...(params.model ? { model: params.model } : {}),
+    log: params.log,
+  });
+
   // Upstream's gate, upstream's function: `mode: "off"` never runs, `"always"` always does,
   // and a strong lane-one hit short-circuits before a second lookup is paid for.
-  const decision = resolveRecallEscalationDecision({
-    mode: config.mode,
-    message: params.message,
-    hasStrongLaneOneHit: params.hasStrongLaneOneHit,
-  });
-  if (decision === "mode-off") return { context: buildRecallOutcomePrefix("skipped-no-recall-intent") };
-  if (decision === "strong-lane-one-hit") return { context: null, reason: decision };
-  if (decision !== "recall") return { context: buildRecallOutcomePrefix("skipped-no-recall-intent") };
+  const decide = (message: string) =>
+    resolveRecallEscalationDecision({
+      mode: config.mode,
+      message,
+      hasStrongLaneOneHit: params.hasStrongLaneOneHit,
+    });
+  // The translation is authoritative when there is one; the original is still consulted
+  // so a translation that loses a match upstream would have found can never narrow recall.
+  // `mode-off` and `strong-lane-one-hit` win outright -- turning recall off, or skipping it
+  // because lane 1 already hit, must not be overridable by either text.
+  const decision = localised.localised ? decide(localised.text) : decide(params.message);
+  const decisionOriginal = localised.localised ? decide(params.message) : decision;
+  const resolved =
+    decision === "mode-off" || decision === "strong-lane-one-hit"
+      ? decision
+      : decision === "recall" || decisionOriginal === "recall"
+        ? "recall"
+        : decision;
+
+  if (resolved === "mode-off") return { context: buildRecallOutcomePrefix("skipped-no-recall-intent") };
+  if (resolved === "strong-lane-one-hit") return { context: null, reason: resolved };
+  if (resolved !== "recall") return { context: buildRecallOutcomePrefix("skipped-no-recall-intent") };
+
+  // The same English feeds the search. Upstream's `buildQuery` widens the query with the
+  // recent conversation tail for the model's benefit; the index itself is lexical, and FTS
+  // needs terms the sentence literally contains, which a natural question does not have
+  // ("百度网盘右键菜单怎么关" -> 0 hits, "百度网盘" -> 2). The translation is the closest
+  // thing to a keyword rewrite that does not require inventing one.
+  const searchQuery = localised.localised ? localised.text : params.searchQuery;
 
   const breakerKey = params.model ? `${params.model.providerID}/${params.model.id}` : "opencode-default";
   const startedAt = Date.now();
@@ -428,7 +465,7 @@ export async function runDeepRecall(params: {
 
   let prompt = buildRecallPrompt({
     query: params.conversationContext,
-    searchQuery: params.searchQuery,
+    searchQuery,
     promptStyle: config.promptStyle,
     toolsAllow: usable,
     ...(config.promptOverride ? { promptOverride: config.promptOverride } : {}),
