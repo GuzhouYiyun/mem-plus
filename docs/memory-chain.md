@@ -241,6 +241,54 @@ Requires `automaticRecall.eligible === true` **and** all its project keys active
    (zh-Hans, zh-Hant, ja, ko, ru, es); a future-reminder phrasing suppresses
    escalation unless a retrospective marker co-occurs.
 
+**DIVERGENCE (mem-plus, 2026-10-11) — the gate sees a translated message;
+`hasRecallIntent` itself is untouched, byte-identical to upstream.** Upstream decides a turn
+deserves deep recall with `hasRecallIntent` (`extensions/active-memory/escalation.ts`): fourteen
+English regexes plus six localized groups. Measured 2026-10-11 on thirteen ordinary recall
+questions: the **English patterns match 13/13, the zh-Hans group 4/13**. Its lookahead requires
+the recall verb to be immediately followed by 过 or 了, so it only fires when the verb phrase
+*ends* there — "上次我们决定了什么？" matches, "我们之前讨论过向量模型吗？" does not, because the
+character after 过 begins the object. Two of this user's own questions ("我最开始想做什么东西？",
+"一开始你打算做的是什么？") miss it.
+
+Three approaches were built and measured before settling:
+
+| approach | recall questions matched | diverges from upstream |
+|---|---|---|
+| upstream zh-Hans group, unmodified | 4/13 | — |
+| hand-widened Chinese regex in `escalation.ts` | 11/13 | yes: forked upstream's decision logic |
+| **translate → run upstream's unchanged ENGLISH group** | **13/13** | one localisation step |
+
+The hand-widened regex and a model classifier (Mem0's "Proactive Memory" Pattern 2, which asks
+the model for `DEMAND`/`NO_DEMAND`) were both **prototyped, measured, and removed**. The
+classifier scored 11/13 — missing the exact sentences above — and, wired behind the regex gate as
+it was, never ran on the messages it was built for, because the gate returned `no-recall-intent`
+first. The widened regex was deleted too: `escalation.ts` is now byte-identical to upstream's, so
+the whole `extensions/active-memory/` tree carries no divergence at all (verified file by file;
+only `trigger-recall.ts` differs, replaced by `plugin/src/trigger-recall.ts`, and the upstream
+test-support file is not vendored).
+
+English wins because upstream's 14 English patterns were written against natural English and
+cover it; the Chinese group was the weak one. So `plugin/src/recall-intent.ts` **localises every
+non-Latin message into English and hands the unchanged `hasRecallIntent` the text it was written
+for.** Measured 13/13, 0 false positives on negatives.
+
+Two properties kept deliberate:
+- **Localisation is not a fallback.** Every Han/Kana/Hangul message is translated before the gate,
+  so a decision never depends on which phrasings today's patterns happen to cover. Latin, Cyrillic
+  and Arabic pass through untouched (upstream covers them), costing nothing.
+- **The gate can only widen.** Recall runs if *either* the translation or the original says so, so a
+  translation that loses a match upstream would have found can never narrow recall. `mode-off` and
+  `strong-lane-one-hit` still win outright — neither turning recall off nor skipping it because
+  lane 1 already hit may be overridden.
+
+The translation also becomes the search query: upstream's `buildQuery` widens the query with the
+recent-conversation tail for the *model*, but the index is lexical, and FTS needs terms the sentence
+literally contains ("百度网盘右键菜单怎么关" → 0 hits, "百度网盘" → 2). Translation is the closest thing
+to a keyword rewrite that does not invent one. On any failure (model down, 3 s timeout, non-English
+reply, too-short reply) the original text is used, so behaviour degrades to exactly upstream's —
+which for Chinese means its own 4/13.
+
 ## 6. Consolidation safety
 
 **Optimistic concurrency at the rename boundary**, not a lock held during the model
