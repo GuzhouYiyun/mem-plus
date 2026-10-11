@@ -156,14 +156,40 @@ export type ReindexReport = {
  * per legacy document, once, and it is what lets a single `memory_reindex`
  * repair an index that already holds duplicates.
  */
-function unchangedDocuments(db: DatabaseSync, root: IndexRoot): Map<string, { bytes: number; mtime: number }> {
+function unchangedDocuments(
+  db: DatabaseSync,
+  root: IndexRoot,
+): Map<string, { bytes: number; mtime: number; classified: boolean }> {
   const rows = db
-    .prepare("SELECT path, bytes, mtime, content FROM documents WHERE root = ?")
-    .all(root) as { path: string; bytes: number; mtime: number; content: string | null }[];
+    .prepare("SELECT path, bytes, mtime, content, origin_class FROM documents WHERE root = ?")
+    .all(root) as {
+    path: string;
+    bytes: number;
+    mtime: number;
+    content: string | null;
+    origin_class: string | null;
+  }[];
   return new Map(
     rows
       .filter((row) => row.content !== null)
-      .map((row) => [row.path, { bytes: row.bytes, mtime: row.mtime }]),
+      .map((row) => [
+        row.path,
+        {
+          bytes: row.bytes,
+          mtime: row.mtime,
+          // A missing provenance is not a reason to skip.
+          //
+          // Provenance is classified from the file's PATH, not its bytes, so it stays
+          // valid when the content changes -- which is why skipping on bytes+mtime is
+          // sound for everything else. But a document indexed before the classifier was
+          // reachable has no class at all, and skipping it forever meant its NULL could
+          // never be repaired. `isPromotedTrustedMemoryEntry` rejects a NULL class, so
+          // every such document stayed invisible to lane 1c no matter what was asked.
+          // Measured 2026-10-11: 15 of 15 documents NULL, on an index that `memory_reindex`
+          // reported as fully up to date.
+          classified: typeof row.origin_class === "string",
+        },
+      ]),
   );
 }
 
@@ -248,7 +274,12 @@ export async function reindexFiles(params: {
   for (const entry of params.files) {
     seen.add(entry.file);
     const previous = known.get(entry.file);
-    if (previous && previous.bytes === entry.bytes && previous.mtime === entry.mtime) {
+    if (
+      previous &&
+      previous.bytes === entry.bytes &&
+      previous.mtime === entry.mtime &&
+      previous.classified
+    ) {
       skipped += 1;
       continue;
     }
@@ -329,11 +360,13 @@ export async function indexWrittenFile(params: {
   file: string;
   root: IndexRoot;
   project: string;
+  memoryHome?: string;
   log: (message: string, detail?: unknown) => void;
 }): Promise<number> {
   try {
     const info = await stat(params.file);
     const text = await readFile(params.file, "utf-8");
+    const mtime = Math.trunc(info.mtimeMs);
     return indexDocument({
       db: params.db,
       file: params.file,
@@ -341,7 +374,18 @@ export async function indexWrittenFile(params: {
       project: params.project,
       text,
       bytes: info.size,
-      mtime: Math.trunc(info.mtimeMs),
+      mtime,
+      // The full-scan path has always classified; this per-turn path did not, which is
+      // worse than it looks. Snapshots rewrite their whole file every turn and this is
+      // the ONLY path they take, so the document row was rewritten with a NULL
+      // provenance on every single turn -- there was no window in which the value was
+      // ever right. `isPromotedTrustedMemoryEntry` then rejected every candidate and
+      // lane 1c could not fire, no matter what the user asked.
+      provenance: await classify(
+        params.memoryHome,
+        { file: params.file, root: params.root, project: params.project, bytes: info.size, mtime },
+        text,
+      ),
     }).written;
   } catch (error) {
     params.log(`index update skipped for ${params.file}`, error);

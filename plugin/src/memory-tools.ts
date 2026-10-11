@@ -641,9 +641,18 @@ async function runReindex(
   // pruning a subset of a corpus would delete documents that are still on disk,
   // and pruning must always run against the complete set for that root.
   const files = await discoverHomeFiles();
-  const report = await reindexFiles({ db, files, root: "home" });
+  // `memoryHome` is what makes `classify()` return anything: its first line is
+  // `if (!memoryHome) return undefined`. Omitting it here left every home
+  // document with `origin_class = NULL`, and `isPromotedTrustedMemoryEntry`
+  // rejects a null provenance class -- so lane 1c (trigger injection) filtered
+  // out 100% of its candidates and could never fire. Measured 2026-10-11:
+  // 15 documents, 1244 units, all NULL.
+  const report = await reindexFiles({ db, files, root: "home", memoryHome: memoryHomeDir() });
   const wiki = readWikiConfig(deps.options);
   const wikiFiles = wiki.enabled ? await discoverWikiFiles(wiki.dir) : [];
+  // The wiki is deliberately NOT given a memoryHome: `classify` maps any non-`memory`
+  // source to `untrusted`, which keeps imported reference material out of automatic
+  // injection. That is the point of the corpus, so it stays unclassified on purpose.
   const wikiReport =
     wikiFiles.length > 0 ? await reindexFiles({ db, files: wikiFiles, root: "wiki" }) : null;
 

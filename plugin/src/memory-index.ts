@@ -103,7 +103,13 @@ export type IndexStats = {
   readonly bytes: number;
 };
 
-const SCHEMA = `
+// Split deliberately: the additive column migrations in openIndexAt have to run
+// *between* the two halves. `CREATE TABLE IF NOT EXISTS` is a no-op against an
+// index.db written by an older build, but `CREATE INDEX ... ON units(triggers)`
+// is not -- SQLite builds it against the column and throws `no such column`, so a
+// database from before that column existed could never be opened again, and the
+// migration that would have added it was unreachable because it ran after this.
+const SCHEMA_TABLES = `
 CREATE TABLE IF NOT EXISTS documents (
   id          INTEGER PRIMARY KEY,
   path        TEXT    NOT NULL UNIQUE,
@@ -122,8 +128,6 @@ CREATE TABLE IF NOT EXISTS documents (
   supersedes_key TEXT,
   curated_root INTEGER NOT NULL DEFAULT 0
 );
-CREATE INDEX IF NOT EXISTS documents_root    ON documents(root);
-CREATE INDEX IF NOT EXISTS documents_project ON documents(project);
 
 CREATE TABLE IF NOT EXISTS units (
   id           INTEGER PRIMARY KEY,
@@ -141,11 +145,6 @@ CREATE TABLE IF NOT EXISTS units (
   heading      TEXT    NOT NULL DEFAULT '',
   text         TEXT    NOT NULL
 );
-CREATE INDEX IF NOT EXISTS units_document ON units(document_id);
-CREATE INDEX IF NOT EXISTS units_day      ON units(day);
-CREATE INDEX IF NOT EXISTS units_kind     ON units(kind);
-CREATE INDEX IF NOT EXISTS units_triggers ON units(triggers) WHERE triggers IS NOT NULL;
-CREATE UNIQUE INDEX IF NOT EXISTS units_marker ON units(marker) WHERE marker IS NOT NULL;
 
 CREATE VIRTUAL TABLE IF NOT EXISTS units_fts USING fts5(
   text, heading, tags,
@@ -159,16 +158,29 @@ CREATE TABLE IF NOT EXISTS vectors (
 );
 `;
 
+const SCHEMA_INDEXES = `
+CREATE INDEX IF NOT EXISTS documents_root    ON documents(root);
+CREATE INDEX IF NOT EXISTS documents_project ON documents(project);
+CREATE INDEX IF NOT EXISTS units_document ON units(document_id);
+CREATE INDEX IF NOT EXISTS units_day      ON units(day);
+CREATE INDEX IF NOT EXISTS units_kind     ON units(kind);
+CREATE INDEX IF NOT EXISTS units_triggers ON units(triggers) WHERE triggers IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS units_marker ON units(marker) WHERE marker IS NOT NULL;
+`;
+
 /**
  * Open (creating if needed) the shared index.
  *
- * Returns `null` instead of throwing when `node:sqlite` is unavailable. This is
- * the one dependency that cannot be worked around and cannot be polyfilled, so a
- * runtime without it must still get snapshots and extraction -- retrieval is a
- * feature, not a prerequisite for the plugin loading at all.
+ * Returns `null` instead of throwing when the index cannot be opened, so a
+ * runtime that cannot provide it still gets snapshots and extraction --
+ * retrieval is a feature, not a prerequisite for the plugin loading at all.
+ *
+ * The cause reaches `log`. It is not always a missing `node:sqlite`: a locked
+ * file, a migration that does not apply, or a schema this build cannot open all
+ * fail here, and a bare catch reported every one of them as a missing runtime.
  */
-export function openIndex(): DatabaseSync | null {
-  return openIndexAt(indexPath());
+export function openIndex(options?: { log?: (message: string) => void }): DatabaseSync | null {
+  return openIndexAt(indexPath(), options?.log);
 }
 
 /**
@@ -180,7 +192,10 @@ export function openIndex(): DatabaseSync | null {
  * two drift, and a test that indexes through a different schema than production is
  * testing the wrong thing.
  */
-export function openIndexAt(file: string): DatabaseSync | null {
+export function openIndexAt(
+  file: string,
+  log?: (message: string) => void,
+): DatabaseSync | null {
   try {
     mkdirSync(path.dirname(file), { recursive: true });
     const db = new DatabaseSync(file);
@@ -189,18 +204,23 @@ export function openIndexAt(file: string): DatabaseSync | null {
     // ON DELETE CASCADE below is what keeps orphans out; SQLite ignores it
     // unless asked.
     db.exec("PRAGMA foreign_keys = ON");
-    // Schema first, then additive column migrations: CREATE TABLE IF NOT EXISTS is
-    // a no-op against an index that already exists, so an existing database would
-    // otherwise be left without columns the current code reads. The order matters
-    // in the other direction too -- ALTER TABLE on a table that does not exist yet
-    // throws, which would make openIndex() return null on a first run.
-    db.exec(SCHEMA);
+    // Order is load-bearing in both directions. Tables first: ALTER TABLE against a
+    // table that does not exist yet throws, which would make openIndex() return
+    // null on a first run. Migrations next: CREATE TABLE IF NOT EXISTS is a no-op
+    // against an index that already exists, so an existing database would
+    // otherwise be left without columns the current code reads. Indexes last: an
+    // index naming a migrated column cannot be built until that column exists.
+    db.exec(SCHEMA_TABLES);
     for (const [table, column, ddl] of MIGRATIONS) {
       if (hasColumn(db, table, column)) continue;
       db.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
     }
+    db.exec(SCHEMA_INDEXES);
     return db;
-  } catch {
+  } catch (error) {
+    log?.(
+      `index open failed: ${file}: ${error instanceof Error ? error.message : String(error)}`,
+    );
     return null;
   }
 }

@@ -60,9 +60,10 @@ import { runPromotionRound } from "./promotion.js";
 import { resolveOptions } from "./config-file.js";
 import { dreamingMarker, homeProjectMemoryDir, homeProjectSlug, logFile, memoryHomeDir, stateRoot } from "./paths.js";
 import {
-  DEFAULT_MEMORY_FILENAME,
-  WORKSPACE_BOOTSTRAP_FILENAMES,
-} from "../../src/agents/workspace-bootstrap-policy.js";
+  BOOTSTRAP_FILENAMES,
+  buildProjectContextSection,
+  loadBootstrapContextFiles,
+} from "./bootstrap-context.js";
 import {
   eventBelongsToWorkspace,
   isExecutionEnded,
@@ -71,12 +72,6 @@ import {
 } from "./event-compat.js";
 import { asSessionMessage, type PluginContext, type SessionMessageView } from "./opencode.js";
 import { writeSessionSnapshot } from "./snapshot.js";
-import { loadWorkspaceBootstrapFiles } from "../../src/agents/workspace.js";
-import { buildBootstrapContextFiles } from "../../src/agents/embedded-agent-helpers/bootstrap.js";
-import {
-  prepareContextFilesForPrompt,
-  buildProjectContextSection,
-} from "../../src/agents/system-prompt-context-files.js";
 import {
   readFlushConfig,
   resolveContextWindow,
@@ -233,7 +228,7 @@ export default Plugin.define({
     //
     // Nothing here loads a model. Vector search fills in lazily, on the first
     // reindex that asks for it, so opening a project does not pay for bge-m3.
-    const index = openIndex();
+    const index = openIndex({ log });
     if (index) {
       log(`index ${indexPath()}`);
 
@@ -346,7 +341,7 @@ export default Plugin.define({
       }
     } else {
       log(
-        "index unavailable (no node:sqlite in this runtime) -- capture continues, search will not work",
+        "index unavailable (reason logged above) -- capture continues, search will not work",
       );
     }
 
@@ -369,6 +364,11 @@ export default Plugin.define({
           file,
           root: "home",
           project: homeProjectSlug(file),
+          // Snapshots only ever reach the index through this call, so this is the only
+          // place their provenance can be recorded. Without it every snapshot document
+          // is stored with a NULL provenance class and the trigger-injection gate
+          // (`isPromotedTrustedMemoryEntry`) rejects all of them.
+          memoryHome: memoryHomeDir(),
           log,
         });
         if (written > 0) log(`indexed ${written} unit(s) from ${file}`);
@@ -545,7 +545,8 @@ export default Plugin.define({
     // appended last (canonical order). It only exists once dreaming has
     // promoted something into it, so absence is the normal state and is not a
     // `[MISSING]` worth showing the model.
-    const instructionFileNames = WORKSPACE_BOOTSTRAP_FILENAMES.filter(
+    const DEFAULT_MEMORY_FILENAME = "MEMORY.md";
+    const instructionFileNames = BOOTSTRAP_FILENAMES.filter(
       (name) => name !== DEFAULT_MEMORY_FILENAME,
     );
     await ctx.session.hook("context", async (event) => {
@@ -573,21 +574,18 @@ export default Plugin.define({
         })();
       }
       try {
-        const files = await loadWorkspaceBootstrapFiles(workspaceDir, instructionFileNames);
+        const files = await loadBootstrapContextFiles(workspaceDir, instructionFileNames);
         const homeMemoryPath = path.join(memoryHomeDir(), DEFAULT_MEMORY_FILENAME);
         try {
           files.push({
             name: DEFAULT_MEMORY_FILENAME,
             path: homeMemoryPath,
             content: await readFile(homeMemoryPath, "utf8"),
-            missing: false,
           });
         } catch {
           // No global long-term memory yet; nothing to inject.
         }
-        const contextFiles = buildBootstrapContextFiles(files);
-        const preparedFiles = prepareContextFilesForPrompt(contextFiles);
-        const lines = buildProjectContextSection(preparedFiles);
+        const lines = buildProjectContextSection(files);
         if (lines.length > 0) {
           event.system.push({ type: "text", text: lines.join("\n") });
         }
@@ -655,22 +653,17 @@ export default Plugin.define({
             return { text: result.text };
           },
         };
-        // Episodic -> curated, before the sweep: the deep consolidation phase then sees
-        // what this round promoted. Both halves are openclaw's own functions.
-        const promotion = await runPromotionRound({
-          memoryHome: memoryHomeDir(),
-          options,
-          subagent,
-          log,
-          nowMs: now,
-        });
-        if (promotion && promotion.applied > 0) {
-          log(
-            `promotion: applied ${promotion.applied}/${promotion.candidates} candidate(s) ` +
-              `into MEMORY.md (${promotion.rejected} rejected)`,
-          );
-        }
-
+        // light -> REM -> deep, in that order, inside one trigger. Upstream's
+        // `runShortTermDreamingPromotion` runs `runDreamingSweepPhases` at
+        // `dreaming.ts:166` and only ranks/applies at `:195`/`:221`, so deep is
+        // strictly last and reads the same `sweepNowMs`. A sweep that throws hits
+        // `continue` at `dreaming.ts:183` and skips deep for that workspace; the
+        // catch below reproduces that, since the home is a single workspace.
+        //
+        // This used to run promotion first, on the claim that deep's output feeds
+        // the sweep. Upstream has no such dependency -- nothing light or REM do
+        // reaches MEMORY.md -- so the old order was a local invention that
+        // inverted the phases. `docs/memory-chain.md` §3 had it right all along.
         const result = await runDreamingSweepPhases({
           agentId: "main",
           workspaceDir: memoryHomeDir(),
@@ -689,13 +682,27 @@ export default Plugin.define({
           nowMs: now,
         } as unknown as Parameters<typeof runDreamingSweepPhases>[0]);
         log(
-          // light+REM is what this sweep runs. Deep consolidation is NOT a dreaming phase
-          // upstream either: `short-term-promotion-apply.ts` calls `consolidateMemory`, so
-          // it happens inside the promotion round above. The old string claimed this sweep
-          // did all three.
+          // light+REM is what this sweep runs; deep is the promotion round below,
+          // not a third phase here.
           `dreaming sweep done: light+rem over ${memoryHomeDir()} ` +
             `(degradedPhases=${result?.degradedPhases ?? 0}, pendingNarratives=${result?.pendingNarratives ?? 0})`,
         );
+
+        // deep: episodic -> curated. Reached only when the sweep returned, matching
+        // upstream's `continue` on sweep failure.
+        const promotion = await runPromotionRound({
+          memoryHome: memoryHomeDir(),
+          options,
+          subagent,
+          log,
+          nowMs: now,
+        });
+        if (promotion && promotion.applied > 0) {
+          log(
+            `promotion: applied ${promotion.applied}/${promotion.candidates} candidate(s) ` +
+              `into MEMORY.md (${promotion.rejected} rejected)`,
+          );
+        }
       } catch (error) {
         log("dreaming sweep failed", error);
       }
