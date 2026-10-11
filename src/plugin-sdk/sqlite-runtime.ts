@@ -26,7 +26,13 @@ export {
   withOpenClawAgentDatabaseAsync,
 } from "../state/openclaw-agent-db.js";
 export { withOpenClawAgentDatabaseReadOnly } from "../state/openclaw-agent-db-readonly.js";
+// Also upstream's surface; nothing in the trimmed tree needed it until standing intents.
+export { withFreshOpenClawAgentDatabaseReadOnly } from "../state/openclaw-agent-db-readonly-open.js";
 export { withOpenClawAgentDatabaseWrite } from "../state/openclaw-agent-db-write.js";
+// Restored to upstream's shape: the trim dropped this re-export, and the standing-intents
+// write path imports it from here. The target module was vendored; only the alias line was
+// missing.
+export { runOpenClawAgentWriteAdmission } from "../state/openclaw-agent-write-admission.js";
 export { assertOpenClawAgentDatabaseForMaintenance } from "../state/openclaw-agent-db-maintenance.js";
 export { ensureOpenClawAgentStandingIntentsSchema } from "../state/openclaw-agent-standing-intents-schema.js";
 export {

@@ -188,6 +188,33 @@ function keyedStore<T>(ctx: PluginContext, options: OpenKeyedStoreOptions): Plug
         await ctx.storage.remove(entry.key);
       }
     },
+
+    // `update` and `deleteIf` are the conditional half of openclaw's store contract, and
+    // they are what the write-provenance record is built on: the origin class it writes
+    // depends on what was there a moment earlier. `ctx.storage` has no compare-and-swap,
+    // so these are read-modify-write and therefore safe only for a single writer — which
+    // is the case here (one plugin process, one memory home). Do not add a second
+    // concurrent writer to this namespace without a real CAS.
+    async update(
+      key: string,
+      mutate: (current: T | undefined) => T | undefined,
+    ): Promise<boolean> {
+      const stored = await read(key);
+      const next = mutate(stored === undefined ? undefined : (stored.v as T));
+      if (next === undefined) {
+        await ctx.storage.remove(prefix + key);
+        return false;
+      }
+      await ctx.storage.set(prefix + key, asStorageValue({ c: stored?.c ?? Date.now(), v: next }));
+      return true;
+    },
+
+    async deleteIf(key: string, predicate: (current: T) => boolean): Promise<boolean> {
+      const stored = await read(key);
+      if (stored === undefined || !predicate(stored.v as T)) return false;
+      await ctx.storage.remove(prefix + key);
+      return true;
+    },
   };
 }
 

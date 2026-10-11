@@ -19,7 +19,13 @@ import type { Dirent } from "node:fs";
 import path from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { homeProjectSlug, memoryFile, MEMORY_DIR_NAME, memoryHomeDir } from "./paths.js";
-import { indexDocument, indexAppendedTail, pruneMissing, type IndexRoot } from "./memory-index.js";
+import { indexDocument, indexAppendedTail, pruneMissing, type DocumentProvenance, type IndexRoot } from "./memory-index.js";
+import {
+  clearMemoryArtifactProvenance,
+  readMemoryArtifactProvenance,
+} from "./memory-artifact-provenance.js";
+import { resolveMemoryPathClassification } from "./memory-path-provenance.js";
+import { sha256Hex } from "../../packages/normalization-core/src/node-crypto.js";
 
 /** Guard against a pathological tree; a memory directory is never this large. */
 const MAX_FILES = 20_000;
@@ -162,6 +168,59 @@ function unchangedDocuments(db: DatabaseSync, root: IndexRoot): Map<string, { by
 }
 
 /**
+ * openclaw's per-file classification, with the session facts mem-plus knows.
+ *
+ * `sessionKind` is not derivable here: upstream reads it off the session that wrote the
+ * file, and OpenCode exposes no equivalent for a file that has already been written. The
+ * answer is `unknown`, which is one of upstream's own values and is neither owner nor
+ * trusted-by-default at any gate that reads it.
+ *
+ * A file whose content no longer matches its recorded provenance was changed by something
+ * other than the writer that recorded it, so the record is dropped here rather than left to
+ * vouch for content it no longer describes — upstream's `clearMemoryArtifactProvenance`,
+ * applied where the divergence becomes visible instead of at overwrite time.
+ */
+async function classify(
+  memoryHome: string | undefined,
+  entry: DiscoveredFile,
+  text: string,
+): Promise<DocumentProvenance | undefined> {
+  if (!memoryHome) return undefined;
+  const relativePath = path.relative(memoryHome, entry.file).replaceAll(path.sep, "/");
+  try {
+    const [classification, recorded] = await Promise.all([
+      resolveMemoryPathClassification({
+          absolutePath: entry.file,
+          // upstream's `MemorySource` is `memory | sessions`; the wiki corpus is
+          // neither, and its rule for anything that is not `memory` is `untrusted`.
+          // That is the honest answer for imported reference material, and it keeps
+          // a wiki page out of automatic injection.
+          source: entry.root === "home" ? "memory" : "sessions",
+          workspaceDir: memoryHome,
+        }),
+      readMemoryArtifactProvenance({ workspaceDir: memoryHome, relativePath }),
+    ]);
+    const stale = recorded !== undefined && recorded.fileHash !== sha256Hex(text);
+    if (stale && recorded) {
+      await clearMemoryArtifactProvenance({
+        workspaceDir: memoryHome,
+        relativePath,
+        contentBefore: text,
+      });
+    }
+    return {
+      originClass: stale ? "untrusted" : classification.originClass,
+      sessionKind: recorded && !stale ? "interactive" : "unknown",
+      observedAt: recorded && !stale ? recorded.observedAt : entry.mtime,
+      curatedRoot: classification.curatedRoot,
+    };
+  } catch {
+    // No classification means no provenance, which fails closed at the injection gate.
+    return undefined;
+  }
+}
+
+/**
  * Bring the index in line with what is on disk.
  *
  * Reads each changed file once, parses it, and writes the result in a single
@@ -172,6 +231,12 @@ export async function reindexFiles(params: {
   db: DatabaseSync;
   files: readonly DiscoveredFile[];
   root: IndexRoot;
+  /**
+   * The memory home. Provenance is classified relative to it, exactly as upstream
+   * classifies relative to the workspace root, so the same rules decide what is
+   * curated, what is system-owned and what is merely agent-written.
+   */
+  memoryHome?: string;
 }): Promise<ReindexReport> {
   const known = unchangedDocuments(params.db, params.root);
   const seen = new Set<string>();
@@ -197,6 +262,7 @@ export async function reindexFiles(params: {
         text,
         bytes: entry.bytes,
         mtime: entry.mtime,
+        provenance: await classify(params.memoryHome, entry, text),
       });
       units += result.written;
       if (result.mirrored) mirrored += 1;

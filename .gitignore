@@ -4,7 +4,7 @@ ANALYSIS.txt
 # Local model weights (GGUF, ~3.9 GB; not part of the memory subsystem)
 models/
 
-# Installed dependencies (type-check toolchain only; see ANALYSIS.txt §7)
+# Installed dependencies (type-check toolchain only; see ANALYSIS.txt 搂7)
 node_modules/
 
 # npm pack build artifacts (regenerable via `npm pack`; never commit)
@@ -53,3 +53,13 @@ m3.mjs
 TODO.md
 
 VERIFY.md
+
+# Windows installer build output. The payload dir holds the unpacked tarball that gets
+# embedded (~2550 files), dist holds the installer; build.ps1 regenerates both.
+# version.nsh and nsis-paths.nsh are written by the build (the version lives in
+# package.json; the NSIS language path is machine-specific), so neither is hand-maintained.
+installer/nsis/dist/
+installer/nsis/payload/*
+!installer/nsis/payload/.gitkeep
+installer/nsis/version.nsh
+installer/nsis/nsis-paths.nsh

@@ -22,11 +22,28 @@
 //   there is no user prompt to land. So the flush does not call `performCapture`:
 //   it calls the same extraction and the same writer directly, which is also what
 //   keeps a flush from being swept twice by the turn-end sweep.
+//
+// THE TARGET FILE IS PREPARED BEFORE THE MODEL RUNS
+//   Upstream's `prepareMemoryFlushSession` opens the bounded conversation view
+//   and then calls `ensureMemoryFlushTargetFile`, so by the time the flush turn
+//   can decide there is nothing to write, `memory/<day>.md` already exists. Same
+//   order here: the flush turn is the expensive, irreversible part, and a target
+//   that cannot be prepared should cost nothing.
+//
+// A BOUNDED VIEW THAT DOES NOT FIT IS AN ERROR, NOT A SHORTER MEMORY
+//   Upstream's bounded session view throws `Memory flush exceeds the bounded
+//   conversation view.` when the transcript does not fit. `buildCaptureMarkdownContext`
+//   truncates instead, leaving `CAPTURE_CONTEXT_TRUNCATION_MARKER` in the context.
+//   For an ordinary capture that is the right trade -- a slightly shorter summary
+//   beats none -- but a flush exists precisely to keep what a compaction is about
+//   to discard, and a summary of a silently shortened conversation is a memory
+//   missing the oldest part of the very window it was taken to save. So the
+//   marker is honoured as upstream's throw: the flush fails and stays retryable.
 import {
   buildCaptureMarkdownContext,
   getCaptureMarkdownBudget,
 } from "../../extensions/memory-core/src/capture/context.js";
-import { CAPTURE_DEFAULT_MAX_CONTEXT_BYTES } from "../../extensions/memory-core/src/capture/constants.js";
+import { CAPTURE_CONTEXT_TRUNCATION_MARKER, CAPTURE_DEFAULT_MAX_CONTEXT_BYTES } from "../../extensions/memory-core/src/capture/constants.js";
 import { extractCaptureSummary } from "../../extensions/memory-core/src/capture/extract.js";
 import { captureEntryMarker, renderCaptureEntry } from "../../extensions/memory-core/src/capture/render.js";
 import { appendCaptureEntry, resolveCaptureWriteTarget } from "../../extensions/memory-core/src/capture/write.js";
@@ -37,6 +54,8 @@ import type {
   CaptureTurn,
 } from "../../extensions/memory-core/src/capture/types.js";
 import { buildFlushPrompt, buildFlushSystemPrompt } from "./flush-config.js";
+import { ensureFlushTargetFile } from "./flush-target.js";
+import { withWriteProvenance } from "./write-provenance.js";
 
 /** Which layer opened the gate. Both share one idempotency key per day. */
 export type FlushTrigger = "occupancy" | "compaction";
@@ -147,6 +166,25 @@ export async function runFlush(params: {
     return { trigger: params.trigger, kind: "skipped", detail: "no recent turn" };
   }
 
+  // Upstream prepares the target before the turn runs (see the header note). The
+  // returned path is the same one `resolveCaptureWriteTarget` names; asking the
+  // guard for it is what proves the two agree.
+  const target = resolveCaptureWriteTarget({
+    workspaceDir: params.deps.workspaceDir,
+    nowMs,
+    timezone: params.deps.timezone,
+  });
+  try {
+    await ensureFlushTargetFile({
+      workspaceDir: params.deps.workspaceDir,
+      relativePath: target.relativePath,
+    });
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    params.log(`flush ${params.trigger}: target file unavailable -- ${detail}`);
+    return { trigger: params.trigger, kind: "failed", detail };
+  }
+
   const latestMemory = params.deps.loadLatestMemory
     ? await params.deps.loadLatestMemory(record).catch(() => null)
     : null;
@@ -158,6 +196,18 @@ export async function runFlush(params: {
     latestMemory,
     maxContextBytes: getCaptureMarkdownBudget(CAPTURE_DEFAULT_MAX_CONTEXT_BYTES),
   });
+
+  if (context.includes(CAPTURE_CONTEXT_TRUNCATION_MARKER)) {
+    params.log(
+      `flush ${params.trigger}: exceeds the bounded conversation view -- ` +
+        `${target.relativePath} would hold a summary of a truncated window`,
+    );
+    return {
+      trigger: params.trigger,
+      kind: "failed",
+      detail: "flush exceeds the bounded conversation view",
+    };
+  }
 
   let summary: Awaited<ReturnType<typeof extractCaptureSummary>> | null = null;
   try {
@@ -184,13 +234,9 @@ export async function runFlush(params: {
 
   // Upstream renders the entry itself. mem-plus reuses `renderCaptureEntry` so a
   // flush and an ordinary capture produce the same shape in the same file, carry
-  // the same marker, and one reader handles both.
+  // the same marker, and one reader handles both. The target was resolved and
+  // prepared before the extraction ran.
   const rendered = renderCaptureEntry({ summary, entryKey, nowMs });
-  const target = resolveCaptureWriteTarget({
-    workspaceDir: params.deps.workspaceDir,
-    nowMs,
-    timezone: params.deps.timezone,
-  });
 
   let writtenPath: string;
   try {
@@ -203,10 +249,15 @@ export async function runFlush(params: {
         entryKey,
       });
     } else {
-      await appendCaptureEntry({
+      // Same provenance the capture path records: the flush is another agent
+      // append to the same file, and a human edit in between must downgrade it
+      // exactly as it would downgrade a capture.
+      await withWriteProvenance({
+        memoryHome: params.deps.workspaceDir,
         absolutePath: target.absolutePath,
-        rendered,
-        entryKey,
+        append: async () => {
+          await appendCaptureEntry({ absolutePath: target.absolutePath, rendered, entryKey });
+        },
       });
       writtenPath = target.absolutePath;
     }

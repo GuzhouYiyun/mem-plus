@@ -29,7 +29,7 @@ export type ConfigField = {
   /**
    * Short. The row already prints `key` beside it in code, so the label only has
    * to name the thing -- not spell out the namespace the key is showing anyway.
-   * `抽取模型` + `model.contentPath` says it once; `抽取模型文件` says it twice.
+   * `嵌入模型` + `model.embedPath` says it once; `嵌入模型文件` says it twice.
    */
   label: string;
   kind: FieldKind;
@@ -98,20 +98,11 @@ export function isAction(item: ConfigItem): item is ConfigAction {
 export const CONFIG_SECTIONS: readonly ConfigSection[] = [
   {
     id: "settings",
-    // Ordered by what you have to decide before what: what does the extraction
-    // run on, which files is that, and only then how the machine runs it. The
-    // hardware settings used to sit above the file paths, which reads backwards --
-    // you cannot pick a GPU before you have said which model is loading onto it.
+    // Ordered by what you have to decide before what: which model does the thinking,
+    // then the file the one local model loads from, and only then how the machine runs
+    // it. The hardware settings used to sit above the file paths, which reads backwards.
     fields: [
       { heading: "抽取" },
-      {
-        key: "model.content",
-        label: "推理来源",
-        kind: "enum",
-        choices: ["opencode", "local"],
-        defaultValue: "opencode",
-        help: "opencode（默认）= 用你在 OpenCode 里配好的模型，不需要下载 GGUF、不需要显卡。local = 走本地 GGUF，全程不出机器。",
-      },
       {
         key: "model.hostedModel",
         label: "OpenCode 模型",
@@ -121,13 +112,6 @@ export const CONFIG_SECTIONS: readonly ConfigSection[] = [
         defaultValue: "",
         help: "留空 = 用 OpenCode 当前的默认模型。",
       },
-      {
-        key: "model.allowHostedFallback",
-        label: "回退到 OpenCode",
-        kind: "boolean",
-        defaultValue: false,
-        help: "若启用，当推理来源选择 local 时，如果本地无法推理，则会自动使用 opencode 进行推理。",
-      },
       { heading: "文件" },
       {
         key: "model.dir",
@@ -135,13 +119,6 @@ export const CONFIG_SECTIONS: readonly ConfigSection[] = [
         kind: "text",
         defaultValue: "",
         help: "留空 = 仓库里的 models/，安装版则用记忆库目录下的 models/。",
-      },
-      {
-        key: "model.contentPath",
-        label: "抽取模型",
-        kind: "text",
-        defaultValue: "",
-        help: "留空 = 模型目录下的 Qwen3.5-4B-Q4_K_M.gguf。",
       },
       {
         key: "model.embedPath",

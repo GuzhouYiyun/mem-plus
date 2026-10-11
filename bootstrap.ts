@@ -13,18 +13,38 @@
 // It is best effort on purpose: a read-only install (the npm cache dir)
 // cannot be written to, in which case the spawn fails silently and the import
 // error surfaces with the real cause instead of a mysterious spawn crash.
+//
+// It is also skipped under Bun, deliberately. OpenCode ships as a Bun-compiled
+// single-file binary and loads this plugin with it, and Bun resolves
+// `openclaw/plugin-sdk/*` through the `paths` table in `tsconfig.json` -- which
+// ships in the tarball for exactly that reason. Verified on a real install: with
+// `node_modules/openclaw` and every `@openclaw/*` stub deleted, Bun still loads
+// the plugin. So on the path real users take, the generated tree is never
+// consulted, and the spawn below would be a synchronous process launch paid on
+// every plugin load for nothing (plus a console window when the option is
+// missed). Node has no `paths` support, so that is where the guard is kept.
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+const runningUnderBun = typeof (process as { versions?: { bun?: string } }).versions?.bun === "string";
+
 const here = path.dirname(fileURLToPath(import.meta.url));
 const aliasManifest = path.join(here, "node_modules", "openclaw", "package.json");
-if (!existsSync(aliasManifest)) {
+if (!runningUnderBun && !existsSync(aliasManifest)) {
   const linkScript = path.join(here, "plugin", "scripts", "link-openclaw-alias.mjs");
   if (existsSync(linkScript)) {
     try {
-      spawnSync(process.execPath, [linkScript], { stdio: "ignore" });
+      spawnSync(process.execPath, [linkScript], {
+          stdio: "ignore",
+          // Matches `plugin/src/model/client.ts`: the host may have no console of its
+          // own, and a bare spawn there opens a black window. Under Bun this branch is
+          // unreachable (see above), so it only guards a Node-side load -- but a Node
+          // load can be as casual as `node -e "import('mem-plus')"` from a terminal the
+          // user is watching, and the window is not worth the risk of omitting the flag.
+          windowsHide: true,
+        });
     } catch {
       // Nothing to do: report the missing alias through the import failure
       // rather than masking it with a bootstrap error.

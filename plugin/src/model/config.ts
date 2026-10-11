@@ -1,30 +1,18 @@
-// Configuration for the local GGUF inference the plugin drives.
+// Configuration for the local embedding service, and for which OpenCode model does the
+// thinking.
 //
-// WHY LOCAL INFERENCE EXISTS AT ALL
-//   openclaw does not ship a GGUF runtime: it reaches one through either the
-//   `@openclaw/llama-cpp-provider` plugin (a managed llama-server) or an Ollama
-//   endpoint. mem-plus offers the same thing itself -- the models are loaded from
-//   disk by `node-llama-cpp` in a separate Node process (see `serve/server.mjs`
-//   for why the plugin process cannot host them) -- so a `model.content: "local"`
-//   install never sends anything off the machine.
+// WHY THE SERVICE EXISTS
+//   openclaw does not ship a GGUF runtime for memory: it reaches embeddings through a
+//   provider plugin. mem-plus loads the embedding model from disk with `node-llama-cpp`
+//   in a separate Node process (see `serve/server.mjs` for why the plugin process cannot
+//   host it), so vector search needs nothing installed beyond the model file.
 //
-// WHICH MODEL SUMMARISES, BY DEFAULT
-//   `opencode`. The alternative is `ctx.generate.text`, which runs the prompt on
-//   whichever OpenCode model the user has configured: no GGUF to download, no GPU
-//   to have, and the summary comes from a model that is usually better at
-//   following the extraction schema than a 4B local one. Someone who wants the
-//   local path says `"local"` and gets a machine-local pipeline.
-//
-//   Note what this default does *not* decide: whether the requests cost anything.
-//   That depends entirely on which provider the user's OpenCode model is pointed
-//   at, which is not this plugin's business to characterise.
-//
-// FALLBACK IS STILL OPT-IN
-//   `model.allowHostedFallback` is about the *local* path failing, and it defaults
-//   to false: a missing GGUF, an uninstalled dependency or a busy port would
-//   otherwise silently change which model is answering, with nothing but a log
-//   line to show for it. Off means extraction is skipped, the snapshot is kept,
-//   and the landing zone retries when the service is back.
+// WHICH MODEL THINKS
+//   The user's own OpenCode model, through `ctx.generate.text` (`plugin/src/llm.ts`).
+//   `model.hostedModel` pins which one; omitting it keeps OpenCode's default. Note what
+//   this does *not* decide: whether the requests cost anything. That depends entirely on
+//   which provider the user's model points at, which is not this plugin's business to
+//   characterise.
 //
 // BACKEND PRIORITY
 //   discrete GPU > integrated GPU; CPU is not a supported backend. This option
@@ -76,13 +64,10 @@ const LEGACY_GPU: Readonly<Record<string, GpuPreference>> = {
   vulkan: "integrated",
 };
 
-/** Which model produces capture summaries. `opencode` routes to `ctx.generate.text`. */
-export type ContentBackend = "local" | "opencode";
-
 /**
- * An OpenCode model reference: the model that produces capture summaries when
- * `model.content` is `"opencode"` (the default). Optional on purpose -- leaving it
- * unset keeps OpenCode's own model choice, which is the behavior without this option.
+ * An OpenCode model reference: the model that produces capture summaries and runs
+ * promotion consolidation. Optional on purpose -- leaving it unset keeps OpenCode's own
+ * model choice, which is the behavior without this option.
  *
  * Field names match `@opencode/client`'s `ModelRef` (`providerID` + `id`) so it
  * can be handed to `ctx.generate.text` without reshaping. Users still write the
@@ -92,25 +77,12 @@ export type HostedModelRef = { readonly providerID: string; readonly id: string 
 
 export type ModelConfig = {
   /**
-   * `"opencode"` (the default) sends extraction to `ctx.generate.text`. `"local"`
-   * runs it on the GGUF through the inference service instead.
-   */
-  readonly contentBackend: ContentBackend;
-  /**
    * Which OpenCode model `ctx.generate.text` should use. `undefined` = OpenCode's
    * default choice.
    */
   readonly hostedModel?: HostedModelRef;
-  /**
-   * Whether an *unavailable local service* may be covered by the OpenCode model.
-   * Defaults to `false`: with it off, a local failure skips the extraction for that
-   * turn and leaves the record pending for retry, rather than silently switching
-   * which model is answering for as long as the problem lasts.
-   */
-  readonly allowHostedFallback: boolean;
   readonly gpu: GpuPreference;
   readonly modelDir: string;
-  readonly contentModelPath: string;
   readonly embedModelPath: string;
   /** `model.embed: false` = fts-only, the openclaw `provider: "none"` mode. */
   readonly embedEnabled: boolean;
@@ -209,10 +181,6 @@ function readNumber(value: unknown, fallback: number, min: number, max: number):
   return Math.min(max, Math.max(min, Math.trunc(value)));
 }
 
-function readBoolean(value: unknown): boolean | undefined {
-  return typeof value === "boolean" ? value : undefined;
-}
-
 function readGpu(value: unknown): GpuPreference {
   if (value === "auto" || value === "discrete" || value === "integrated") return value;
   if (typeof value === "string" && LEGACY_GPU[value] !== undefined) return LEGACY_GPU[value];
@@ -289,17 +257,9 @@ export function resolveEmbedAvailability(config: ModelConfig): EmbedAvailability
     : { mode: "optional", missingPath: config.embedModelPath };
 }
 
-/** GGUF files that are not where the config says they should be (both slots). */
+/** GGUF files that are not where the config says they should be. Embedding is the only slot. */
 export function missingModelPaths(config: ModelConfig): string[] {
-  const missing: string[] = [];
-  if (!existsSync(config.contentModelPath)) missing.push(config.contentModelPath);
-  if (!existsSync(config.embedModelPath)) missing.push(config.embedModelPath);
-  return missing;
-}
-
-/** Only the extraction slot: extraction cannot run without it. */
-export function missingContentPaths(config: ModelConfig): string[] {
-  return existsSync(config.contentModelPath) ? [] : [config.contentModelPath];
+  return existsSync(config.embedModelPath) ? [] : [config.embedModelPath];
 }
 
 /** Permissive read: `ctx.options` is untyped JSON supplied by opencode.json(c). */
@@ -311,21 +271,12 @@ export function readModelConfig(options: unknown): ModelConfig {
       ? (root["model"] as Record<string, unknown>)
       : {};
 
-  // `opencode` is the default: no GGUF to fetch, no GPU to need, and the model the
-  // user already configured. `"local"` opts into the on-machine pipeline.
-  const rawBackend = readString(nested["content"]) ?? readString(root["contentModel"]);
-  const contentBackend: ContentBackend = rawBackend === "local" ? "local" : "opencode";
-
   const modelDir = readString(nested["dir"]) ?? readString(root["modelDir"]) ?? defaultModelDir();
 
   return {
-    contentBackend,
     hostedModel: readHostedModel(nested["hostedModel"]),
-    allowHostedFallback: readBoolean(nested["allowHostedFallback"]) ?? false,
     gpu: readGpu(nested["gpu"] ?? root["gpu"]),
     modelDir,
-    contentModelPath:
-      readString(nested["contentPath"]) ?? path.join(modelDir, "Qwen3.5-4B-Q4_K_M.gguf"),
     embedModelPath: readString(nested["embedPath"]) ?? path.join(modelDir, "bge-m3-FP16.gguf"),
     embedEnabled: nested["embed"] !== false,
     embedPathExplicit: readString(nested["embedPath"]) !== undefined,

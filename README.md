@@ -31,8 +31,7 @@ mem-plus 是 OpenCode 的持久记忆插件。记忆内容跨会话、跨项目�
 | 项目 | 要求 |
 |---|---|
 | OpenCode | V2，`@opencode/plugin` 2.0.20 及以上。不支持 V1。`opencode --version` 查看 |
-| Node.js | 22.5 及以上，或 Bun。检索工具依赖内置的 `node:sqlite` |
-| GPU | 向量模型在本机显卡上运行，独显优先 |
+| GPU | 本机的向量模型需要显卡；条目抽取使用 OpenCode 侧模型 |
 | 磁盘 | 压缩包约 4.3 MB；向量模型约 1.2 GB |
 
 抽取默认使用 OpenCode 侧的模型，无需 API key、provider 或 endpoint，认证与计费由 OpenCode 负责。
@@ -84,8 +83,7 @@ New-Item -ItemType Directory -Force "$env:USERPROFILE\.config\opencode\mem-plus\
 ```
 
 该目录即默认值，保持默认位置时无需修改配置。
-
-向量模型的具体文件与下载链接，以及模型的槽位、格式要求、GPU 后端与缺失时的行为，见[模型](#模型)。
+抽取用 OpenCode 侧模型，向量模型在本机运行。装好向量模型即完成配置，缺失时的行为见[模型](#模型)。
 
 ### 4. 验证
 
@@ -124,33 +122,26 @@ opencode service restart
 
 ## 模型
 
-mem-plus 在两处使用模型，两者相互独立，使用不同的文件。
+mem-plus 用模型做两件事，各用一个模型。
 
-| 槽位 | 用途 | 文件 |
-|---|---|---|
-| 条目抽取 | 将每轮对话内容提炼为结构化条目 | `Qwen3.5-4B-Q4_K_M.gguf`（语言模型） |
-| 向量检索 | 计算文本向量，供 `memory_search` 的 `hybrid` 与 `vector` 模式使用 | `bge-m3-FP16.gguf`（embedding 模型） |
+| 用途 | 由谁执行 |
+|---|---|
+| 条目抽取、整合、dreaming | OpenCode 侧的模型 |
+| 向量检索（`memory_search` 的 `hybrid` 与 `vector` 模式） | 本机的 embedding 模型 |
 
-两者不可互换。缺少其中之一只影响对应的功能。
+两者互不依赖：缺少 embedding 模型只是检索退化为关键词匹配，其余功能不受影响。
 
-### 抽取：默认不使用本地模型
+### 抽取：用 OpenCode 侧的模型
 
-`model.content` 默认为 `"opencode"`，条目抽取使用 OpenCode 侧的模型，**不需要任何本地模型文件，也不需要 GPU**。这是 mem-plus 的默认行为。
+条目抽取直接使用你在 OpenCode 里配置好的模型，**不需要任何本地模型文件**。推理位置由 OpenCode 的 provider 决定。
 
-| 推理位置 | 设置 | 模型文件 |
-|---|---|---|
-| OpenCode 侧 | `model.content` 为 `"opencode"`（默认） | 无 |
-| 本机 GGUF | `model.content` 为 `"local"` | 需放置 `Qwen3.5-4B-Q4_K_M.gguf` |
-
-使用 OpenCode 侧模型时，可用 `model.hostedModel` 指定模型，格式 `providerID/modelID`，可用 `opencode models` 查询可用值。未指定时沿用 OpenCode 当前的默认模型。推理位置由 OpenCode 的 provider 决定，若该 provider 指向本机服务（ollama、lmstudio、vllm 等），同样不出本机。
-
-选择本地推理时，将 `Qwen3.5-4B-Q4_K_M.gguf` 放入与向量模型相同的目录，下载见[下载](#下载)。
+可用 `model.hostedModel` 指定模型，格式 `providerID/modelID`，可用 `opencode models` 查询可用值。未指定时沿用 OpenCode 当前的默认模型。若该 provider 指向本机服务（ollama、lmstudio、vllm 等），同样不出本机。
 
 ### 文件位置
 
-默认模型目录为 `~/.config/opencode/mem-plus/models/`。插件目录下若存在 `models/`，优先使用该目录；默认目录不存在时使用上述路径，且该目录需自行创建。
+向量模型默认目录为 `~/.config/opencode/mem-plus/models/`。插件目录下若存在 `models/`，优先使用该目录；默认目录不存在时使用上述路径，且该目录需自行创建。
 
-默认文件名为 `bge-m3-FP16.gguf` 与 `Qwen3.5-4B-Q4_K_M.gguf`。文件使用默认文件名并置于默认目录时，无需修改任何配置。文件名或位置不同时，用 `model.embedPath` 与 `model.contentPath` 分别指定；`model.dir` 可整体指定模型目录。
+默认文件名为 `bge-m3-FP16.gguf`。文件名或位置不同时用 `model.embedPath` 指定；`model.dir` 可整体指定模型目录。
 
 模型文件不包含在安装包内，需另行下载。
 
@@ -159,18 +150,16 @@ mem-plus 在两处使用模型，两者相互独立，使用不同的文件。
 | 文件 | 用途 | 大小 | 国内（ModelScope） | 海外（Hugging Face） |
 |---|---|---|---|---|
 | `bge-m3-FP16.gguf` | 向量检索 | 约 1.2 GB | [下载](https://modelscope.cn/models/gpustack/bge-m3-GGUF/resolve/main/bge-m3-FP16.gguf) | [下载](https://huggingface.co/gpustack/bge-m3-GGUF/resolve/main/bge-m3-FP16.gguf) |
-| `Qwen3.5-4B-Q4_K_M.gguf` | 条目抽取（可选） | 约 2.7 GB | [下载](https://modelscope.cn/models/unsloth/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf) | [下载](https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf) |
 
 ### 格式要求
 
-| 槽位 | 要求 | 不满足时的表现 |
+| 用途 | 要求 | 不满足时的表现 |
 |---|---|---|
-| 条目抽取 | completion 风格（base）模型 | Instruct 与 Chat 风格模型返回空结果，日志记录 `summary=0 chars` |
 | 向量检索 | 带 embedding 头的模型 | 无法生成向量，语义检索不可用 |
 
 ### GPU 后端
 
-仅本机推理要求显卡，**不使用 CPU 推理**。无可用 GPU 时推理服务拒绝启动，日志记录 `gpu backend unavailable; service will not start`。
+向量模型要求显卡，**不使用 CPU 推理**。无可用 GPU 时推理服务拒绝启动，日志记录 `gpu backend unavailable; service will not start`。
 
 | `model.gpu` | 含义 | 适用 |
 |---|---|---|
@@ -188,11 +177,6 @@ AMD 与 Intel 的独显经 vulkan 运行，取 `discrete` 会漏掉，因此统�
 |---|---|
 | 未放置向量模型，或 `model.embed` 为 `false` | 语义检索不可用，日志记录 `no embedding model at ... vector search off`。会话快照、条目抽取、全文检索均正常 |
 | `model.embedPath` 指向的文件不存在 | 日志明确报错，属配置错误，不静默降级 |
-| `model.content` 为 `"local"` 但抽取模型缺失 | 日志记录 `extraction DISABLED (GGUF not found)`。条目抽取延后，待处理记录保留 |
-| `model.content` 为 `"local"` 时本地推理不可用 | 默认延后而不降级：会话快照继续写入，待处理记录保留，服务恢复后自动补做 |
-| `model.allowHostedFallback` 为 `true` | 上述情况下该轮抽取改用 OpenCode 侧模型，不再延后 |
-
-`model.allowHostedFallback` 仅在 `model.content` 为 `"local"` 时有效。
 
 ### 更换模型
 
@@ -208,11 +192,8 @@ memory_reindex { "embed": true }
 
 | 键 | 默认值 | 说明 |
 |---|---|---|
-| `model.content` | `"opencode"` | 条目抽取的推理来源。`opencode` 为 OpenCode 侧模型；`local` 为本机 GGUF |
 | `model.hostedModel` | — | 指定 OpenCode 侧使用的模型，格式 `providerID/modelID` |
-| `model.allowHostedFallback` | `false` | 本地推理不可用时是否改用 OpenCode 侧模型 |
 | `model.dir` | 插件目录下 `models/`，不存在时回落 `~/.config/opencode/mem-plus/models` | GGUF 文件所在目录 |
-| `model.contentPath` | `<模型目录>/Qwen3.5-4B-Q4_K_M.gguf` | 抽取模型文件路径 |
 | `model.embedPath` | `<模型目录>/bge-m3-FP16.gguf` | 向量模型文件路径 |
 | `model.embed` | `true` | `false` 时停用向量检索，仅使用全文检索 |
 | `model.gpu` | `"auto"` | GPU 后端：`auto` / `discrete` / `integrated` |

@@ -122,7 +122,8 @@ export async function eventBelongsToWorkspace(
   raw: unknown,
   event: EventView,
 ): Promise<boolean> {
-  const here = sameDirectory(ctx.location.directory, ctx.location.directory);
+
+
 
   // Any of these has carried the directory across versions of the envelope.
   const outer = (raw ?? {}) as Record<string, unknown>;

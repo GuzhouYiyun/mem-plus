@@ -49,7 +49,7 @@ import {
 } from "./api.js";
 import { WebAuth } from "./auth.js";
 import { AUTH_HEADER, getOrCreateAuthToken, isAuthorizedApiRequest } from "./auth-token.js";
-import { describeAuth, readWebConfig, type WebConfig } from "./config.js";
+import { describeAuth, type WebConfig } from "./config.js";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
 

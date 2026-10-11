@@ -33,6 +33,7 @@ const MIDDLE_DOT = "\\u00b7";
 import { chunkMarkdown } from "openclaw/plugin-sdk/memory-core-host-engine-indexing";
 import { enforceEmbeddingMaxInputTokens } from "openclaw/plugin-sdk/memory-core-host-engine-indexing";
 import { estimateStringChars } from "../../packages/normalization-core/src/cjk-chars.js";
+import { extractCuratedEntryRecallMetadata } from "../../packages/memory-host-sdk/src/host/curated-annotations.js";
 import { extractFrontmatterBlock } from "../../packages/markdown-core/src/frontmatter.js";
 import YAML from "yaml";
 
@@ -93,6 +94,18 @@ export type MemoryUnit = {
   readonly tags: readonly string[];
   /** openclaw's provenance id, carried through so a hit can be traced back. */
   readonly marker: string | null;
+  /**
+   * `<!-- trigger: ... -->` phrases and `<!-- importance: N -->`, parsed by
+   * openclaw's own `extractCuratedEntryRecallMetadata`.
+   *
+   * Both are optional and absent everywhere except curated memory: upstream only
+   * scans annotation lines for a curated-root document, so a diary entry or a wiki
+   * page cannot become a trigger candidate no matter what it is annotated with.
+   */
+  readonly triggers?: string | null;
+  readonly importance?: number | null;
+  /** `<!-- project: ... -->` keys, `;`-joined as openclaw stores them. */
+  readonly projectKey?: string | null;
   /** First meaningful line, used as the hit's title. */
   readonly heading: string;
   /** The searchable body, headings flattened. */
@@ -262,7 +275,7 @@ function collectMarker(body: string): string | null {
  * words themselves are worth far less than what is under them.
  */
 function parseEntryDay(text: string, fallbackTitle: string): ParsedDocument {
-  const { head, matches } = splitOn(text, ENTRY_HEADING);
+  const { matches } = splitOn(text, ENTRY_HEADING);
   const units: MemoryUnit[] = matches.map(({ match, body }) => {
     const stamp = parseIso(match[1] as string);
     const tags = collectTags(body);
@@ -354,6 +367,17 @@ function parseLongTerm(text: string, fallbackTitle: string): ParsedDocument {
       entryType: null,
       tags: collectTags(body),
       marker: null,
+      // openclaw's own annotation reader, called with the section's own lines
+      // rather than its flattened text: `extractCuratedEntryRecallMetadata` is
+      // line-scoped by contract, because a `trigger:` annotation only belongs to
+      // the entry whose line it closes. Curated root is true -- MEMORY.md is the
+      // curated tier -- and project scoping is eligible, so an annotated section
+      // narrows to its projects and an unannotated one stays global.
+      ...extractCuratedEntryRecallMetadata({
+        sourceLines: body.split("\n"),
+        curatedRoot: true,
+        projectScopeEligible: true,
+      }),
       heading: (match[1] ?? "section").trim(),
       text: flatten(body),
     })),

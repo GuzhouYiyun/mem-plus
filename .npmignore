@@ -13,7 +13,11 @@ ANALYSIS.txt
 models/
 node_modules/
 *.tgz
-memory/
+# memory/ used to be listed here. It was a fossil from when the plugin wrote
+# its diary into whatever workspace it loaded into; the write path moved to
+# <stateRoot>/workspace and nothing writes here any more. Worse, a bare name
+# matches at any depth, so it silently hid vendored code in
+# extensions/memory-core/src/memory/ -- a file npm would then not ship.
 MEMORY.md
 DREAMS.md
 AGENTS.md

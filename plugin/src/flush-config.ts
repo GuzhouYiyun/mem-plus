@@ -25,8 +25,21 @@
 //   75% of the window on every model whose window is large enough for the cap to
 //   bind, and at `window - 4000` on the small ones. Writing the ratio directly is
 //   the same policy with one fewer knob, and `flush.contextRatio` is that 0.75.
+//
+// COPIED VERBATIM FROM `flush-plan.ts`
+//   The four prompt clauses, both prompt texts, and the `enabled` / `model`
+//   knobs. `SILENT_REPLY_TOKEN` is imported from the vendored openclaw tree
+//   rather than retyped, so the token stays the host's single definition.
+//
+// NOT PORTED: `forceFlushTranscriptBytes`
+//   Upstream's second trigger is the transcript's own size (2 MB default), read at
+//   gate time from the session entry. OpenCode's compaction event carries
+//   `reason`, `recent` and an optional `inputID` and no byte count, and the flush
+//   gate reads real token usage off assistant messages, so there is no equivalent
+//   number to compare. A knob nothing feeds would be a lie in `config.jsonc`.
 import { buildCaptureSystemPrompt } from "../../extensions/memory-core/src/capture/extract.js";
 import { detectCaptureLanguage, getCaptureLanguageName } from "../../extensions/memory-core/src/capture/language.js";
+import { SILENT_REPLY_TOKEN } from "../../src/auto-reply/tokens.js";
 import type { HostedModelRef } from "./model/config.js";
 
 /**
@@ -119,35 +132,80 @@ export function shouldFlushForOccupancy(params: {
 }
 
 /**
- * Upstream's user-prompt text, verbatim except for the date stamp.
+ * openclaw's three hint clauses, verbatim from `flush-plan.ts`.
  *
- * It becomes the "## User Request" section of the extraction context: the
- * request the flush models. The framing is deliberately the *extraction*
- * framing of the capture pipeline, not openclaw's agentic write-file prompt --
- * mem-plus has no agentic turn, so the model returns a summary the plugin
- * appends itself, and telling it "write to memory/<day>.md" makes it answer
- * with file content instead of the JSON the extractor parses.
+ * They describe a store the model cannot reach: mem-plus's flush has no file
+ * handle and no tools. They are kept anyway because they are the contract -- what
+ * the durable store is, that only new content belongs in it, and that the curated
+ * and bootstrap files are not part of this write -- and because the target path
+ * they name is the same path `ensureFlushTargetFile` validates.
+ */
+const MEMORY_FLUSH_TARGET_HINT =
+  "Store durable memories only in memory/YYYY-MM-DD.md (create memory/ if needed).";
+const MEMORY_FLUSH_APPEND_ONLY_HINT =
+  "If memory/YYYY-MM-DD.md already exists, APPEND new content only and do not overwrite existing entries.";
+const MEMORY_FLUSH_READ_ONLY_HINT =
+  "Treat workspace bootstrap/reference files such as MEMORY.md, DREAMS.md, SOUL.md, and AGENTS.md as read-only during this flush; never overwrite, replace, or edit them.";
+
+/**
+ * Upstream's user-prompt text, verbatim, with the date stamped in.
+ *
+ * It becomes the "## User Request" section of the extraction context: the request
+ * the flush models. The `replaceAll` is upstream's too, and it rewrites the
+ * example in the variant-file clause as well -- `2026-10-10-HHMM.md` is what
+ * upstream tells the model not to create.
  */
 export function buildFlushPrompt(dateStamp: string): string {
   return [
     "Pre-compaction memory flush.",
-    "The session is near auto-compaction; capture the durable memories from the conversation so they survive it.",
-    "Append new entries only; never overwrite existing ones.",
-  ].join(" ");
+    MEMORY_FLUSH_TARGET_HINT,
+    MEMORY_FLUSH_READ_ONLY_HINT,
+    MEMORY_FLUSH_APPEND_ONLY_HINT,
+    "Do NOT create timestamped variant files (e.g., YYYY-MM-DD-HHMM.md); always use the canonical YYYY-MM-DD.md filename.",
+    `If nothing to store, reply with ${SILENT_REPLY_TOKEN}.`,
+  ]
+    .join(" ")
+    .replaceAll("YYYY-MM-DD", dateStamp);
+}
+
+/** Upstream's system-prompt text, verbatim, with the date stamped in. */
+function flushSystemPrompt(dateStamp: string): string {
+  return [
+    "Pre-compaction memory flush turn.",
+    "The session is near auto-compaction; capture durable memories to disk.",
+    MEMORY_FLUSH_TARGET_HINT,
+    MEMORY_FLUSH_READ_ONLY_HINT,
+    MEMORY_FLUSH_APPEND_ONLY_HINT,
+    `You may reply, but usually ${SILENT_REPLY_TOKEN} is correct.`,
+  ]
+    .join(" ")
+    .replaceAll("YYYY-MM-DD", dateStamp);
 }
 
 /**
- * The flush extraction's system prompt: the capture recorder framing, in the
- * conversation's own language, plus the flush context and an explicit envelope
- * contract. The envelope clause is the difference between a parseable reply and
- * a markdown essay: the text path hands the model no schema and no tool, so
- * the JSON shape must be in the prompt itself.
+ * The flush extraction's system prompt: the capture recorder framing in the
+ * conversation's own language, upstream's flush prompt, and an explicit envelope
+ * contract.
+ *
+ * THE ENVELOPE CLAUSE IS THE ONE DEVIATION, and it is forced by the host: the
+ * flush runs through `ctx.generate.text`, which takes `{prompt, model}` and no
+ * tools, so there is no tool call to parse and the JSON shape has to live in the
+ * prompt. Telling the model to "store durable memories in memory/<day>.md" with
+ * no way to act on it produces file content instead of the JSON the extractor
+ * reads, which is why upstream's clauses are kept as the contract and the
+ * envelope is appended rather than replacing them.
+ *
+ * `SILENT_REPLY_TOKEN` is therefore not the operative skip here: `"type": "skip"`
+ * is. A model that obeys the clause literally answers `NO_REPLY`, that reply does
+ * not parse as JSON, `extractCaptureSummary` returns null, and the flush reports
+ * `skipped` -- the same outcome upstream gets from a silent reply, reached one
+ * step later.
  */
 export function buildFlushSystemPrompt(dateStamp: string, conversation: string): string {
   const languageName = getCaptureLanguageName(detectCaptureLanguage(conversation));
   return [
     buildCaptureSystemPrompt(languageName),
-    `This is a pre-compaction flush for ${dateStamp}: prioritize durable memories the compaction would otherwise discard.`,
+    flushSystemPrompt(dateStamp),
     'Reply with a single JSON object and nothing else -- no prose, no code fence: {"summary": "<the FORMAT body above>", "type": "one of feature, bug-fix, refactor, analysis, configuration, discussion, other, or skip", "tags": ["2 to 4 lowercase tags"]}. For a skip, summary is "" and tags is [].',
   ].join("\n");
 }

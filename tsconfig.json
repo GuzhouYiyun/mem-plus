@@ -20,6 +20,7 @@
     "resolveJsonModule": true,
     "skipLibCheck": true,
     "strict": true,
+    "noUnusedLocals": true,
     "target": "es2023",
     "types": ["node"],
     "useDefineForClassFields": false,

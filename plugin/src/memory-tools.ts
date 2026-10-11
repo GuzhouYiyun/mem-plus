@@ -38,9 +38,15 @@ import {
   type SearchMode,
 } from "./memory-index.js";
 import { discoverHomeFiles, discoverWikiFiles, reindexFiles } from "./memory-scan.js";
+import { memoryHomeDir } from "./paths.js";
+import { recordRetrievalRecalls } from "./promotion.js";
+import type { MemorySearchResult } from "../../packages/memory-host-sdk/src/host/types.js";
+import { isPathStrictlyInside } from "../../src/infra/path-guards.js";
 import { projectSlug } from "./paths.js";
 import { readWikiConfig } from "./wiki/config.js";
 import { importChatGptExport } from "./wiki/chatgpt.js";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 
 /**
  * The exact shape `editor.add` accepts, derived from the context rather than
@@ -58,7 +64,7 @@ export type MemoryTool = Parameters<ToolEditor["add"]>[0];
 
 /** What a tool executor is handed: unvalidated input plus a cancellation signal. */
 type ToolInput = Parameters<MemoryTool["execute"]>[0];
-type ToolContext = Parameters<MemoryTool["execute"]>[1];
+
 /** What an executor returns. */
 type ToolResult = Awaited<ReturnType<MemoryTool["execute"]>>;
 
@@ -150,6 +156,38 @@ function int(input: RawInput, key: string, fallback: number, max: number): numbe
 function bool(input: RawInput, key: string, fallback: boolean): boolean {
   const value = input[key];
   return typeof value === "boolean" ? value : fallback;
+}
+
+/** A caller-supplied score floor. `undefined` means "the index's own floor applies". */
+function num(input: RawInput, key: string): number | undefined {
+  const value = input[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+/** Upstream's "bounded excerpt": an omitted `lines` is a cap, not "the whole file". */
+const GET_DEFAULT_LINES = 120;
+const GET_MAX_LINES = 2_000;
+
+/**
+ * Read one memory file for `memory_get`.
+ *
+ * The `path` is whatever `memory_search` reported, so it is index-relative (a wiki page
+ * can be outside the memory home) -- so the guard is openclaw's own
+ * `isPathStrictlyInside`, and anything outside is refused rather than read. Upstream can
+ * hand this to a host that already owns the path; mem-plus has to open the file itself,
+ * which is the whole reason the check exists.
+ */
+function readMemoryFile(
+  relative: string,
+): { ok: true; lines: string[] } | { ok: false; reason: "outside" | "missing" } {
+  const home = memoryHomeDir();
+  const resolved = path.resolve(home, relative);
+  if (!isPathStrictlyInside(home, resolved)) return { ok: false, reason: "outside" };
+  try {
+    return { ok: true, lines: readFileSync(resolved, "utf8").split(/\r?\n/) };
+  } catch {
+    return { ok: false, reason: "missing" };
+  }
 }
 
 /** Truncate on a word boundary where one is close by. */
@@ -315,7 +353,17 @@ async function runSearch(
 
   const scope = str(input, "scope") ?? SCOPE_PROJECT;
   const requested = str(input, "mode");
-  const limit = int(input, "limit", DEFAULT_LIMIT, MAX_LIMIT);
+  // Upstream's `maxResults` is canonical; `limit` is this plugin's older name, kept so an
+  // existing transcript still works. `maxResults` wins when both are present.
+  const limit = int(
+    input,
+    Object.hasOwn(input, "maxResults") ? "maxResults" : "limit",
+    DEFAULT_LIMIT,
+    MAX_LIMIT,
+  );
+  // Upstream's `minScore` has no default in the schema either: absent means "keep the
+  // index's own floor", which is `RANKING.minScore`, applied during ranking.
+  const minScore = num(input, "minScore");
   const projectFilter = str(input, "project");
 
   // Text is the default because it needs no model and no warm service. Asking for
@@ -380,7 +428,7 @@ async function runSearch(
   };
 
   const errors: string[] = [];
-  const hits = await search({
+  const ranked = await search({
     db,
     query,
     mode,
@@ -389,6 +437,24 @@ async function runSearch(
     currentProject: projectSlug(deps.workspaceDir),
     queryVector,
     onError: (message: string) => errors.push(message),
+  });
+
+  // Upstream's `minScore`, applied where a caller's floor is stricter than the index's
+  // own (`RANKING.minScore`). It is a post-ranking filter rather than a ranking input
+  // because that is what upstream's contract describes -- a floor on what comes back,
+  // not a change to how candidates are scored. Applied before recall tracking so the
+  // promotion store counts what the model actually saw, and before `limit` so a floor
+  // that admits fewer hits is not masked by the cap.
+  const hits = (minScore === undefined ? ranked : ranked.filter((hit) => hit.score >= minScore)).slice(0, limit);
+
+  // openclaw's recall tracking. `SearchHit` already carries everything
+  // `MemorySearchResult` asks for, so this is a shape change rather than a
+  // translation -- and skipping it leaves the promotion store empty, which is why
+  // nothing has ever reached `MEMORY.md`.
+  void recordRetrievalRecalls({
+    memoryHome: memoryHomeDir(),
+    query,
+    results: hits as unknown as MemorySearchResult[],
   });
 
   // Semantic recall is only actually available when the corpus has vectors. The
@@ -460,20 +526,76 @@ async function runGet(deps: RetrievalDeps, input: RawInput): Promise<{
   if (!db) {
     return { content: "Memory search is unavailable: no `node:sqlite` in this runtime.", metadata: {} };
   }
-  const id = input["unitId"];
-  if (typeof id !== "number" || !Number.isFinite(id)) {
+  // `unitId` is the deprecated spelling and still resolves, because a transcript that
+  // learned the old contract has no other way to reach the unit. It is tried only when
+  // no path was given; upstream requires `path` and knows nothing about unit ids.
+  const unitId = input["unitId"];
+  if (str(input, "path") === undefined && typeof unitId === "number" && Number.isFinite(unitId)) {
+    return runGetByUnit(deps, Math.trunc(unitId));
+  }
+
+  const path = str(input, "path");
+  if (path === undefined) {
     return {
-      content: "A numeric `unitId` is required -- take it from a memory_search result.",
-      metadata: { error: "missing unitId" },
+      content:
+        "A `path` is required -- take it from a memory_search result.",
+      metadata: { error: "missing path" },
     };
   }
-  const hit = getUnit(db, Math.trunc(id));
+  const read = readMemoryFile(path);
+  if (!read.ok) {
+    return {
+      content:
+        read.reason === "outside"
+          ? `\`${path}\` is outside the memory home. Read it with your own tools.`
+          : `No memory file at \`${path}\`. It may have been reindexed away; ` +
+            "run memory_reindex and search again.",
+      metadata: { error: read.reason, path },
+    };
+  }
+  const from = int(input, "from", 1, Number.MAX_SAFE_INTEGER);
+  const lines = read.lines;
+  const start = Math.min(Math.max(1, from), lines.length + 1);
+  // Upstream: "Defaults to a bounded excerpt when lines are omitted", so an omitted
+  // `lines` is a cap rather than "the rest of the file".
+  const count = Math.min(int(input, "lines", GET_DEFAULT_LINES, GET_MAX_LINES), lines.length);
+  const slice = lines.slice(start - 1, start - 1 + count);
+  const hasMore = start - 1 + slice.length < lines.length;
+
+  const body: string[] = [`# ${path}`, ""];
+  body.push(`\`lines ${start}-${start - 1 + slice.length} of ${lines.length}\``);
+  body.push("", slice.join("\n"));
+  if (hasMore) {
+    body.push("", `_More content follows: memory_get { path: "${path}", from: ${start + slice.length} }._`);
+  }
+
+  return {
+    content: body.join("\n"),
+    metadata: {
+      path,
+      from: start,
+      lines: slice.length,
+      totalLines: lines.length,
+      hasMore,
+    },
+  };
+}
+
+async function runGetByUnit(
+  deps: RetrievalDeps,
+  id: number,
+): Promise<{ content: string; metadata: Record<string, unknown> }> {
+  const db = deps.db;
+  if (!db) {
+    return { content: "Memory search is unavailable: no `node:sqlite` in this runtime.", metadata: {} };
+  }
+  const hit = getUnit(db, id);
   if (!hit) {
     return {
       content:
-        `No unit ${Math.trunc(id)}. It may have been reindexed away; ` +
+        `No unit ${id}. It may have been reindexed away; ` +
         "run memory_reindex and search again.",
-      metadata: { error: "not found", unitId: Math.trunc(id) },
+      metadata: { error: "not found", unitId: id },
     };
   }
   // Built by appending rather than by filtering a literal array: the blank lines
@@ -495,6 +617,7 @@ async function runGet(deps: RetrievalDeps, input: RawInput): Promise<{
       type: hit.entryType,
       tags: hit.tags,
       marker: hit.marker,
+      deprecated: true,
     },
   };
 }
@@ -571,6 +694,31 @@ const SEARCH_DESCRIPTION = [
   "are YYYY-MM-DD.",
 ].join("\n");
 
+/**
+ * Upstream's `MEMORY_SEARCH_TOOL_CONTRACT.prepareArguments`, verbatim in behaviour.
+ *
+ * Models emit `min_score` and `max_results` about as often as the camelCase names, so
+ * upstream accepts both and deletes the alias. Explicit camelCase values win -- including
+ * invalid ones, which validation then rejects rather than silently repairing.
+ */
+function normalizeSearchArgs(args: unknown): unknown {
+  const params = raw(args);
+  if (!Object.hasOwn(params, "min_score") && !Object.hasOwn(params, "max_results")) {
+    return args;
+  }
+  const normalized: RawInput = { ...params };
+  for (const [alias, key] of [
+    ["min_score", "minScore"],
+    ["max_results", "maxResults"],
+  ] as const) {
+    if (Object.hasOwn(normalized, alias)) {
+      if (!Object.hasOwn(normalized, key)) normalized[key] = normalized[alias];
+      delete normalized[alias];
+    }
+  }
+  return normalized;
+}
+
 const SEARCH_INPUT = {
   type: "object",
   properties: {
@@ -612,7 +760,21 @@ const SEARCH_INPUT = {
     project: { type: "string", description: "Project slug, e.g. \"my-app--4f2a1c\"." },
     since: { type: "string", description: "Only entries on or after this YYYY-MM-DD." },
     until: { type: "string", description: "Only entries on or before this YYYY-MM-DD." },
-    limit: { type: "number", description: `1-${MAX_LIMIT}, default ${DEFAULT_LIMIT}.` },
+    // Upstream's names (`memory-tool-contract.ts`). `min_score` / `max_results` are
+    // accepted as aliases by `normalizeSearchArgs`, exactly as upstream does.
+    maxResults: {
+      type: "integer",
+      minimum: 1,
+      description: `How many hits to return, 1-${MAX_LIMIT}. Default ${DEFAULT_LIMIT}.`,
+    },
+    minScore: {
+      type: "number",
+      description: "Drop hits scoring below this. Omit to keep the index's own floor.",
+    },
+    limit: {
+      type: "number",
+      description: `Deprecated alias for maxResults; use maxResults. 1-${MAX_LIMIT}, default ${DEFAULT_LIMIT}.`,
+    },
   },
   required: ["query"],
   additionalProperties: false,
@@ -675,7 +837,11 @@ export function buildMemoryTools(deps: RetrievalDeps): RetrievalTools {
     description: SEARCH_DESCRIPTION,
     input: SEARCH_INPUT,
     execute: async (input, context) => {
-      const { content, metadata } = await runSearch(deps, raw(input), context?.signal);
+        const { content, metadata } = await runSearch(
+          deps,
+          raw(normalizeSearchArgs(input)),
+          context?.signal,
+        );
       return { content, metadata } satisfies ToolResult;
     },
   };
@@ -683,7 +849,7 @@ export function buildMemoryTools(deps: RetrievalDeps): RetrievalTools {
   const get: MemoryTool = {
     name: "memory_get",
     description: [
-      "Read one memory in full, by the unit id a memory_search result reported.",
+      "Read an exact excerpt from a memory file, by the path a memory_search result reported.",
       "",
       "Use it when a hit looks relevant but was truncated, or when you need the exact",
       "detail -- a path, a command, a config value -- rather than the summary.",
@@ -691,9 +857,17 @@ export function buildMemoryTools(deps: RetrievalDeps): RetrievalTools {
     input: {
       type: "object",
       properties: {
-        unitId: { type: "number", description: "The unit id from a memory_search result." },
+        // Upstream's contract (`memory-tool-contract.ts`): `path` is required and
+        // `from`/`lines` are the optional bounded excerpt.
+        path: { type: "string", description: "The memory file path a memory_search result reported." },
+        from: { type: "integer", minimum: 1, description: "First line to read. Default 1." },
+        lines: { type: "integer", minimum: 1, description: "How many lines to read." },
+        // Kept so an existing transcript still resolves. Upstream has no unit ids --
+        // its index is chunk-keyed and its ids are not model-facing -- so this is the
+        // one parameter here with no upstream counterpart.
+        unitId: { type: "number", description: "Deprecated: read by `path` instead." },
       },
-      required: ["unitId"],
+      required: ["path"],
       additionalProperties: false,
     },
     execute: async (input) => {

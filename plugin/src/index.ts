@@ -39,12 +39,11 @@ import { runDreamingSweepPhases } from "../../extensions/memory-core/src/dreamin
 import { formatMemoryDreamingDay } from "../../extensions/memory-core/src/capture/day.js";
 import {
   createCaptureDependencies,
-  disabledComplete,
   hostedComplete,
   type CaptureCompleteOverride,
 } from "./capture-deps.js";
 import { createStorageOpenKeyedStore } from "./kv.js";
-import { missingContentPaths, readModelConfig, readServiceConfig, resolveEmbedAvailability } from "./model/config.js";
+import { readModelConfig, readServiceConfig, resolveEmbedAvailability } from "./model/config.js";
 import { readWikiConfig } from "./wiki/config.js";
 import { readWebConfig } from "./web/config.js";
 import { startWebServer } from "./web/server.js";
@@ -53,6 +52,11 @@ import { createLogger } from "./log.js";
 import { indexPath, openIndex } from "./memory-index.js";
 import { indexWrittenFile, indexTail } from "./memory-scan.js";
 import { buildMemoryTools } from "./memory-tools.js";
+import { completeThroughHost } from "./llm.js";
+import { buildStandingIntentTool } from "./standing-intents.js";
+import { installMemoryInjection } from "./recall-inject.js";
+import { recallToolsFor, readDeepRecallConfig } from "./deep-recall.js";
+import { runPromotionRound } from "./promotion.js";
 import { resolveOptions } from "./config-file.js";
 import { dreamingMarker, homeProjectMemoryDir, homeProjectSlug, logFile, memoryHomeDir, stateRoot } from "./paths.js";
 import {
@@ -139,6 +143,8 @@ export default Plugin.define({
   async setup(ctx) {
     const log = createLogger("[mem-plus]");
     const workspaceDir = ctx.location.directory;
+    // Lane-one injection (trigger recall + project memory), once the index exists.
+    let memoryInjection: { dispose: () => Promise<void> } | undefined;
     // First line in the log file, so an empty or stale log is unambiguous.
     log(`plugin loaded, workspace ${workspaceDir}`);
     log(`log file ${logFile()}`);
@@ -159,102 +165,27 @@ export default Plugin.define({
     const modelConfig = readModelConfig(options);
     const serviceConfig = readServiceConfig(options);
     const wikiConfig = readWikiConfig(options);
-    // openclaw treats the two model slots independently
-    // (manager-provider-lifecycle.ts): extraction needs the content model, and
-    // only extraction. A missing embedding model degrades search to
-    // keyword-only -- it must not take extraction down with it.
-    const missingContent = missingContentPaths(modelConfig);
+    // Only one model slot is left on this machine: the embedding model. Extraction,
+    // promotion consolidation and dreaming all run on the user's OpenCode model, so a
+    // missing embedding model degrades search to keyword-only and nothing else -- it must
+    // never take capture or consolidation down with it.
     const embedAvailability = resolveEmbedAvailability(modelConfig);
     const vectorsUsable = embedAvailability.mode !== "fts-only" && !embedAvailability.missingPath;
-    const allowHosted = modelConfig.allowHostedFallback;
     const hostedLabel = modelConfig.hostedModel
       ? `${modelConfig.hostedModel.providerID}/${modelConfig.hostedModel.id}`
       : "opencode default";
 
-    // The local service answers whichever slots need it, and they are different
-    // slots: `model.content` picks the summarising model, `model.embed` picks the
-    // embedding one. With `content` defaulting to `opencode` the service is no
-    // longer implied by extraction -- but embeddings still need it, so creating it
-    // only on the `local` branch would quietly turn vector search off for everyone
-    // who left `model.content` alone.
-    const wantsLocalContent = modelConfig.contentBackend !== "opencode" && missingContent.length === 0;
-    let service: MemPlusService | null = null;
-    if (wantsLocalContent || vectorsUsable) {
-      service = createServiceClient(serviceConfig, modelConfig, log);
-    }
-
-    if (modelConfig.contentBackend === "opencode") {
-      log(`extraction model = opencode (model = ${hostedLabel})`);
-    } else if (missingContent.length > 0) {
-      for (const file of missingContent) log(`  missing ${file} -- see README "本地模型"`);
-      if (allowHosted) {
-        log(
-          "extraction model = opencode (fallback: GGUF not found, model.allowHostedFallback = true) " +
-            `(model = ${hostedLabel})`,
-        );
-      } else {
-        log(
-          "extraction DISABLED (GGUF not found; snapshots still written). " +
-            'Fix the paths, set options.model.allowHostedFallback = true, or set ' +
-            'options.model.content = "opencode" to summarise on the OpenCode model.',
-        );
-      }
-    } else {
-      log(
-        `extraction model = local gguf via ${serviceConfig.host}:${serviceConfig.port} ` +
-          `(gpu priority ${modelConfig.gpu}, idle ${serviceConfig.idleMinutes} min)`,
-      );
-    }
+    // The service is embedding-only, so it is created for that slot alone.
+    const service: MemPlusService | null = vectorsUsable
+      ? createServiceClient(serviceConfig, modelConfig, log)
+      : null;
+    log(`extraction model = opencode (model = ${hostedLabel})`);
 
     // The extraction transport, named once because the pre-compaction flush reuses it.
-    //
-    // `model.content` decides this, and nothing else does. It used to be the other
-    // way round: the check was "does a service object exist", and because embeddings
-    // and summarising share one service, having the embedding GGUF installed created
-    // that object and handed *extraction* to the local model as well. So
-    // `"content": "opencode"` silently meant "local, whenever a GGUF happens to be
-    // present" -- and it broke the worst possible way, because the local model was
-    // missing on exactly those machines, so extraction stalled and the records piled
-    // up pending. The page's own help text for the setting ("不需要下载 GGUF、不需要
-    // 显卡") was false.
-    //
-    // The service is still created when `vectorsUsable`: that is the embedding slot,
-    // a separate need, and it must not depend on the extraction setting. It is also
-    // contacted lazily -- probing during setup would stall plugin loading behind a
-    // ~3 s model load in every window, whether or not anything needs extracting.
-    const complete: CaptureCompleteOverride =
-      modelConfig.contentBackend === "opencode"
-        ? hostedComplete(ctx, modelConfig.hostedModel)
-        : service
-          ? async ({ systemPrompt, prompt }) => {
-            try {
-              return await service.extract({ systemPrompt, prompt });
-            } catch (error) {
-              if (!allowHosted) {
-                // Throw rather than degrade. The sweep records the failure and the
-                // record stays pending, so the memory is written later instead of the
-                // model silently changing for as long as the outage lasts.
-                log(
-                  "local service unavailable; skipping extraction and leaving the " +
-                    "record pending (no OpenCode fallback -- " +
-                    'set options.model.allowHostedFallback = true to change this)',
-                  error,
-                );
-                throw error;
-              }
-              log(
-                "local service unavailable, using the OpenCode model for this turn " +
-                  "(model.allowHostedFallback = true)",
-                error,
-              );
-              return await hostedComplete(ctx, modelConfig.hostedModel)({ systemPrompt, prompt });
-            }
-          }
-          : disabledComplete(
-              missingContent.length > 0
-                ? `GGUF not found: ${missingContent.join(", ")}`
-                : "no local service and no hosted opt-in",
-            );
+    // It always runs on the user's own OpenCode model. `hostedComplete` throws on
+    // failure, which keeps openclaw's landing zone honest: the record stays pending
+    // and is retried, so a memory is written later rather than dropped.
+    const complete: CaptureCompleteOverride = hostedComplete(ctx, modelConfig.hostedModel, log);
 
     const captureDeps = createCaptureDependencies(ctx, complete);
     const capture = createMemoryCapture(captureDeps);
@@ -320,6 +251,31 @@ export default Plugin.define({
         options,
         log,
       });
+
+      // Lane one, upstream's way: the matched curated entries ride along as
+      // request-scoped system context on every agent-loop model call. Registered
+      // here because this is where the index becomes available.
+      //
+      // Lane 2 gets its tools from the same `buildMemoryTools` output rather than a second
+      // implementation: upstream resolves `toolsAllow` against the host's memory tool
+      // registry at run time, and that registry is here.
+      const injection = await installMemoryInjection({
+        ctx,
+        db: index,
+        workspaceDir,
+        log,
+        options,
+        recallTools: () => recallToolsFor(readDeepRecallConfig(options), retrieval),
+      });
+      memoryInjection = injection;
+
+      // Standing intents: openclaw's own tool and matcher behind OpenCode's tool shape
+      // and session identity (see `standing-intents.ts`). Registered apart from the
+      // retrieval tools because it reads its own database, not the index.
+      await ctx.tool.transform((editor) => {
+        editor.add(buildStandingIntentTool({ workspaceDir, log }));
+      });
+
       void startWebServer(
         readWebConfig(options),
         {
@@ -671,23 +627,50 @@ export default Plugin.define({
         await mkdir(path.dirname(marker), { recursive: true });
         await writeFile(marker, today, "utf8");
 
-        const subagent =
-          localService && (await localService.ready())
-            ? {
-                complete: async ({
-                  message,
-                  extraSystemPrompt,
-                }: {
-                  message: string;
-                  extraSystemPrompt?: string;
-                }) => ({
-                  text: await localService.generate({
-                    systemPrompt: extraSystemPrompt,
-                    prompt: message,
-                  }),
-                }),
-              }
-            : undefined;
+        // STAGE 2: consolidation's model call also moves to the user's OpenCode model, so
+        // it no longer waits on `localService.ready()` -- a promotion round used to be
+        // skipped entirely whenever the local model was down, even though a model was
+        // available. `completeThroughHost` never throws, so a failure here is turned back
+        // into a rejection: upstream's `applyShortTermPromotions` catches a consolidation
+        // failure and degrades, and it can only do that if something throws.
+        const subagent = {
+          complete: async ({
+            message,
+            extraSystemPrompt,
+          }: {
+            message: string;
+            extraSystemPrompt?: string;
+          }) => {
+            const result = await completeThroughHost(
+              ctx,
+              {
+                purpose: "promotion consolidation",
+                prompt: message,
+                ...(extraSystemPrompt ? { systemPrompt: extraSystemPrompt } : {}),
+                ...(modelConfig.hostedModel ? { model: modelConfig.hostedModel } : {}),
+              },
+              log,
+            );
+            if (result.text === null) throw new Error(result.reason);
+            return { text: result.text };
+          },
+        };
+        // Episodic -> curated, before the sweep: the deep consolidation phase then sees
+        // what this round promoted. Both halves are openclaw's own functions.
+        const promotion = await runPromotionRound({
+          memoryHome: memoryHomeDir(),
+          options,
+          subagent,
+          log,
+          nowMs: now,
+        });
+        if (promotion && promotion.applied > 0) {
+          log(
+            `promotion: applied ${promotion.applied}/${promotion.candidates} candidate(s) ` +
+              `into MEMORY.md (${promotion.rejected} rejected)`,
+          );
+        }
+
         const result = await runDreamingSweepPhases({
           agentId: "main",
           workspaceDir: memoryHomeDir(),
@@ -706,7 +689,11 @@ export default Plugin.define({
           nowMs: now,
         } as unknown as Parameters<typeof runDreamingSweepPhases>[0]);
         log(
-          `dreaming sweep done: light+rem+deep over ${memoryHomeDir()} ` +
+          // light+REM is what this sweep runs. Deep consolidation is NOT a dreaming phase
+          // upstream either: `short-term-promotion-apply.ts` calls `consolidateMemory`, so
+          // it happens inside the promotion round above. The old string claimed this sweep
+          // did all three.
+          `dreaming sweep done: light+rem over ${memoryHomeDir()} ` +
             `(degradedPhases=${result?.degradedPhases ?? 0}, pendingNarratives=${result?.pendingNarratives ?? 0})`,
         );
       } catch (error) {
@@ -743,14 +730,12 @@ export default Plugin.define({
       // does. The snapshot above still lands either way.
       //
       // Nothing to check when extraction is not routed to the local service.
-      if (localService && !(await localService.ready())) {
-        log(
-          "local service unavailable; deferring the sweep. Snapshots keep working " +
-            "and pending captures are retried once the service is back" +
-            (allowHosted ? " -- or set model.allowHostedFallback = false to fail fast" : ""),
-        );
-        return;
-      }
+      // STAGE 2: extraction no longer runs on the local service, so its availability is
+      // not a precondition for sweeping. The gate used to exist because a dead local
+      // model would fail inside the pipeline and burn a memory per outage; that failure
+      // mode is gone with the branch. The sweep now runs regardless, and a capture whose
+      // model call fails stays pending on its own.
+      void localService;
 
       try {
         const outcomes = await capture.runSweep({ sessionId: sessionID });
@@ -866,6 +851,7 @@ export default Plugin.define({
       controller.abort();
       for (const timer of settleTimers.values()) clearTimeout(timer);
       settleTimers.clear();
+            void memoryInjection?.dispose();
       void localService?.dispose();
     };
   },

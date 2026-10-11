@@ -32,7 +32,7 @@
 //   either mechanism; it does not make double loading safe. That is a separate,
 //   documented rule, and this file is not where it lives.
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
@@ -59,18 +59,12 @@ const CONFIG_TEMPLATE = `{
   // 改完需要 opencode service restart 生效。
 
   "model": {
-    // 抽取用哪个模型："opencode"（用你在 OpenCode 里配好的模型）或 "local"（本地 GGUF）
-    "content": "opencode",
-
-    // 用 OpenCode 时指定哪一个，格式 "providerID/modelID"；删掉这一行 = OpenCode 当前的默认模型
+    // 抽取、整合、dreaming 全部用你在 OpenCode 里配好的模型（ctx.generate.text）。
+    // 这里可以指定哪一个，格式 "providerID/modelID"；删掉这一行 = OpenCode 当前的默认模型。
     // "hostedModel": "anthropic/claude-sonnet-4-5",
 
-    // 只在 "content": "local" 时有意义：本地服务起不来时是否改用 OpenCode 模型
-    "allowHostedFallback": false,
-
-    // 本地 GGUF 相关。删掉 = 用模型目录下的默认文件名。
+    // 本地只剩向量模型。删掉 = 用模型目录下的默认文件名。
     // "dir": "C:/Users/你的用户名/models",
-    // "contentPath": "…/models/Qwen3.5-4B-Q4_K_M.gguf",
     // "embedPath": "…/models/bge-m3-FP16.gguf",
 
     "embed": true,
@@ -103,6 +97,21 @@ const CONFIG_TEMPLATE = `{
   "wiki": {
     "enabled": true
     // "dir": "C:/Users/你的用户名/vault"
+  },
+
+  // 短期提升：决定哪些被反复召回的日记条目可以进入 MEMORY.md。
+  // 默认值全部来自 openclaw；注释掉的每一项都留着，取消注释即覆盖。
+  // 上游默认 0.75 / 3 次召回：语料小时一条都提升不了，这是策略不是故障。
+  //
+  // 顶层而非 dreaming.promotion：mergeOptions 只深合并一层，嵌两层会让部分
+  // 配置整体覆盖掉默认的其余字段。
+  "promotion": {
+    "enabled": true
+    // "minScore": 0.75,
+    // "minRecallCount": 3,
+    // "minUniqueQueries": 2,
+    // "limit": 10,
+    // "maxAgeDays": 90
   }
 }
 `;

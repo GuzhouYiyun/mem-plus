@@ -28,8 +28,9 @@ export type ServiceHealth = {
   service?: string;
   port?: number | null;
   backend?: string;
-  loaded?: { content?: boolean; embed?: boolean };
-  present?: { content?: boolean; embed?: boolean };
+  /** Embedding only: the content model left with local generation. */
+  loaded?: { embed?: boolean };
+  present?: { embed?: boolean };
 };
 
 export type MemPlusService = {
@@ -38,7 +39,7 @@ export type MemPlusService = {
   /** What `/health` said the last time we asked; `null` if never reachable. */
   readonly health: ServiceHealth | null;
   /**
-   * Whether extraction is possible right now, starting the service if needed.
+   * Whether the embedding service is reachable right now, starting it if needed.
    *
    * Called *before* a sweep claims any work. `maxRetries` is 3 with a 2 s base
    * delay, so letting an unreachable service fail inside the pipeline burns the
@@ -47,8 +48,11 @@ export type MemPlusService = {
    * outage leaves every prompt untouched and pending instead.
    */
   ready(): Promise<boolean>;
-  extract(params: { systemPrompt: string; prompt: string }): Promise<string>;
-  generate(params: { systemPrompt?: string; prompt: string; maxTokens?: number }): Promise<string>;
+  /**
+   * The service is embedding-only, since the local content model was removed: extraction,
+   * promotion consolidation and dreaming all run on the user's OpenCode model
+   * (`plugin/src/llm.ts`), and the only thing left to reach over HTTP for is a vector.
+   */
   /**
    * `signal` comes from the tool call's context, so stopping a session also stops
    * the embed request it started. On this hardware an embed takes seconds, so
@@ -256,7 +260,8 @@ export function createServiceClient(
         "--gpu", models.gpu,
         "--context-size", String(models.contextSize),
         "--max-tokens", String(models.maxNewTokens),
-        "--content", models.contentModelPath,
+        // Embedding only: the content model was removed with local generation, so the
+        // service is started for the vector slot and nothing else.
         "--embed", models.embedModelPath,
         ...(models.threads > 0 ? ["--threads", String(models.threads)] : []),
         ...(models.gpuLayers !== "auto" ? ["--gpu-layers", String(models.gpuLayers)] : []),
@@ -351,19 +356,9 @@ export function createServiceClient(
       }
     },
 
-    extract: ({ systemPrompt, prompt }) =>
-      call("/extract", { systemPrompt, prompt }, 10 * 60_000).then((json) => {
-        const text = (json as { text?: unknown }).text;
-        if (typeof text !== "string") throw new Error("/extract returned no text");
-        return text;
-      }),
-
-    generate: ({ systemPrompt, prompt, maxTokens }) =>
-      call("/generate", { systemPrompt, prompt, maxTokens }, 10 * 60_000).then((json) => {
-        const text = (json as { text?: unknown }).text;
-        if (typeof text !== "string") throw new Error("/generate returned no text");
-        return text;
-      }),
+    // The service is embedding-only. `extract` and `generate` are gone with the local
+    // content model: generation runs on the user's own OpenCode model through
+    // `plugin/src/llm.ts`, so the only thing left to reach over HTTP for is a vector.
 
     embed: (input, signal) =>
       call("/embed", { input }, 60_000, signal).then((json) => {

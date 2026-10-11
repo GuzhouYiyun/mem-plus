@@ -420,7 +420,7 @@ function FieldRow({
   return (
     <div className="grid gap-1.5 sm:grid-cols-[minmax(0,15rem)_minmax(0,1fr)] sm:items-start sm:gap-4">
       {/* Label and badge on one line, key underneath. Run inline they collided:
-          `model.allowHostedFallback` is longer than the label column, so the key
+          `model.embedPath` is longer than the label column, so the key
           wrapped mid-identifier and the row read as noise. */}
       <div className="min-w-0 space-y-0.5">
         <div className="flex flex-wrap items-center gap-1.5">
@@ -501,8 +501,8 @@ function Control({
           value={current}
           onChange={onChange}
           searchable
-          // No max-width. A model reference is two names long -- `qwen3.5-4b-q4_k_m`
-          // and `xiaomi/qwen3.5-4b-q4_k_m` -- and the list is where you read them,
+          // No max-width. A model reference is two names long -- `claude-sonnet-4-5`
+          // and `anthropic/claude-sonnet-4-5` -- and the list is where you read them,
           // so the popup (which is as wide as this control) has to be as wide as
           // the column allows. This one used to be capped at 42rem, which was a
           // *ceiling* dressed up as a size: it sat there looking deliberate while

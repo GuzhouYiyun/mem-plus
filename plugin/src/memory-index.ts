@@ -32,6 +32,7 @@ import {
 } from "../../extensions/memory-core/src/memory/hybrid.js";
 import { stateRoot } from "./paths.js";
 import { parseMemoryDocument, type IndexRoot, type MemoryUnit, type ParsedDocument } from "./memory-parse.js";
+import type { MemoryEntryProvenance } from "../../packages/memory-host-sdk/src/host/types.js";
 
 /** `~/.config/opencode/mem-plus/index.db`. */
 export function indexPath(): string {
@@ -73,6 +74,19 @@ export type SearchHit = {
   readonly entryType: string | null;
   readonly tags: readonly string[];
   readonly marker: string | null;
+  /**
+   * Curated recall annotations, carried on the hit so trigger injection can score
+   * without re-reading the file. Null unless the unit came from a curated
+   * `MEMORY.md` section that carries the annotation.
+   */
+  readonly triggers: string | null;
+  readonly importance: number | null;
+  /** `<!-- project: ... -->` keys, `;`-joined. null unless the unit is annotated. */
+  readonly projectKey: string | null;
+  /** openclaw's stored provenance. undefined when the document was never classified. */
+  readonly provenance: MemoryEntryProvenance | undefined;
+  /** True for `<memory home>/MEMORY.md` and `USER.md` — the curated tier. */
+  readonly curatedRoot: boolean;
   readonly heading: string;
   readonly text: string;
   readonly ts: number | null;
@@ -101,7 +115,12 @@ CREATE TABLE IF NOT EXISTS documents (
   content     TEXT,
   bytes       INTEGER NOT NULL DEFAULT 0,
   mtime       INTEGER NOT NULL DEFAULT 0,
-  indexed_at  INTEGER NOT NULL DEFAULT 0
+  indexed_at  INTEGER NOT NULL DEFAULT 0,
+  origin_class TEXT,
+  session_kind TEXT,
+  observed_at  INTEGER,
+  supersedes_key TEXT,
+  curated_root INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS documents_root    ON documents(root);
 CREATE INDEX IF NOT EXISTS documents_project ON documents(project);
@@ -116,12 +135,16 @@ CREATE TABLE IF NOT EXISTS units (
   entry_type   TEXT,
   tags         TEXT    NOT NULL DEFAULT '',
   marker       TEXT,
+  triggers     TEXT,
+  importance   INTEGER,
+  project_key  TEXT,
   heading      TEXT    NOT NULL DEFAULT '',
   text         TEXT    NOT NULL
 );
 CREATE INDEX IF NOT EXISTS units_document ON units(document_id);
 CREATE INDEX IF NOT EXISTS units_day      ON units(day);
 CREATE INDEX IF NOT EXISTS units_kind     ON units(kind);
+CREATE INDEX IF NOT EXISTS units_triggers ON units(triggers) WHERE triggers IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS units_marker ON units(marker) WHERE marker IS NOT NULL;
 
 CREATE VIRTUAL TABLE IF NOT EXISTS units_fts USING fts5(
@@ -190,6 +213,20 @@ export function openIndexAt(file: string): DatabaseSync | null {
  */
 const MIGRATIONS: readonly (readonly [string, string, string])[] = [
   ["documents", "content", "content TEXT"],
+  // openclaw's curated recall annotations. Added for the same reason as every
+  // other additive column: an index.db written by an older build has to answer
+  // the trigger-candidate query, not just the search.
+  ["units", "triggers", "triggers TEXT"],
+  ["units", "importance", "importance INTEGER"],
+  ["units", "project_key", "project_key TEXT"],
+  // openclaw's provenance, stored rather than parsed. It hangs off the *document*
+  // because that is upstream's granularity too: one classification per memory file,
+  // produced once by `resolveMemoryPathClassification` and joined onto every hit.
+  ["documents", "origin_class", "origin_class TEXT"],
+  ["documents", "session_kind", "session_kind TEXT"],
+  ["documents", "observed_at", "observed_at INTEGER"],
+  ["documents", "supersedes_key", "supersedes_key TEXT"],
+  ["documents", "curated_root", "curated_root INTEGER NOT NULL DEFAULT 0"],
 ];
 
 function hasColumn(db: DatabaseSync, table: string, column: string): boolean {
@@ -227,6 +264,19 @@ function contentHash(text: string): string {
  */
 const ROOT_PRECEDENCE: Record<IndexRoot, number> = { home: 0, wiki: 1 };
 
+/**
+ * openclaw's per-file classification, as `resolveMemoryPathClassification` returns it.
+ * `sessionKind` and `observedAt` come from the write that produced the file; both are
+ * absent when the file has no recorded provenance, which leaves the hit ineligible for
+ * automatic injection -- the fail-closed default.
+ */
+export type DocumentProvenance = {
+  readonly originClass: string;
+  readonly sessionKind: string;
+  readonly observedAt: number;
+  readonly curatedRoot: boolean;
+};
+
 /** Insert or replace one document and its units. */
 export function indexDocument(params: {
   db: DatabaseSync;
@@ -236,6 +286,12 @@ export function indexDocument(params: {
   text: string;
   bytes: number;
   mtime: number;
+  /**
+   * Omitted when the caller has no classifier available; the row then stores no
+   * provenance and every hit from it reports `undefined`, so nothing it contains can
+   * be injected automatically.
+   */
+  provenance?: DocumentProvenance;
 }): DocumentIndex {
   const { db, file, root, project, text, bytes, mtime } = params;
   const parsed: ParsedDocument = parseMemoryDocument(file, text, root);
@@ -291,8 +347,9 @@ export function indexDocument(params: {
   }
 
   const insertDoc = db.prepare(
-    `INSERT INTO documents (path, root, project, kind, title, day, content, bytes, mtime, indexed_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO documents (path, root, project, kind, title, day, content, bytes, mtime, indexed_at,
+                            origin_class, session_kind, observed_at, curated_root)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
   const docResult = insertDoc.run(
     file,
@@ -305,6 +362,10 @@ export function indexDocument(params: {
     bytes,
     mtime,
     Date.now(),
+    params.provenance?.originClass ?? null,
+    params.provenance?.sessionKind ?? null,
+    params.provenance?.observedAt ?? null,
+    params.provenance?.curatedRoot ? 1 : 0,
   );
   const documentId = Number(docResult.lastInsertRowid);
 
@@ -313,8 +374,8 @@ export function indexDocument(params: {
   }
 
   const insertUnit = db.prepare(
-    `INSERT INTO units (document_id, ord, kind, ts, day, entry_type, tags, marker, heading, text)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO units (document_id, ord, kind, ts, day, entry_type, tags, marker, triggers, importance, project_key, heading, text)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
   const insertFts = db.prepare(
     "INSERT INTO units_fts (rowid, text, heading, tags) VALUES (?, ?, ?, ?)",
@@ -333,6 +394,9 @@ export function indexDocument(params: {
       unit.entryType,
       unit.tags.join(" "),
       unit.marker,
+      unit.triggers ?? null,
+      unit.importance ?? null,
+      unit.projectKey ?? null,
       unit.heading,
       unit.text,
     );
@@ -446,8 +510,8 @@ export function indexAppendedTail(params: {
   );
 
   const insertUnit = db.prepare(
-    `INSERT INTO units (document_id, ord, kind, ts, day, entry_type, tags, marker, heading, text)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO units (document_id, ord, kind, ts, day, entry_type, tags, marker, triggers, importance, project_key, heading, text)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
   const insertFts = db.prepare(
     "INSERT INTO units_fts (rowid, text, heading, tags) VALUES (?, ?, ?, ?)",
@@ -465,6 +529,9 @@ export function indexAppendedTail(params: {
       unit.entryType,
       unit.tags.join(" "),
       unit.marker,
+      unit.triggers ?? null,
+      unit.importance ?? null,
+      unit.projectKey ?? null,
       unit.heading,
       unit.text,
     );
@@ -572,6 +639,14 @@ const HIT_COLUMNS = `
   u.entry_type AS entryType,
   u.tags    AS tags,
   u.marker  AS marker,
+  u.triggers AS triggers,
+  u.importance AS importance,
+  u.project_key AS projectKey,
+  d.origin_class AS originClass,
+  d.session_kind AS sessionKind,
+  d.observed_at  AS observedAt,
+  d.supersedes_key AS supersedesKey,
+  d.curated_root AS curatedRoot,
   u.heading AS heading,
   u.text    AS text
 `;
@@ -632,6 +707,37 @@ function describe(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/**
+ * openclaw's `MemoryEntryProvenance`, or undefined when the document carries no
+ * classification. The failure mode matters: a hit with no provenance is not eligible
+ * for automatic injection, which is the safe direction.
+ */
+function buildProvenance(row: Record<string, unknown>): MemoryEntryProvenance | undefined {
+  const originClass = row["originClass"];
+  const sessionKind = row["sessionKind"];
+  const observedAt = Number(row["observedAt"]);
+  if (
+    typeof originClass !== "string" ||
+    typeof sessionKind !== "string" ||
+    !Number.isFinite(observedAt) ||
+    observedAt <= 0
+  ) {
+    return undefined;
+  }
+  return {
+    originClass: originClass as MemoryEntryProvenance["originClass"],
+    sessionKind: sessionKind as MemoryEntryProvenance["sessionKind"],
+    observedAt,
+    // openclaw's lineage key, attached the way `manager-keyword-retrieval.ts:172` does:
+    // only when it is a string, so "absent" and "empty" stay distinguishable. No writer in
+    // this openclaw revision sets a non-null value, so hits normally carry no
+    // `supersedesKey` -- the column exists so the contract matches, not to hold data.
+    ...(typeof row["supersedesKey"] === "string" && row["supersedesKey"].trim()
+      ? { supersedesKey: row["supersedesKey"] }
+      : {}),
+  };
+}
+
 function rowToHit(row: Record<string, unknown>): SearchHit {
   const tags = typeof row["tags"] === "string" ? (row["tags"] as string) : "";
   const text = String(row["text"] ?? "");
@@ -647,6 +753,16 @@ function rowToHit(row: Record<string, unknown>): SearchHit {
     entryType: (row["entryType"] as string | null) ?? null,
     tags: tags.length > 0 ? tags.split(" ").filter(Boolean) : [],
     marker: (row["marker"] as string | null) ?? null,
+    // Curated recall annotations. Null for everything but MEMORY.md sections,
+    // which is what makes them trigger-injection candidates and nothing else.
+    triggers: (row["triggers"] as string | null) ?? null,
+    importance: (row["importance"] as number | null) ?? null,
+    projectKey: (row["projectKey"] as string | null) ?? null,
+    // openclaw's `MemoryEntryProvenance`, projected onto the hit so
+    // `isAutomaticMemoryEntryEligible` and the injection gate can read it directly.
+    // Null when the document was indexed without a classification.
+    provenance: buildProvenance(row),
+    curatedRoot: Number(row["curatedRoot"] ?? 0) === 1,
     heading: String(row["heading"] ?? ""),
     text,
     startLine: 0,
@@ -654,6 +770,100 @@ function rowToHit(row: Record<string, unknown>): SearchHit {
     source: "memory",
     snippet: text,
   };
+}
+
+// --- trigger candidates ----------------------------------------------------
+
+/**
+ * Curated entries that carry trigger phrases -- the unscored half of
+ * `resolveTriggerRecall`'s two queries.
+ *
+ * UPSTREAM: `MemorySearchManager.listTriggerCandidates({ activeProjectKeys })`,
+ * called alongside a scored search so an entry that matches nothing lexically is
+ * still a candidate when its trigger phrases match. This is that query.
+ *
+ * WHY THE ELIGIBILITY FILTERS ARE NOT HERE
+ *   Upstream filters by `activeProjectKeys` in the manager and again in
+ *   `isPromotedTrustedMemoryEntry`, and its provenance gate
+ *   (`isAutomaticMemoryEntryEligible`) is part of that second predicate. The selector is
+ *   where those checks decide, so they live there; this query only narrows to the memory
+ *   source, which is what `sources: ["memory"]` does upstream.
+ *
+ * WHY THE BASENAME CHECK IS GONE
+ *   It stood in for the provenance gate while the index carried no provenance. That gate
+ *   is `isAutomaticMemoryEntryEligible`, called from the selector now that every hit
+ *   reports `provenance`. The old check keyed on the file being `MEMORY.md`, which was
+ *   a structural approximation of "curated tier"; the provenance class is the rule
+ *   itself, and it also survives a day file that the parser mis-dispatched.
+ *
+ * The limit is optional and defaults to 512, clamped to `[1, 512]`, exactly as upstream's
+ * `MemoryKeywordRetrieval.listTriggerCandidates` does -- and upstream's `trigger-recall.ts`
+ * call site passes only `activeProjectKeys`, so 512 is what upstream actually runs. The
+ * per-message candidate budget (`TRIGGER_CANDIDATE_LIMIT`) applies to the *scored* half,
+ * which is a different query; this one is the curated tier, and a second cap here would
+ * silently drop trigger phrases from entries the block budget would have admitted.
+ */
+export function listTriggerCandidates(params: {
+  db: DatabaseSync;
+  limit?: number;
+  onError?: (message: string) => void;
+}): SearchHit[] {
+  const limit = Math.max(1, Math.min(512, Math.floor(params.limit ?? 512)));
+  const sql = `
+    SELECT ${HIT_COLUMNS},
+           0 AS rank
+    FROM units u
+    JOIN documents d  ON d.id = u.document_id
+    WHERE u.triggers IS NOT NULL
+      AND d.root = 'home'
+    ORDER BY d.path, u.ord
+    LIMIT ?
+  `;
+  try {
+    const rows = params.db.prepare(sql).all(limit) as Record<string, unknown>[];
+    return rows.map(rowToHit);
+  } catch (error) {
+    params.onError?.(error instanceof Error ? error.message : String(error));
+    return [];
+  }
+}
+
+/**
+ * Curated entries that carry at least one `<!-- project: ... -->` annotation.
+ *
+ * UPSTREAM: `MemoryKeywordRetrieval.listCuratedProjectCandidates({ activeProjectKeys,
+ * limit })` -- the same reader as {@link listTriggerCandidates} with `projectsOnly: true`,
+ * which is what the project-memory bootstrap draws from. Upstream's default limit is 48
+ * (clamped `[1, 512]`) and its call site passes 48 explicitly.
+ *
+ * "Projects only" means *annotated*: upstream's `buildProjectMemoryBootstrap` admits an
+ * entry only when its `automaticRecall.projectKeys` is non-empty and every key is active,
+ * so an unannotated curated entry is global and never arrives through here. That is why
+ * this query requires `project_key IS NOT NULL` rather than filtering in the caller.
+ */
+export function listCuratedProjectCandidates(params: {
+  db: DatabaseSync;
+  limit?: number;
+  onError?: (message: string) => void;
+}): SearchHit[] {
+  const limit = Math.max(1, Math.min(512, Math.floor(params.limit ?? 48)));
+  const sql = `
+    SELECT ${HIT_COLUMNS},
+           0 AS rank
+    FROM units u
+    JOIN documents d  ON d.id = u.document_id
+    WHERE u.project_key IS NOT NULL
+      AND d.root = 'home'
+    ORDER BY d.path, u.ord
+    LIMIT ?
+  `;
+  try {
+    const rows = params.db.prepare(sql).all(limit) as Record<string, unknown>[];
+    return rows.map(rowToHit);
+  } catch (error) {
+    params.onError?.(error instanceof Error ? error.message : String(error));
+    return [];
+  }
 }
 
 // --- vectors ---------------------------------------------------------------

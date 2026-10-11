@@ -8,8 +8,10 @@ import path from "node:path";
 import { CAPTURE_LATEST_MEMORY_CHARS, CAPTURE_MAX_TOOL_INPUT_LENGTH } from "../../extensions/memory-core/src/capture/constants.js";
 import { appendCaptureEntry, readCaptureTargetText } from "../../extensions/memory-core/src/capture/write.js";
 import { captureEntryMarker } from "../../extensions/memory-core/src/capture/render.js";
-import { dailyMemoryFile, homeProjectMemoryDir, memoryFile } from "./paths.js";
+import { dailyMemoryFile, homeProjectMemoryDir, memoryFile, memoryHomeDir } from "./paths.js";
+import { withWriteProvenance } from "./write-provenance.js";
 import type { HostedModelRef } from "./model/config.js";
+import { completeThroughHost } from "./llm.js";
 import { asSessionMessage, type PluginContext, type SessionContentPart, type SessionMessageView } from "./opencode.js";
 import type {
   CaptureDependencies,
@@ -95,54 +97,39 @@ async function readTail(filePath: string, maxChars: number): Promise<string | nu
 /**
  * Extraction transport: one prompt in, one completion out.
  *
- * Two implementations, and the caller names which one it wants rather than
- * inheriting one. `ctx.generate.text` is the default (`model.content`) because it
- * needs nothing installed; the GGUF path needs a service that can be absent for
- * reasons the user never sees -- wrong directory, missing dependency, busy port.
- * So when the *local* path is chosen and then fails, the OpenCode fallback is
- * opt-in (`model.allowHostedFallback`): without it, extraction is skipped, the
- * snapshot is kept, and the landing zone retries when the service is back, rather
- * than the model silently changing for as long as the outage lasts.
+ * One implementation, `hostedComplete`, and it must throw when the model cannot be reached:
+ * openclaw's landing zone treats a rejected extraction as "not done yet", so the record
+ * stays pending and is retried rather than being parked or dropped.
  */
 export type CaptureCompleteOverride = (params: {
   systemPrompt: string;
   prompt: string;
 }) => Promise<string>;
 
-/** Raised by `disabledComplete`; no model request was made behind it. */
-export class ExtractionDisabledError extends Error {
-  constructor(reason: string) {
-    super(`extraction disabled: ${reason}`);
-    this.name = "ExtractionDisabledError";
-  }
-}
-
 /**
- * The transport used when local inference is not available and the user has not
- * opted into hosted extraction. Throwing keeps openclaw's landing zone semantics
- * intact: the record stays pending and is retried, so the memory is written later
- * and for free instead of never.
- */
-export function disabledComplete(reason: string): CaptureCompleteOverride {
-  return async () => {
-    throw new ExtractionDisabledError(reason);
-  };
-}
-
-/**
- * Transport via the user's own OpenCode model. The default for `model.content`,
- * and also reachable from `model.allowHostedFallback: true` when the local GGUF
- * path is the one that was asked for but cannot run.
+ * Transport via the user's own OpenCode model. This is the only extraction transport:
+ * the capture pipeline and the pre-compaction flush both go through it.
  *
  * `model` pins which OpenCode model runs the extraction (`model.hostedModel`).
  * Omitted, `ctx.generate.text` uses OpenCode's own default -- unchanged behavior.
+ *
+ * The call itself now goes through `completeThroughHost` so capture shares one model
+ * entry point (and one log line) with promotion and dreaming. The override contract is
+ * unchanged: it must throw on failure, because openclaw's landing zone keeps the record
+ * pending and retries it rather than parking a memory forever.
  */
-export function hostedComplete(ctx: PluginContext, model?: HostedModelRef): CaptureCompleteOverride {
+export function hostedComplete(
+  ctx: PluginContext,
+  model?: HostedModelRef,
+  log: (message: string, detail?: unknown) => void = () => {},
+): CaptureCompleteOverride {
   return async ({ systemPrompt, prompt }) => {
-    const result = await ctx.generate.text({
-      prompt: `${systemPrompt}\n\n${prompt}`,
-      ...(model ? { model } : {}),
-    });
+    const result = await completeThroughHost(
+      ctx,
+      { purpose: "capture extract", prompt, systemPrompt, ...(model ? { model } : {}) },
+      log,
+    );
+    if (result.text === null) throw new Error(result.reason);
     return result.text;
   };
 }
@@ -176,7 +163,17 @@ export function createCaptureDependencies(
     writeEntry: async ({ record, day, rendered, entryKey }) => {
       const base = record.workspaceDir || ctx.location.directory;
       const target = path.join(homeProjectMemoryDir(base), `${day}.md`);
-      await appendCaptureEntry({ absolutePath: target, rendered, entryKey });
+      // openclaw's write-path provenance, taken by the writer. A human edit to the
+      // file between two captures downgrades the next append to `untrusted`, which
+      // is what keeps curated promotion honest.
+      await withWriteProvenance({
+        memoryHome: memoryHomeDir(),
+        absolutePath: target,
+        sessionId: record.sessionId || undefined,
+        append: async () => {
+          await appendCaptureEntry({ absolutePath: target, rendered, entryKey });
+        },
+      });
       return target;
     },
 
