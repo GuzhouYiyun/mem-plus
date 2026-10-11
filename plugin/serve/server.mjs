@@ -308,7 +308,25 @@ function message(error) {
 try {
   await openLlama();
 } catch (error) {
-  log("gpu backend unavailable; service will not start (discrete > integrated, CPU is not allowed)", error);
+  // openLlama() 有三种互不相干的失败，其中只有两种跟显卡有关。第三种是
+  // node-llama-cpp 这个包根本没装——它在 package.json 的 optionalDependencies
+  // 里。安装器每次都会装它（2026-10-12 取消了「本地向量检索依赖」这个可选项），
+// 所以走到这个分支基本意味着包在更新过程中被删掉了。
+  //
+  // 以前这三种都报成 "gpu backend unavailable"，于是 2026-10-11 一次真实的
+  // 更新事故里：包被更新过程删掉了，日志却在讲显卡不够。这条消息会把人送去
+  // 查驱动、查设备管理器、查 model.gpu——为一个从没落到磁盘上的包。报错的
+  // 作用是指出下一步，说错方向比不说更糟。
+  //
+  // 同时匹配 code 和消息文本：ERR_MODULE_NOT_FOUND 是 Node 动态 import 失败
+  // 的标准 code，而 "Cannot find package" 也覆盖打包器改写过的变体。
+  const reason = error instanceof Error ? `${error.code ?? ""} ${error.message}` : String(error);
+  if (error?.code === "ERR_MODULE_NOT_FOUND" || /cannot find package/i.test(reason)) {
+    log("推理依赖未安装：找不到 node-llama-cpp", error);
+    log("修复：用安装器重新运行一遍。未安装时全文检索不受影响，向量检索不可用。");
+  } else {
+    log("gpu backend unavailable; service will not start (discrete > integrated, CPU is not allowed)", error);
+  }
   process.exit(1);
 }
 

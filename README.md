@@ -344,6 +344,7 @@ markdown 文件为唯一数据源，索引为可再生数据。
 | 记忆浏览器无法访问，或显示其他项目的记忆 | 端口先到先得，实际端口见日志 `memory browser at` 一行。多个 OpenCode 窗口仅一个能占用 |
 | `service did not become healthy ... within 30s` | 推理服务未启动。可手动启动查看日志：`node "<插件目录>/plugin/serve/server.mjs" --port 4748` |
 | `gpu backend unavailable; service will not start` | 无可用 GPU，推理服务不启动。出现可用 GPU 后自动恢复 |
+| `推理依赖未安装：找不到 node-llama-cpp` | 推理依赖缺失，推理服务不启动，与显卡无关。重新运行安装器即可补上；未安装时全文检索不受影响，向量检索不可用 |
 
 ## 更新
 
@@ -356,6 +357,10 @@ opencode service restart           # 重启后生效
 ```
 
 覆盖安装会替换插件目录内的全部文件。记忆、索引与日志位于 `~/.config/opencode/mem-plus/`，不在插件目录内，不受影响。各版本号与安装包见 Releases 页面。
+
+安装器（Windows `.exe`）每次都会安装向量检索的 GPU 运行库，不再提供勾选框（0.1.1 起取消了「本地向量检索依赖」这个可选项）。因此覆盖更新会带上 `node-llama-cpp`（约 690 MB）。向量**模型**仍然需要你自己下载放置，见上文「放置向量模型」。
+
+> 早期版本的安装器在不勾选该项时会传入 `--omit=optional`，npm 会顺带把已安装的 `node-llama-cpp` 一并剪掉，于是更新后向量检索静默失效——日志只提示显卡不可用，与真实原因无关。现在该分支已不可达：运行库每次都装，且报错信息会直接说明是包缺失而非显卡问题。
 
 ## 卸载
 

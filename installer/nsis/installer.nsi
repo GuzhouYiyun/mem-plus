@@ -20,6 +20,7 @@ Unicode true
 !include "FileFunc.nsh"
 !include "version.nsh"
 !include "nsis-paths.nsh"
+!include "LogicLib.nsh"
 
 Name        "mem-plus"
 OutFile     "dist/mem-plus-installer-${MEMPLUS_VERSION}.exe"
@@ -66,13 +67,38 @@ VIAddVersionKey /LANG=2052 "LegalCopyright"  "MIT"
 ; template source -- MUI2 bakes them into modern*.exe and offers no width define,
 ; so the template choice is the only lever there is.
 !define MUI_COMPONENTSPAGE_SMALLDESC
-; MUI2 has no MUI_FINISHPAGE_RUN -- that was MUI v1, and defining it here is
-; silently ignored (the function it names compiles out with a 6010 warning). MUI2's
-; finish page also has no hook for adding a control, so nothing extra can live
-; there. The "reload OpenCode" step is a section instead, so it runs while the
-; installer is still in front of the user rather than after they close it.
+; WHY THERE IS NO RESTART CHECKBOX HERE
+;
+; A "restart OpenCode now?" checkbox on the finish page is what a real installer has, and
+; this one should have it too. It does not, because MUI2 gives no way to add a control to
+; that page, and that was verified against the installed MUI2 rather than assumed:
+;
+;   MUI_FINISHPAGE_RUN        removed in MUI2 (MUI v1 only); defining it is silently ignored
+;   MUI_FINISHPAGE_CHECKBOX   does not exist in this build at all -- 0 hits in
+;                              Contrib\Modern UI 2\{Pages,Interface,Localization,MUI2}.nsh
+;   PageEx MUI_PAGE_FINISH    refused by makensis: PageEx accepts only
+;                              custom|license|components|directory|instfiles|uninstConfirm,
+;                              so the finish page cannot be wrapped either
+;
+; The escape hatch is a hand-built page (`PageEx custom` + nsDialogs), which is how
+; Clash Verge does it -- NSIS + nsDialogs with its own bitmap and no MUI2 at all. That was
+; built here and it COMPILED, but at runtime the page never appeared: clicking through from
+; instfiles closed the installer instead. A page that compiles but is never shown cannot
+; be debugged from a build log, and the failure mode of leaving it in was an installer that
+; exits without a finish page. So it was removed rather than shipped, and the restart stays
+; in SecReload where it is observable and has been working since 2026-10-11.
+;
+; Recorded so this is not re-attempted from scratch: the blocker is MUI2's, not NSIS's, and
+; the first thing to try next time is a self-contained NSIS page with no MUI2 in it at all.
 !define MUI_FINISHPAGE_TITLE "安装完成"
-!define MUI_FINISHPAGE_TEXT "mem-plus ${MEMPLUS_VERSION} 已安装到：$\r$\n$\r$\n$INSTDIR$\r$\n$\r$\nOpenCode 已经重新加载，记忆功能现在就可以用了。$\r$\n$\r$\n验证：浏览器打开 http://127.0.0.1:4747/ ，能看到记忆浏览器即为正常。$\r$\n$\r$\n要卸载：Windows 设置 → 应用 → 已安装的应用 → mem-plus → 卸载。记忆数据不受影响。$\r$\n$\r$\n提示：没有装向量检索组件，搜索按全文检索工作（这是没有可用 GPU 时的正常回退方式）。"
+!define MUI_FINISHPAGE_TEXT "mem-plus ${MEMPLUS_VERSION} 已安装到：$\r$\n$\r$\n$INSTDIR$\r$\n$\r$\n如果 OpenCode 之前开着，它已经被重启，记忆功能现在就可以用了。如果没有开过，请手动启动它。$\r$\n$\r$\n验证：浏览器打开 http://127.0.0.1:4747/ ，能看到记忆浏览器即为正常。$\r$\n$\r$\n要卸载：Windows 设置 → 应用 → 已安装的应用 → mem-plus → 卸载。记忆数据不受影响。$\r$\n$\r$\n提示：没有装向量检索组件，搜索按全文检索工作（这是没有可用 GPU 时的正常回退方式）。"
+
+; Not an instruction any more. The installer stops OpenCode itself with
+; `opencode service stop` before writing and starts it again afterwards, so the
+; only thing worth saying here is that an in-progress session will be
+; interrupted -- which the user should know before clicking through, not after.
+!define MUI_WELCOMEPAGE_TITLE "安装 mem-plus"
+!define MUI_WELCOMEPAGE_TEXT "这个安装程序会覆盖：$\r$\n$\r$\n$INSTDIR$\r$\n$\r$\n安装过程中 OpenCode 如果开着，会短暂记录几次加载失败，这是正常的。$\r$\n$\r$\n装完最后会自动重启一次，那时读到的就是完整的插件。安装程序不会主动去动你正在进行的对话。$\r$\n$\r$\n你的记忆数据在另一个目录，不受影响。"
 
 ; The uninstaller is a normal MUI2 wizard, not a bare "are you sure" box. It says
 ; what it is about to delete, because the line it runs is RMDir /r and the user
@@ -81,10 +107,9 @@ VIAddVersionKey /LANG=2052 "LegalCopyright"  "MIT"
 ; OPENCODE_CONFIG_DIR or XDG_CONFIG_HOME set the plugin is not under the profile
 ; and a literal here would name a directory that is not the one being touched.
 !define MUI_UNCONFIRMPAGE_TEXT_TOP "将删除 mem-plus 插件文件：$\r$\n$\r$\n$INSTDIR$\r$\n$\r$\n你的记忆数据保存在另一个目录（与上面这个不同名），不会被删除。"
-!define MUI_UNFINISHPAGE_TEXT_TOP "mem-plus 已卸载。$\r$\n$\r$\n$\r$\n你的记忆数据仍然保存在原来的位置，不会被删除。$\r$\n$\r$\n如果之后还想用，重新运行安装程序即可；记忆会立刻回来。"
+!define MUI_UNFINISHPAGE_TEXT_TOP "mem-plus 已卸载。$\r$\n$\r$\n$\r$\n你的记忆数据仍然保存在原来的位置，不会被删除。$\r$\n$\r$\n如果 OpenCode 之前开着，它已经被重启，记忆功能不再加载。$\r$\n$\r$\n如果之后还想用，重新运行安装程序即可；记忆会立刻回来。"
 
 !insertmacro MUI_PAGE_WELCOME
-!insertmacro MUI_PAGE_COMPONENTS
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
 !insertmacro MUI_PAGE_FINISH
@@ -95,6 +120,13 @@ VIAddVersionKey /LANG=2052 "LegalCopyright"  "MIT"
 !insertmacro MUI_LANGUAGE "SimpChinese"
 
 Var Vectors
+; Decided once in SecDeps and consumed by both the npm and the bun call, so the
+; "is the optional vector runtime already there" question is asked once instead
+; of being duplicated into a fallback that could answer it differently.
+Var InstallFlags
+; Set only on the preserve-an-existing-install path, so the finish page can say
+; so. See SecDeps and the Finish page section.
+Var KeptVectors
 
 ; ------------------------------------------------------------------- where --
 ; OpenCode discovers plugins by scanning <config>/plugins/*, and "config" is not
@@ -195,6 +227,21 @@ FunctionEnd
 ; tickable rows.
 Section "mem-plus 记忆插件" SecMain
 SectionIn RO
+  ; Straight overwrite into $INSTDIR, which is how every other installer works.
+  ;
+  ; `opencode service stop` was tried here first and is worse than useless: measured
+  ; on 2026-10-11, `service stop` returned and 0.1 s later a new `opencode serve
+  ; --service` process started on its own and began reading the tree while the
+  ; payload and node_modules were still being written -- 14 failed loads with
+  ; "Cannot find package '@openclaw/fs-safe'". Stopping the server is what causes
+  ; the read, not what prevents it. So nothing here touches the running OpenCode;
+  ; SecReload restarts it once at the end, which is the whole fix.
+  ;
+  ; Cleaned here and on uninstall. Neither is referenced by the current installer;
+  ; they only exist on machines where an earlier staging design was run once.
+  RMDir /r "$INSTDIR\..\..\mem-plus.__stage"
+  RMDir /r "$INSTDIR\..\..\mem-plus.__old"
+
   SetOutPath "$INSTDIR"
   ; Recursive: the package is ~2550 files (the vendored openclaw tree) and every
   ; one of them is loaded at runtime.
@@ -248,7 +295,14 @@ SectionEnd
 ; The model is not bundled because it is ~2.2 GB against a 3 MB installer, and
 ; most installs never need it -- full-text search is a complete mode, not a
 ; degraded one. See the description below for where to put it.
-Section /o "本地向量检索依赖" SecVectors
+; Always installed. The last optional component was removed on 2026-10-12 at the
+; owner's request: with no choice left to make, there is no component page at all
+; (see the page list), and the runtime comes with every install.
+;
+; The consequence worth stating plainly: an install now also brings node-llama-cpp,
+; ~690 MB. That is the point of the change, not a side effect of it.
+Section "本地向量检索依赖" SecVectors
+SectionIn RO
   ; /o is unchecked by default, so .onInit no longer has to clear it -- which
   ; removes the last place a wrong section index could silently skip a step.
   ;
@@ -266,31 +320,57 @@ SectionIn RO
   DetailPrint "正在安装依赖，请稍候……"
   ; `--omit=optional` is the whole 690 MB: node-llama-cpp pulls per-platform GPU
   ; binaries (win-x64, win-arm64, cuda, vulkan, cuda-ext all at once).
+  ;
+  ; It is also not merely a "skip". npm reconciles $INSTDIR against an ideal
+  ; tree built without optional deps, so this flag PRUNES node-llama-cpp if it is
+  ; already there. Measured 2026-10-11: an install that had the vector component
+  ; was updated with this row left unticked, and node-llama-cpp was deleted --
+  ; vector search then refused to start, with nothing anywhere saying the feature
+  ; had been removed. An update silently downgraded the product.
+  ;
+  ; So unticked now means "do not add", never "take away what is already here".
+  ; Ticking is how you add it; nothing in this installer removes it, which also
+  ; matches the uninstaller, where nothing the user did not ask for is touched.
+  ; This is the branch a silent install lands on: /S shows no component page, so
+  ; $Vectors is 0 by definition, and an update must not be able to strip a
+  ; working install just because nobody was there to tick a box.
+  ;
+  ; The same reasoning kept this out of .onInit, where pre-checking the row would
+  ; have needed SectionSetFlags by index -- the exact mechanism that already cost
+  ; this script one silent, exit-code-0 bug (see the note there).
+  StrCpy $KeptVectors "0"
   ${If} $Vectors == "1"
     DetailPrint "安装全部依赖（含向量检索组件）……"
-    ClearErrors
-    nsExec::ExecToLog 'cmd /c npm install --prefix "$INSTDIR" --no-audit --no-fund'
+    StrCpy $InstallFlags ""
+  ${ElseIf} ${FileExists} "$INSTDIR\node_modules\node-llama-cpp\package.json"
+    DetailPrint "检测到已安装的向量检索组件，本次保留……"
+    StrCpy $InstallFlags ""
+    StrCpy $KeptVectors "1"
   ${Else}
     DetailPrint "安装依赖（不含向量检索组件）……"
-    ClearErrors
-    nsExec::ExecToLog 'cmd /c npm install --prefix "$INSTDIR" --omit=optional --no-audit --no-fund'
+    StrCpy $InstallFlags "--omit=optional"
   ${EndIf}
+
+  ClearErrors
+  nsExec::ExecToLog 'cmd /c npm install --prefix "$INSTDIR" $InstallFlags --no-audit --no-fund'
   ${If} ${Errors}
     ; npm can be missing from this process's PATH even when `where` found it --
     ; common when OpenCode was launched from a shortcut. bun is the documented
     ; fallback and produces an equivalent tree.
     DetailPrint "npm 不可用，改用 bun……"
     ClearErrors
-    ${If} $Vectors == "1"
-      nsExec::ExecToLog 'cmd /c bun install --cwd "$INSTDIR"'
-    ${Else}
-      nsExec::ExecToLog 'cmd /c bun install --omit=optional --cwd "$INSTDIR"'
-    ${EndIf}
+    nsExec::ExecToLog 'cmd /c bun install $InstallFlags --cwd "$INSTDIR"'
     ${If} ${Errors}
-      MessageBox MB_OK|MB_ICONEXCLAMATION \
-        "依赖安装失败：既没有可用的 npm，也没有可用的 bun。$\r$\n$\r$\n\
-         $INSTDIR 已经有文件了，但还不能运行。$\r$\n\
-         请安装 Node.js 或 bun 后，在该目录里手动执行 npm install。"
+      ; A silent install must never raise a modal dialog: nothing can dismiss it
+      ; and the installer hangs until it is killed. ${Silent} is LogicLib's own
+      ; answer to that question and is already included for ${If}.
+      DetailPrint "依赖安装失败。"
+      ${IfNot} ${Silent}
+        MessageBox MB_OK|MB_ICONEXCLAMATION \
+          "依赖安装失败：既没有可用的 npm，也没有可用的 bun。$\r$\n$\r$\n\
+           $INSTDIR 已经有文件了，但还不能运行。$\r$\n\
+           请安装 Node.js 或 bun 后，在该目录里手动执行 npm install。"
+      ${EndIf}
       Abort
     ${EndIf}
   ${EndIf}
@@ -300,25 +380,49 @@ SectionEnd
 Section "重新加载 OpenCode" SecReload
 SectionIn RO   ; the one step the user could reasonably want to skip, so it is
                 ; listed rather than hidden -- just not changeable
-  ; The last step of "download, double-click, use it". OpenCode is a running Bun
-  ; process, so this installer cannot restart it -- but it does not have to:
-  ; `opencode reload` re-runs every plugin's setup against the files on disk,
-  ; which is exactly what a freshly installed plugin needs. Verified on
-  ; 2026-10-10: the log's "plugin loaded" count goes up and the command exits 0
-  ; with "Configuration reloaded".
+  ; One restart at the very end, and it is the whole fix. The overwrite above
+  ; happens with the old server still running, which logs some failed loads while
+  ; the tree is incomplete -- that is expected and self-clearing. A restart is a
+  ; fresh process, so it imports the tree exactly as written and starts clean,
+  ; with none of the ~1800 file watchers a reload inside the same process
+  ; accumulates.
   ;
-  ; Failures are not fatal. If OpenCode is not on PATH, or is not running, or the
-  ; reload does not reach the server, the install is still complete and the user
-  ; can start OpenCode themselves -- the finish page says so.
-  nsExec::ExecToStack 'cmd /c opencode reload'
+  ; `restart`, not `stop` then `start`: `service stop` alone does not hold, a new
+  ; `serve --service` came up 0.1 s after it on 2026-10-11.
+  Call RestartOpenCode
+SectionEnd
+
+; ------------------------------------------------------------------ restart --
+; One restart at the end, and it is the whole fix: the payload overwrite happens while
+; the old OpenCode server is still running, which logs a few failed loads while the tree
+; is incomplete (expected, self-clearing). A restart is a fresh process, so it imports the
+; tree exactly as written, with none of the ~1800 file watchers a reload inside one
+; process accumulates.
+;
+; Only when something is actually running. Starting a background server for a user who
+; closed OpenCode before installing would be a surprise, so the status check comes first
+; and the no-op branch only reports.
+Function RestartOpenCode
+  nsExec::ExecToStack 'cmd /c opencode service status'
   Pop $0
   Pop $1
-  ${If} $0 != 0
-    DetailPrint "没有找到正在运行的 OpenCode，请手动启动它（安装已完成）。"
+  ${If} $0 == 0
+    DetailPrint "正在重启 OpenCode……"
+    nsExec::ExecToLog 'cmd /c opencode service restart'
+    Pop $0
+    Pop $1
+    ${If} $0 == 0
+      DetailPrint "OpenCode 已重启，记忆功能现在可用。"
+    ${Else}
+      DetailPrint "OpenCode 没能自动重启，请手动启动它（安装已完成）。"
+    ${EndIf}
   ${Else}
-    DetailPrint "OpenCode 已重新加载，记忆功能现在可用。"
+    ; Not running, so there is nothing to restart. The install is complete either
+    ; way; the finish page says what to do.
+    DetailPrint "OpenCode 之前没有在运行，请手动启动它（安装已完成）。"
   ${EndIf}
-SectionEnd
+FunctionEnd
+
 
 ; ---------------------------------------------------------------- uninstall --
 ; Not on the component page: NSIS special-cases a section named "Uninstall" and
@@ -332,20 +436,91 @@ Section "Uninstall"
   IfFileExists "$INSTDIR\package.json" 0 not_mem_plus
   DetailPrint "删除插件文件……"
 
-  ; One line, and the reason it is safe: $INSTDIR is
-  ; %USERPROFILE%\.config\opencode\plugins\mem-plus -- the *plugin*. The user's
-  ; memory lives in a different directory one level up, at
-  ; %USERPROFILE%\.config\opencode\mem-plus\ (the diaries, the SQLite index and
-  ; DREAMS.md). OpenCode keeps them separate, so no path expression below can
-  ; reach them: $INSTDIR is never a parent of it, and nothing walks up.
+  ; $INSTDIR is %USERPROFILE%\.config\opencode\plugins\mem-plus -- the *plugin*.
+  ; The user's memory lives one level up, at %USERPROFILE%\.config\opencode\mem-plus\
+  ; (diaries, SQLite index, DREAMS.md), and nothing below reaches it: $INSTDIR is
+  ; never a parent of it and nothing walks up.
+  ;
+  ; Every file and directory below is deleted by name, from a manifest generated by
+  ; build.ps1 while it was staging this very payload -- not `RMDir /r $INSTDIR`.
+  ; The NSIS manual is explicit about why (4.9.1.9): "Using RMDir /r $INSTDIR in
+  ; the uninstaller is not safe ... The user can also put other files in the
+  ; installation folder and wouldn't expect them to get deleted along with the
+  ; program."
+  ;
+  ; That is not hypothetical here. `defaultModelDir()`
+  ; (plugin/src/model/config.ts:121) resolves `<plugin root>/models` before falling
+  ; back to the state root, so bge-m3 (~2.2 GB) can legitimately sit inside the
+  ; directory being uninstalled. The payload ships no models/ at all, so anything
+  ; named that is the user's, and deleting by name leaves it untouched -- in place,
+  ; not moved.
+  ;
+  ; Directories go afterwards, deepest first, and with RMDir's default (no /r) so
+  ; one can only be removed when it is empty. Anything that survives is therefore
+  ; the user's, and the check below says so instead of leaving a silent leftover.
   Delete "$INSTDIR\Uninstall.exe"
-  RMDir /r "$INSTDIR"
+  !include "payload-manifest.nsh"
+
+  ; The manifest covers the payload only. These two are created by `npm install` in
+  ; SecDeps, so build.ps1 never sees them and they cannot appear in the manifest --
+  ; without these two lines the uninstaller would leave ~27,000 files behind.
+  ;
+  ; /r is safe here and only here: node_modules is created by that npm install and
+  ; is ours by definition. It is also the only place /r is defensible, because the
+  ; alternative would mean enumerating a dependency tree at build time and guessing
+  ; at what the user's npm resolves.
+  Delete "$INSTDIR\package-lock.json"
+  RMDir /r "$INSTDIR\node_modules"
+
+  RMDir "$INSTDIR"
+  IfFileExists "$INSTDIR\*" 0 plugin_dir_gone
+    DetailPrint "插件目录里还留有你自己的文件（models 等），没有删除。"
+    DetailPrint "它们仍在：$INSTDIR"
+  plugin_dir_gone:
+
+  ; The staging and previous-install trees live one level above plugins/. SecMain
+  ; clears both before every install; this is the other guaranteed cleanup point,
+  ; and unlike mid-install it is safe: OpenCode is not watching either directory.
+  ; /r is correct here: both are ours, created only by an earlier build of this
+  ; script, and neither can hold anything a user put there.
+  RMDir /r "$INSTDIR\..\..\mem-plus.__stage"
+  RMDir /r "$INSTDIR\..\..\mem-plus.__old"
 
   Delete "$SMPROGRAMS\mem-plus\打开插件文件夹.lnk"
   Delete "$SMPROGRAMS\mem-plus\卸载 mem-plus.lnk"
   RMDir "$SMPROGRAMS\mem-plus"
   DeleteRegKey HKCU "Software\mem-plus"
   DeleteRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\mem-plus"
+
+  ; Restart OpenCode, and this one is not cosmetic. Two things survive the file
+  ; delete inside the running process:
+  ;
+  ;   1. The memory browser's HTTP server. Verified 2026-10-11: after a clean
+  ;      uninstall -- plugin directory, both registry keys and the Start Menu
+  ;      entry all gone -- port 4747 was still listening and the process still held
+  ;      the index.db handle. The uninstaller cannot close a server it does not own,
+  ;      so it restarts the process that does.
+  ;   2. Every file watcher OpenCode registered for the plugin's import graph.
+  ;      Those are never released on unload: 3,011 were live after a few days of
+  ;      installs, enough to pin one core and hold the fan on. A restart is the
+  ;      only way to get them back.
+  ;
+  ; Same shape as SecReload: restart only if something is actually running, since
+  ; starting a server nobody asked for is a surprise. `restart`, never `stop` --
+  ; `service stop` alone does not hold on this machine.
+  nsExec::ExecToStack 'cmd /c opencode service status'
+  Pop $0
+  Pop $1
+  ${If} $0 == 0
+    DetailPrint "正在重启 OpenCode……"
+    nsExec::ExecToLog 'cmd /c opencode service restart'
+    Pop $0
+    Pop $1
+    ${If} $0 != 0
+      DetailPrint "OpenCode 没能自动重启，请手动重启它。"
+    ${EndIf}
+  ${EndIf}
+
   DetailPrint "已从 Windows 应用列表中移除。"
   Goto done
 
@@ -385,12 +560,11 @@ LangString DESC_SecReload  ${LANG_SIMPCHINESE} \
 LangString DESC_SecVectors ${LANG_SIMPCHINESE} \
   "GPU 运行库。还需要另行下载 bge-m3 模型（约 2.2 GB）才能开启向量检索。"
 
-!insertmacro MUI_FUNCTION_DESCRIPTION_BEGIN
-  !insertmacro MUI_DESCRIPTION_TEXT ${SecMain} $(DESC_SecMain)
-  !insertmacro MUI_DESCRIPTION_TEXT ${SecDeps} $(DESC_SecDeps)
-  !insertmacro MUI_DESCRIPTION_TEXT ${SecReload} $(DESC_SecReload)
-  !insertmacro MUI_DESCRIPTION_TEXT ${SecVectors} $(DESC_SecVectors)
-!insertmacro MUI_FUNCTION_DESCRIPTION_END
+; These four strings were shown on the components page, which no longer exists.
+; Kept as a record of what each section is, because the wiring that displayed them
+; is dead without the page: MUI_DESCRIPTION_BEGIN resolves against
+; mui.ComponentsPage.* and emits 7 warning-6000s when there is no components page.
+; If a component page ever comes back, they are the text to put on it.
 
 ; ------------------------------------------------------------------ functions --
 ; Everything below references ${SecVectors}, which is why the sections above
@@ -456,7 +630,9 @@ Function .onInit
   ;
   ; The sections still sit above this function on purpose: ${SecMain} and friends
   ; must be declared before any use, so `.onInit` is below them.
-  StrCpy $Vectors "0"
+  ; 全部安装：向量组件不再是可选项，页面上没有勾选框，所以这里永远是 1。
+  ; 原来是 "0"，靠组件页把勾选结果写回来。
+  StrCpy $Vectors "1"
 FunctionEnd
 
 Function .onInstFailed
