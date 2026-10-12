@@ -60,6 +60,12 @@ import { runPromotionRound } from "./promotion.js";
 import { resolveOptions } from "./config-file.js";
 import { dreamingMarker, homeProjectMemoryDir, homeProjectSlug, logFile, memoryHomeDir, stateRoot } from "./paths.js";
 import {
+  activeProjectKeys,
+  clearActiveProjectKeys,
+  filterProjectScopedCuratedContext,
+  prepareActiveProjectKey,
+} from "./project-key.js";
+import {
   BOOTSTRAP_FILENAMES,
   buildProjectContextSection,
   loadBootstrapContextFiles,
@@ -545,10 +551,18 @@ export default Plugin.define({
     // appended last (canonical order). It only exists once dreaming has
     // promoted something into it, so absence is the normal state and is not a
     // `[MISSING]` worth showing the model.
+    //
+    // Its entries are filtered by this session's active repository keys before they
+    // reach the prompt. Without a session id there is no way to know what is in scope,
+    // so nothing is injected -- see `filterProjectScopedCuratedContext`.
     const DEFAULT_MEMORY_FILENAME = "MEMORY.md";
     const instructionFileNames = BOOTSTRAP_FILENAMES.filter(
       (name) => name !== DEFAULT_MEMORY_FILENAME,
     );
+    // One-shot, not per request: see the branch in the hook below. The `context` hook
+    // fires on every model request, and a missing session id is a property of how the
+    // host wired the hook rather than of any one turn.
+    let warnedMissingSessionID = false;
     await ctx.session.hook("context", async (event) => {
       // Occupancy first, and off the critical path. A flush costs a model request,
       // so it must never delay the turn that noticed the threshold -- started and
@@ -576,14 +590,46 @@ export default Plugin.define({
       try {
         const files = await loadBootstrapContextFiles(workspaceDir, instructionFileNames);
         const homeMemoryPath = path.join(memoryHomeDir(), DEFAULT_MEMORY_FILENAME);
-        try {
-          files.push({
-            name: DEFAULT_MEMORY_FILENAME,
-            path: homeMemoryPath,
-            content: await readFile(homeMemoryPath, "utf8"),
-          });
-        } catch {
-          // No global long-term memory yet; nothing to inject.
+        if (typeof sessionID === "string" && sessionID.length > 0) {
+          // Upstream's `filterProjectScopedCuratedContextFiles`, applied to the file
+          // rather than to a provider's hits. Entries carrying `<!-- project: ... -->`
+          // keys survive only when every key is active for this session; unannotated
+          // ones stay, because upstream defines an unannotated entry as global.
+          //
+          // This is the seam the cross-session leak actually crossed. Dropping this
+          // filter is what let a curated entry written while working in one repository
+          // sit verbatim in the system prompt of a session working in another.
+          await prepareActiveProjectKey(sessionID, workspaceDir);
+          try {
+            const memoryContent = filterProjectScopedCuratedContext(
+              await readFile(homeMemoryPath, "utf8"),
+              activeProjectKeys(sessionID),
+            );
+            if (memoryContent.trim().length > 0) {
+              files.push({
+                name: DEFAULT_MEMORY_FILENAME,
+                path: homeMemoryPath,
+                content: memoryContent,
+              });
+            }
+          } catch {
+            // No global long-term memory yet; nothing to inject. The normal state for
+            // a fresh install, and expected until dreaming promotes something -- so it
+            // stays silent, unlike the case below.
+          }
+        } else if (!warnedMissingSessionID) {
+          // This branch is mem-plus-specific and was previously silent. Upstream cannot
+          // reach it: `prepareAgentPromptProjects` takes `sessionId` as a required
+          // parameter (`prompt-projects.ts:6`), so there is no "no session id" state to
+          // arrive with. Here the host's `context` event carries an optional
+          // `sessionID`, and when it is absent every curated entry would be unfiltered
+          // -- so the whole file is withheld instead. That is the right call (see
+          // `filterProjectScopedCuratedContext`), but it must not be invisible: the
+          // symptom is all long-term memory silently disappearing from every prompt.
+          // openclaw's convention on this path is to warn and carry on
+          // (`bootstrap-files.ts:254`), so this does too, once per process.
+          warnedMissingSessionID = true;
+          log(`${DEFAULT_MEMORY_FILENAME} withheld: context hook carried no session id`);
         }
         const lines = buildProjectContextSection(files);
         if (lines.length > 0) {
@@ -858,7 +904,12 @@ export default Plugin.define({
       controller.abort();
       for (const timer of settleTimers.values()) clearTimeout(timer);
       settleTimers.clear();
-            void memoryInjection?.dispose();
+      // Upstream keeps the active repository keys in session runtime state and never
+      // persists them. A reload is a new runtime, so the sets go with it -- otherwise a
+      // session that ran before the reload would keep its scope, which is exactly the
+      // "new session inherits old scope" behaviour the set exists to prevent.
+      clearActiveProjectKeys();
+      void memoryInjection?.dispose();
       void localService?.dispose();
     };
   },

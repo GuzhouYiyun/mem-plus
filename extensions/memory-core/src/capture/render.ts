@@ -25,8 +25,26 @@ export function renderCaptureEntry(params: {
   summary: CaptureSummary;
   entryKey: string;
   nowMs: number;
+  /**
+   * openclaw's project identity for the repository this work happened in, written
+   * as `<!-- project: KEY -->` so the entry is scoped rather than global.
+   *
+   * Why it has to be written here and not at promotion time: openclaw's gate reads
+   * the annotation off the *source* entry. `short-term-promotion.ts:209` copies
+   * `entry.projectKey` onto the candidate and `buildPromotionRecallAnnotations`
+   * re-emits it into `MEMORY.md`, so an unannotated daily entry produces an
+   * unannotated curated entry, which `extractCuratedEntryRecallMetadata` reports as
+   * `projectKey: null`, which `isPromotedTrustedMemoryEntry` treats as global. The
+   * whole chain then injects into every session regardless of repository.
+   *
+   * Placement: its own line, immediately before the idempotency marker and outside
+   * it. `captureEntryMarker` is compared byte for byte on every append, so anything
+   * variable has to stay off that line; `extractProjectKeysFromCuratedEntry` scans
+   * the entry's joined text, so its position inside the block does not matter.
+   */
+  projectKey?: string | null;
 }): string {
-  const { summary, entryKey, nowMs } = params;
+  const { summary, entryKey, nowMs, projectKey } = params;
   const parts: string[] = [
     `## ${new Date(nowMs).toISOString()} · auto-capture · ${summary.type}`,
     "",
@@ -35,6 +53,11 @@ export function renderCaptureEntry(params: {
   if (summary.tags.length > 0) {
     parts.push("", `Tags: ${summary.tags.join(", ")}`);
   }
+  // `normalizeProjectAnnotationKey` rejects anything with a line break or an angle
+  // bracket, and `resolveProjectKey` escapes those away already; the check here is
+  // the last place a malformed key could be written into the daily file.
+  const scoped = projectKey && !/[\r\n<>]/u.test(projectKey) ? projectKey.trim() : "";
+  if (scoped) parts.push("", `<!-- project: ${scoped} -->`);
   parts.push("", captureEntryMarker(entryKey), "");
   return `${parts.join("\n")}\n`;
 }

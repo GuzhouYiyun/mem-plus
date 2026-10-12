@@ -15,6 +15,19 @@
 //   is ported as-is. `filterProjectScopedCuratedContextFiles` and
 //   `buildProjectMemoryWriteInstruction` are the host-injected-file counterparts of the
 //   same rule and have nothing to do once delivery is request-scoped.
+//
+// CORRECTION (2026-10-12). That paragraph was wrong about
+// `buildProjectMemoryWriteInstruction`, and the mistake disabled the gate rather than
+// removing a redundant one. That function is not a host-injection mechanism: it is what
+// tells the writer to put `<!-- project: ... -->` on an entry, and the annotation is the
+// key `extractCuratedEntryRecallMetadata` reads back into `units.project_key`. With
+// nothing writing it, every curated entry was unannotated -- which upstream defines as
+// *global* -- so `isPromotedTrustedMemoryEntry` admitted all of them and this file's
+// `keys.length > 0` check never matched, leaving the block permanently empty. Both
+// halves now live: the writer in `capture/render.ts` plus `project-key.ts`, and
+// `filterProjectScopedCuratedContext` in `project-key.ts` (upstream's
+// `filterProjectScopedCuratedContextFiles`, applied to the file text). See
+// `docs/memory-chain.md` §5, "Project scoping".
 import {
   stripMemoryAnnotationCarriers,
 } from "../../packages/memory-host-sdk/src/host/curated-annotations.js";

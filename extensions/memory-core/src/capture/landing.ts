@@ -55,6 +55,8 @@ export async function recordCapturePrompt(params: {
   nowMs?: number;
   providerId?: string | null;
   modelId?: string | null;
+  /** openclaw's project identity for `workspaceDir`; see `CapturePromptRecord`. */
+  projectKey?: string | null;
 }): Promise<CapturePromptRecord> {
   const key: CapturePromptKey = {
     workspaceDir: params.workspaceDir,
@@ -79,6 +81,11 @@ export async function recordCapturePrompt(params: {
     linkedMemoryId: null,
     providerId: params.providerId ?? null,
     modelId: params.modelId ?? null,
+    // Resolved by the host before landing, so the value is fixed at the moment the
+    // prompt was recorded rather than at render time. A capture that settles late, in
+    // a session that has since moved to another repository, must still be scoped to
+    // where the work actually happened.
+    projectKey: params.projectKey ?? null,
   };
   await writeRecord(record);
   return record;

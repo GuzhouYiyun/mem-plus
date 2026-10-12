@@ -296,6 +296,19 @@ function parseEntryDay(text: string, fallbackTitle: string): ParsedDocument {
       marker: collectMarker(body),
       heading: entryTitle(flat),
       text: flat,
+      // The same reader `kind: "memory"` uses, and for the same reason: promotion
+      // copies `entry.projectKey` onto the candidate
+      // (`short-term-promotion.ts:209`) and `buildPromotionRecallAnnotations`
+      // re-emits it into `MEMORY.md`. Without it here the candidate is anonymous, the
+      // curated entry lands unannotated, and openclaw's rule that an unannotated
+      // entry is *global* sends it to every session. `curatedRoot: false` keeps the
+      // trigger and importance scan off the daily tier -- those are curated-only, and
+      // the daily tier never auto-injects either way.
+      ...extractCuratedEntryRecallMetadata({
+        sourceLines: body.split("\n"),
+        curatedRoot: false,
+        projectScopeEligible: true,
+      }),
     };
   });
 

@@ -191,6 +191,73 @@ reflection note). This is what stops the diary from becoming a promotion source.
 
 ## 5. Recall — two lanes
 
+### Project scoping — the gate that needs a writer
+
+Upstream does **not** partition memory files by repository. It annotates each curated
+entry with `<!-- project: KEY -->` and filters at injection and ranking time, so
+"Project scope changes ranking and automatic injection without partitioning the files".
+Two halves, and both are required:
+
+- **Writer** — `buildProjectMemoryWriteInstruction` (`src/agents/project-memory-bootstrap.ts`,
+  last export) hands the model the instruction *"For every repository-specific memory
+  entry you write, add `<!-- project: KEY -->` on the same line"*, and
+  `buildPromotionRecallAnnotations` (`short-term-promotion-metadata.ts:67`) re-emits the
+  annotation for entries promotion appends. Key identity: `resolveProjectKey`
+  (`src/agents/project-memory-scope.ts`, not vendored) — the normalised `origin` remote
+  via `parseGitUrl`, so clones and linked worktrees converge and forks stay apart; the
+  canonical local root when there is no origin. Host lower-cased, remote path case kept.
+  LRU-cached at 128 roots, 4 s git timeout. `;` `<` `>` CR LF `%` are escaped.
+- **Reader** — `extractCuratedEntryRecallMetadata` (`curated-annotations.ts:114`) puts the
+  keys on the indexed unit; the gates are `isPromotedTrustedMemoryEntry` (every key must
+  be active) and `listCuratedProjectCandidates` (`project_key IS NOT NULL` plus every key
+  active), with `applyRetrievalRanking` multiplying by 1.15 for active and 0.9 for other
+  repositories.
+
+Each session keeps up to **4** keys, most-recent-first, as ephemeral runtime state that is
+never persisted, so a new session or process starts empty and inherits nothing.
+
+**DIVERGENCE (mem-plus, 2026-10-12) — the writer was dropped and the reader kept, which
+disables the gate rather than removing it.** `plugin/src/project-memory.ts` recorded that
+`buildProjectMemoryWriteInstruction` and `filterProjectScopedCuratedContextFiles` "have
+nothing to do once delivery is request-scoped". The first is not a host-injection
+mechanism: it is what puts the annotation in the file, and the annotation is the key the
+reader gate reads. Consequence, measured on this install: `units.project_key` was NULL for
+all 1350 rows, so `isPromotedTrustedMemoryEntry` saw no keys and treated every curated
+entry as *global* (upstream's definition for an unannotated entry), and
+`buildProjectMemoryBootstrap` required `keys.length > 0` so it never produced a block.
+A curated entry written while working in one repository was injected verbatim into a
+session working in another.
+
+Fixed by restoring both halves: `plugin/src/project-key.ts` (upstream's
+`resolveProjectKey` + the per-session set + `filterProjectScopedCuratedContext`),
+`renderCaptureEntry` emitting the annotation, `parseEntryDay` reading it back,
+`activeProjectKeys` derived from the repository rather than `projectSlug` (a path hash —
+two clones of one repository disagree under it), and the `MEMORY.md` bootstrap filtered
+per entry before injection. One deliberate difference: upstream's filter keeps
+unannotated entries when the active set is empty, mem-plus returns nothing, because
+upstream is only ever reached with a prepared repository and a wholesale injection is
+the leak the filter exists to close.
+
+Two key-space defects fixed alongside it, both of which would have made the gate worse
+than the leak it removes:
+
+- **`hit.projectKey` carried the directory slug.** `memory-index.ts` selected
+  `d.project` — the on-disk partition key, values like `mem-plus--83e5df` — where
+  openclaw's identity is `github.com/GuzhouYiyun/mem-plus`. Hybrid search therefore
+  stamped curated entries with a key the gate could never match, and an annotated entry
+  with no active key is *dropped*, not passed: fail-closed hides the memory permanently
+  rather than merely scoping it. The hybrid and vector projections now read
+  `u.project_key`; the vector query did not select the column at all, so vector-only
+  recall silently reported every entry as unannotated.
+- **The consolidation prompt needed nothing.** `CONSOLIDATION_SYSTEM_PROMPT` and
+  `buildCandidateResultEntry` are byte-identical to upstream, and both already funnel
+  through `buildPromotionRecallAnnotations` — the host writes the entry text, the model
+  chooses only the operation. `buildProjectMemoryWriteInstruction` belongs to the other
+  write path (the agent authoring curated entries during a turn), which mem-plus does not
+  expose. `dreaming-phases.ts` `buildDailyIngestionResults` likewise drops `projectKey`
+  **in upstream too**, so daily-sweep-driven promotion is unannotated on both sides and
+  recall-driven promotion is the path that carries it.
+
 ### Lane 1a: bootstrap injection
 
 `src/agents/bootstrap-files.ts:269` filters candidates through

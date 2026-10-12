@@ -139,6 +139,7 @@ async function capturePrompt(params: {
           summary,
           entryKey,
           nowMs: params.nowMs,
+          projectKey: record.projectKey,
         });
         const written = await writeDefaultEntry({
           deps,

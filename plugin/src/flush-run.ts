@@ -146,6 +146,9 @@ export async function runFlush(params: {
     linkedMemoryId: null,
     providerId: null,
     modelId: null,
+    projectKey: params.deps.resolveProjectKey
+      ? await params.deps.resolveProjectKey(params.deps.workspaceDir)
+      : null,
   };
 
   // Idempotency is settled here, before anything is spent. `appendCaptureEntry`
@@ -235,7 +238,15 @@ export async function runFlush(params: {
   // flush and an ordinary capture produce the same shape in the same file, carry
   // the same marker, and one reader handles both. The target was resolved and
   // prepared before the extraction ran.
-  const rendered = renderCaptureEntry({ summary, entryKey, nowMs });
+  const rendered = renderCaptureEntry({
+    summary,
+    entryKey,
+    nowMs,
+    // A flush distils the same conversation an ordinary capture would have taken, so
+    // it carries the same project scope. Leaving it off here would make every flush
+    // entry global, which is the leak this annotation exists to prevent.
+    projectKey: record.projectKey,
+  });
 
   let writtenPath: string;
   try {

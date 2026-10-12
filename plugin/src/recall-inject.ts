@@ -27,7 +27,7 @@ import { prepareProjectMemoryBootstrap } from "./project-memory.js";
 import { matchStandingIntentsForPrompt } from "./standing-intents.js";
 import { runDeepRecall, readDeepRecallConfig } from "./deep-recall.js";
 import { asSessionMessage, type PluginContext, type SessionMessageView } from "./opencode.js";
-import { projectSlug } from "./paths.js";
+import { activeProjectKeys, prepareActiveProjectKey } from "./project-key.js";
 
 /** OpenCode's `SystemPart` text shape, as the hook's `system` array accepts it. */
 type TextSystemPart = { readonly type: "text"; readonly text: string };
@@ -85,10 +85,16 @@ export async function installMemoryInjection(params: {
   recallTools?: () => readonly import("./memory-tools.js").MemoryTool[];
   options?: unknown;
 }): Promise<{ dispose: () => Promise<void> }> {
-  const project = projectSlug(params.workspaceDir);
-  const activeProjectKeys = project ? [project] : [];
   const verdicts = new Map<string, Verdict>();
   const recallConfig = readDeepRecallConfig(params.options);
+
+  // Upstream's active repository keys, per session. Deliberately NOT the project slug:
+  // `projectSlug` hashes the *path*, so two clones of one repository get different keys
+  // and one repository opened at two paths gets two. Upstream's key is the normalised
+  // `origin` remote (see project-key.ts), and the set is per session and never
+  // persisted -- a fresh conversation starts with an empty set and therefore inherits
+  // no curated memory from a repository it is not working in.
+  const activeKeys = (sessionID: string): string[] => [...activeProjectKeys(sessionID)];
 
   // Stage 1 -- decide. Once per inbound user prompt.
   const prompt = await params.ctx.session.hook("prompt", async (event) => {
@@ -98,11 +104,17 @@ export async function installMemoryInjection(params: {
     const message = event.prompt?.text ?? "";
     if (message.trim().length === 0) return;
     try {
+      // Upstream prepares the repository when a turn runs in it, and that preparation
+      // is what makes its entries eligible. Awaited rather than fired: the gate below
+      // reads the set immediately, and reading it a tick early would return the
+      // previous turn's keys.
+      await prepareActiveProjectKey(event.sessionID, params.workspaceDir);
+      const activeProjectKeys = activeKeys(event.sessionID);
       const trigger = await resolveTriggerRecall({
         db: params.db,
         message,
         activeProjectKeys,
-        currentProject: project,
+        currentProject: activeProjectKeys[0],
         signal: undefined,
         onError: (why) => params.log("trigger recall query failed", why),
       });

@@ -105,7 +105,12 @@ export type CaptureAttachment = {
  */
 export function createMemoryCapture(deps: CaptureDependencies): CaptureAttachment {
   return {
-    onUserPrompt: (params) =>
+    onUserPrompt: async (params) =>
+      // The project key is resolved here, at landing, rather than at render time: a
+      // capture can settle many turns later, and by then the session may be working in
+      // another repository. `deps.workspaceDir` is the instance's own landing-zone key
+      // -- the plugin is instantiated per workspace -- so the entry is scoped to where
+      // the work happened rather than to wherever the append eventually ran.
       recordCapturePrompt({
         workspaceDir: deps.workspaceDir,
         sessionId: params.sessionId,
@@ -114,6 +119,9 @@ export function createMemoryCapture(deps: CaptureDependencies): CaptureAttachmen
         providerId: params.providerId,
         modelId: params.modelId,
         nowMs: params.nowMs,
+        projectKey: deps.resolveProjectKey
+          ? await deps.resolveProjectKey(deps.workspaceDir)
+          : null,
       }),
     runSweep: (params) =>
       performCapture({

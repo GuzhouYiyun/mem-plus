@@ -20,6 +20,16 @@ export type CapturePromptRecord = {
   linkedMemoryId: string | null;
   providerId: string | null;
   modelId: string | null;
+  /**
+   * openclaw's project identity for the repository this prompt was worked on
+   * (`resolveProjectKey`: normalised `origin` remote, else the canonical local
+   * root). It rides on the record because the daily entry is the only place the
+   * value is captured before dreaming stages a candidate, and a candidate without
+   * one is promoted into `MEMORY.md` unannotated -- which openclaw defines as
+   * *global*, so it reaches every later session. The host resolves it; this layer
+   * only carries it.
+   */
+  projectKey?: string | null;
 };
 
 export type CaptureToolCall = {
@@ -97,6 +107,16 @@ export type CaptureDependencies = {
   }) => Promise<boolean>;
   /** Workspace the capture lands in. */
   workspaceDir: string;
+  /**
+   * openclaw's project identity for a workspace (normalised `origin` remote, else
+   * the canonical local root). The host owns it because it needs Git and a cache;
+   * this layer only carries the value onto the record and into the rendered entry.
+   *
+   * Optional because a host that cannot answer must still be able to capture -- and
+   * an unresolved key produces an unannotated entry, which openclaw defines as
+   * global. That is a leak, not a failure, so it degrades rather than throws.
+   */
+  resolveProjectKey?: (workspaceDir: string) => Promise<string>;
   /** Overrides the day used for `memory/YYYY-MM-DD.md`. */
   timezone?: string;
   /** Delays between retries; injectable so tests never sleep. */

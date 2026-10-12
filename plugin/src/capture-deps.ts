@@ -9,6 +9,7 @@ import { CAPTURE_LATEST_MEMORY_CHARS, CAPTURE_MAX_TOOL_INPUT_LENGTH } from "../.
 import { appendCaptureEntry, readCaptureTargetText } from "../../extensions/memory-core/src/capture/write.js";
 import { captureEntryMarker } from "../../extensions/memory-core/src/capture/render.js";
 import { dailyMemoryFile, homeProjectMemoryDir, memoryFile, memoryHomeDir } from "./paths.js";
+import { resolveProjectKey } from "./project-key.js";
 import { withWriteProvenance } from "./write-provenance.js";
 import type { HostedModelRef } from "./model/config.js";
 import { completeThroughHost } from "./llm.js";
@@ -149,6 +150,13 @@ export function createCaptureDependencies(
 ): CaptureDependencies {
   return {
     workspaceDir: ctx.location.directory,
+
+    /**
+     * openclaw's project identity, resolved once per root and cached process-wide by
+     * `resolveProjectKey`. It is what scopes the rendered entry, and therefore what
+     * keeps a capture made in one repository out of another repository's recall.
+     */
+    resolveProjectKey,
 
     loadTurn: (record) => loadAssistantTurn(ctx, record),
 
