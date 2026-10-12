@@ -935,7 +935,12 @@ export function searchVector(params: {
   const sql = `
     SELECT u.id AS unitId, d.project AS project, d.path AS path, d.kind AS documentKind,
            u.day AS day, u.ts AS ts, u.entry_type AS entryType, u.tags AS tags,
-           u.marker AS marker, u.heading AS heading, u.text AS text, v.vec AS vec
+           u.marker AS marker, u.heading AS heading, u.text AS text, v.vec AS vec,
+           u.triggers AS triggers, u.importance AS importance,
+           u.project_key AS projectKey, d.origin_class AS originClass,
+           d.session_kind AS sessionKind, d.observed_at AS observedAt,
+           d.supersedes_key AS supersedesKey, d.curated_root AS curatedRoot,
+           d.root AS root
     FROM vectors v
     JOIN units u     ON u.id = v.unit_id
     JOIN documents d ON d.id = u.document_id
@@ -1059,7 +1064,14 @@ export async function fuseRankings(params: {
       endLine: hit.unitId,
       source: hit.source,
       snippet: hit.text,
-      projectKey: hit.project,
+      // The unit's `<!-- project: ... -->` keys, not `hit.project`. `project` is the
+      // document's *directory slug* -- it partitions `memory/<slug>/` on disk and has
+      // nothing to do with openclaw's project identity, which is the repository's
+      // normalised `origin` remote. Passing the slug here stamped curated entries with
+      // `mem-plus--83e5df` while the injection gate compares against
+      // `github.com/...`, so every such entry was annotated-and-never-active: dropped
+      // fail-closed, which hides a memory permanently rather than merely scoping it.
+      projectKey: hit.projectKey ?? undefined,
       textScore: hit.score,
     });
   }
@@ -1072,7 +1084,7 @@ export async function fuseRankings(params: {
       endLine: hit.unitId,
       source: hit.source,
       snippet: hit.text,
-      projectKey: hit.project,
+      projectKey: hit.projectKey ?? undefined,
       vectorScore: hit.score,
     });
   }
