@@ -30,20 +30,31 @@
 //   order here: the flush turn is the expensive, irreversible part, and a target
 //   that cannot be prepared should cost nothing.
 //
-// A BOUNDED VIEW THAT DOES NOT FIT IS AN ERROR, NOT A SHORTER MEMORY
-//   Upstream's bounded session view throws `Memory flush exceeds the bounded
-//   conversation view.` when the transcript does not fit. `buildCaptureMarkdownContext`
-//   truncates instead, leaving `CAPTURE_CONTEXT_TRUNCATION_MARKER` in the context.
-//   For an ordinary capture that is the right trade -- a slightly shorter summary
-//   beats none -- but a flush exists precisely to keep what a compaction is about
-//   to discard, and a summary of a silently shortened conversation is a memory
-//   missing the oldest part of the very window it was taken to save. So the
-//   marker is honoured as upstream's throw: the flush fails and stays retryable.
+// A BOUNDED VIEW THAT DOES NOT FIT IS TRUNCATED, NOT REFUSED
+//   This used to refuse, and it made the flush dead: `buildCaptureMarkdownContext`
+//   truncates whenever the conversation outgrows the capture budget, and a flush
+//   fires at 75% of the window, so on this machine it triggered twice and failed
+//   twice (2026-10-11, 09:24 and 16:05) with "flush exceeds the bounded conversation
+//   view". A safety net that only works in short conversations is not a safety net.
+//
+//   The refusal rested on a claim about upstream that is not true. It said upstream
+//   throws `Memory flush exceeds the bounded conversation view.` Read on 2026-10-12,
+//   upstream's flush is an agentic turn in a DETACHED session
+//   (`src/auto-reply/reply/memory-flush-prepare.ts`: "The detached transcript keeps
+//   maintenance messages out of the source session"), so it never assembles the
+//   transcript into one prompt and never checks whether it fit. There is no such
+//   error string in upstream's flush sources; `src/auto-reply/reply/` is not vendored
+//   here, which is why the claim survived unexamined.
+//
+//   Truncating is also the smaller loss. `fitTextResponses` keeps the newest turns,
+//   and the oldest ones this drops are exactly what per-turn capture already wrote to
+//   the day file after each turn -- the flush is the second line of defence, not the
+//   only one. Refusing saved nothing and cost everything.
 import {
   buildCaptureMarkdownContext,
   getCaptureMarkdownBudget,
 } from "../../extensions/memory-core/src/capture/context.js";
-import { CAPTURE_CONTEXT_TRUNCATION_MARKER, CAPTURE_DEFAULT_MAX_CONTEXT_BYTES } from "../../extensions/memory-core/src/capture/constants.js";
+import { CAPTURE_DEFAULT_MAX_CONTEXT_BYTES } from "../../extensions/memory-core/src/capture/constants.js";
 import { extractCaptureSummary } from "../../extensions/memory-core/src/capture/extract.js";
 import { captureEntryMarker, renderCaptureEntry } from "../../extensions/memory-core/src/capture/render.js";
 import { appendCaptureEntry, resolveCaptureWriteTarget } from "../../extensions/memory-core/src/capture/write.js";
@@ -196,18 +207,6 @@ export async function runFlush(params: {
     latestMemory,
     maxContextBytes: getCaptureMarkdownBudget(CAPTURE_DEFAULT_MAX_CONTEXT_BYTES),
   });
-
-  if (context.includes(CAPTURE_CONTEXT_TRUNCATION_MARKER)) {
-    params.log(
-      `flush ${params.trigger}: exceeds the bounded conversation view -- ` +
-        `${target.relativePath} would hold a summary of a truncated window`,
-    );
-    return {
-      trigger: params.trigger,
-      kind: "failed",
-      detail: "flush exceeds the bounded conversation view",
-    };
-  }
 
   let summary: Awaited<ReturnType<typeof extractCaptureSummary>> | null = null;
   try {
