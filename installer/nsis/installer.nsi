@@ -49,8 +49,11 @@ VIAddVersionKey /LANG=2052 "LegalCopyright"  "MIT"
 
 !define MUI_ABORTWARNING
 
-; Component page layout. MUI2 ships three dialog templates for this page and this
-; picks one of them:
+; Component page layout -- KEPT AS A RECORD ONLY. There is no component page (see the
+; page list); this define and the layout measurements below survive because a page
+; could come back and re-deciding it from scratch is how it got measured the first
+; time. MUI2 ships three dialog templates for that page and the measurements pick
+; one of them:
 ;
 ;   default    components list and description side by side, each half the
 ;              available height. Measured on this build: list at x=179 w=147,
@@ -210,34 +213,29 @@ Function ResolveInstallDir
 FunctionEnd
 
 ; ------------------------------------------------------------------ sections --
-; Component presentation, the way shipping installers do it -- all three of these
-; are NSIS features, none of them is a workaround:
+; Four sections, all installed, in order. There is no component page (see the page
+; list): the last optional component was removed on 2026-10-12, and with no choice
+; left to offer there is nothing for a component page to display.
 ;
-;   SectionIn RO   the row is greyed and cannot be toggled (NSIS Reference:
-;                  "the section will be read-only, meaning the user won't be able
-;                  to change its state"). Necessary, not cosmetic: while these
-;                  were plain sections, "mem-plus（必需）" and "安装依赖" were
-;                  tickable, and unticking either yields an install with no
-;                  node_modules -- a plugin that cannot run, exit code 0, nothing
-;                  in any log.
-;   Section /o     unchecked by default, so the optional component does not need
-;                  .onInit to clear it. Verified: under /S an /o section does not
-;                  run, which is what the silent install relies on.
+; `SectionIn RO` stays on every one of them even though it no longer has a row to
+; grey out. It costs nothing, and if a page ever comes back the rows are already
+; correct instead of four tickable ones -- which was a real hazard rather than a
+; hypothetical one: while these were plain sections, "mem-plus（必需）" and
+; "安装依赖" were tickable, and unticking either yields an install with no
+; node_modules -- a plugin that cannot run, exit code 0, nothing in any log.
 ;
-; NSIS also has `Section "!name"` for a bold row. Deliberately not used: with every
-; row the same weight, the one optional component is the only thing that stands out
-; by not being greyed, which is the distinction that matters here. Bold would add a
-; second, weaker signal pointing at the wrong row.
+; The names are kept deliberately. A setup that lists what it is doing reads as a
+; working installer, whereas an unnamed section with a trailing "; unnamed" comment
+; still showed four tickable rows when it was tried (2026-10-10), and a list box
+; holding one lone row reads as a broken page. NSIS also has `Section "!name"` for a
+; bold row -- deliberately unused, since with every row the same weight there is no
+; row that needs singling out.
 ;
-; Earlier revisions hid the mandatory sections entirely (no name at all). That was
-; also correct but wrong-looking: a real setup lists what it is doing, and an empty
-; list box with one lone row reads as a broken page.
-; NO NAME, no id -- that is the whole mechanism. An unnamed section is a "required"
-; section: makensis counts it in the "N sections (1 required)" build line, it is
-; not listed on the component page, and there is no checkbox to untick. A trailing
-; comment does not do this; the name must be absent. Verified 2026-10-10, after a
-; version that kept the names and a trailing "; unnamed" comment still showed four
-; tickable rows.
+; `Section /o` (unchecked by default) was how the optional one avoided needing
+; .onInit to clear it, and it went away with the component. Do not reintroduce a
+; selectable section the old way, by index from .onInit: `SectionSetFlags 2 0` once
+; cleared SecDeps while the comment above it counted sections as if it were clearing
+; SecReload, and every install then skipped `npm install`.
 Section "mem-plus 记忆插件" SecMain
 SectionIn RO
   ; Straight overwrite into $INSTDIR, which is how every other installer works.
@@ -289,8 +287,9 @@ SectionIn RO
   ; work is worse than not offering it.
   WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\mem-plus" "NoModify" 1
   WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\mem-plus" "NoRepair" 1
-  ; A silent install (/S) runs no component page, so the vector section is never
-  ; selected and this stays 0: full-text search. Same default either way.
+  ; EstimatedSize 0 is Windows' own "not known", not "zero bytes" -- Programs and
+  ; Features then shows no size rather than a wrong one. The installer's "所需空间"
+  ; line comes from AddSize instead, which is why the two are not in step.
   WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\mem-plus" "EstimatedSize" 0
 
   CreateDirectory "$SMPROGRAMS\mem-plus"
@@ -569,9 +568,12 @@ not_mem_plus:
 done:
 SectionEnd
 
-; What each component IS, not why you might want it. The previous wording was
-; answering objections nobody had asked yet -- "不勾选也能正常使用…不是故障" is a
-; reply to a worried user, and reading like one while deciding. A description
+; What each section IS, not why you might want it -- and these four strings are no
+; longer displayed anywhere: the components page they belonged to was removed on
+; 2026-10-12 (see the note under DESC_SecVectors). The rationale is kept because it
+; is about wording, and it still holds for whatever shows these rows next. The
+; previous wording was answering objections nobody had asked yet -- "不勾选也能正常使用…不是故障"
+; is a reply to a worried user, and reading like one while deciding. A description
 ; pane on a component page is a label, not a reassurance.
 ;
 ; Short names on purpose: the list is a fixed-width control baked into MUI2's
@@ -651,15 +653,14 @@ Function .onInit
   ;   $INSTDIR is something else -> either /D= or InstallDirRegKey already
   ;                                 supplied it, and both mean "use this"
   Call ResolveInstallDir
-  ; No SectionSetFlags here any more. The vector component is `/o` (unchecked by
-  ; default) in its own declaration, which is where NSIS wants that decision --
-  ; and it is what a silent install reads too, verified 2026-10-10.
+  ; No SectionSetFlags here any more, and there is no section left to set flags on:
+  ; every one is `SectionIn RO` and there is no component page, so /S runs all four.
+  ; $Vectors below is not carried over from a flag -- it is simply assigned.
   ;
   ; It used to be cleared from here by index, and that cost a real bug: index 2 was
   ; cleared believing it was SecReload, when index 2 is SecDeps, so every install
   ; skipped `npm install` -- payload written, no node_modules, plugin unrunnable,
-  ; exit code 0, nothing in any log. The declaration is the single source of truth
-  ; now, so there is no index left to get wrong.
+  ; exit code 0, nothing in any log.
   ;
   ; The sections still sit above this function on purpose: ${SecMain} and friends
   ; must be declared before any use, so `.onInit` is below them.
