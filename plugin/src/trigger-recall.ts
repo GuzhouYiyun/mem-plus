@@ -128,6 +128,22 @@ function prepareTriggerScorer(message: string): (entry: SearchHit) => number {
  * matches, which is why the empty-key case needs no separate branch here — an unannotated
  * entry has no keys, so the all-of check is vacuously true and it stays global.
  */
+/**
+ * Upstream's curated-tier gate, with a coarser input.
+ *
+ * Upstream reads the entry's own provenance row, so one file can hold both eligible and
+ * ineligible entries and only the eligible ones pass. Here `entry.provenance.originClass`
+ * comes from `documents.origin_class`, which is ONE value per FILE (`memory-path-provenance.ts`
+ * decides it by path). So when a curated file mixes qualified and unqualified entries, every
+ * entry in it passes where upstream would admit only some.
+ *
+ * That is a weakened version of a property the architecture docs name as a security
+ * boundary rather than a tuning choice, so it is registered as a divergence in
+ * `docs/port-plan.md` and pinned to P2: the gate cannot have upstream's input until
+ * provenance is per chunk, which is what upstream's `memory_index_chunk_provenance` is.
+ *
+ * `isAutomaticMemoryEntryEligible` and the project-key term are upstream's, verbatim.
+ */
 function isPromotedTrustedMemoryEntry(
   entry: SearchHit,
   activeProjectKeys: readonly string[] = [],

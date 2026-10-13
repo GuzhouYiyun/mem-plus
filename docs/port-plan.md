@@ -252,6 +252,35 @@ sqlite-vec 依赖(后者可选,缺了会退回进程内余弦)。
    `trigger-recall.ts` 37%。这两个是**我或前人搬的**,要逐行看剩下那 84%/63% 是什么:
    是接缝(合理)还是自创(要换回上游)。
 
+## 偏离登记(照搬过程中确认的每一处)
+
+偏离必须写在这里,不留在代码注释里 —— 注释会过期,而且没人会读。判据 1 要求"抄不进来的写出
+理由",这就是那个理由的位置。**「依赖 P2」是必填项**:凡是不搬是为了 P2 的粒度不够,就要
+写明它随 P2 一起回来,不能变成永久的自创。
+
+| 上游行为 | mem-plus | 原因 | 风险 | 依赖 |
+|---|---|---|---|---|
+| **curated 层限定**:`isPromotedTrustedMemoryEntry` 读该 entry 自己的 provenance 行,所以一个文件里合格与不合格的条目可以共存,只有合格的过闸 | `entry.provenance.originClass` 来自 `documents.origin_class`,**一个文件一个值**(按路径判定)。混合文件里**全部**条目都过闸 | mem-plus 的 provenance 粒度是文件,不是块 | **真实削弱。** 架构文档称这条为 security property 而非调参选择 | **P2** —— provenance 换成上游的逐块(`memory_index_chunk_provenance`)后自动恢复 |
+| `forget.purge` 顺带清理 `memory_embedding_cache` | 报告里 `embeddingCacheRows` 恒为 0 | mem-plus 无此表。它在上游的唯一作用是不重复嵌入未变文本,重新 reindex 本来就会做 | 无。reindex 收敛 | 无 |
+| 上游的语料计数(`sessionCorpusFiles`/`Lines`、`shortTermEntries`、`backups`、`seenHashScopes`) | 恒为 0 | 裁剪期删掉了 `session-ingestion` 的写端,mem-plus 没有会话语料;短期召回库是 plugin-state keyed store 而非表 | 无。这些计数描述的是不存在的存储 | 无 |
+| `forget` 的参与者/hook 来源解析(`resolveMemorySessionTargetsAsync` 查活的会话库) | 选择器按给定值使用,每个都记 `resolution: "direct"` | OpenCode 无 openclaw 的会话库可查 | 无法兑现的项会进 `refusals` 而非静默失败 | 无 |
+| `forget` 的索引清理经 worker 借用 openclaw agent 数据库 | 索引是插件自己的 `index.db`,直接传入 | 见 P2:让索引拥有自己的库,顺带丢掉 reader admission | 无 | 无 |
+
+### trigger-recall 的双后端分支消失 —— 判定为接缝,非自创
+
+上游 `trigger-recall.ts` 有两套候选加载:`loadNativeTriggerRecallCandidates`(新
+`memory_index_*`,带 provider facts)与 `loadLegacyTriggerRecallCandidates`(旧 manager 路径),
+外加 `toLegacyTriggerRecallHit` 转换、`assertTriggerSourceCurrent`、run 缓存与
+`forgetTriggerRecallRun`。上游注释说明 run 缓存存在是因为「Native lookups run under caller
+authority that can lapse」。
+
+mem-plus 只有一个索引,合并成一路是必然结果。**判定内核逐字保留**:五个常量与值全同
+(`TRIGGER_CANDIDATE_LIMIT=24`、`TRIGGER_INJECTION_LIMIT=3`、
+`MAX_TRIGGER_CONTEXT_CHARS=1800`、`STRONG_TRIGGER_MATCH_SCORE=0.65`、`WORD_RE`),
+`prepareTriggerScorer` / `isPromotedTrustedMemoryEntry` / `selectStrongTriggerMatches` /
+`buildTriggerRecallContext` 全在。**唯一真丢失的是 `isPromotedTrustedMemoryEntry` 的输入粒度**,
+见上表第一行。
+
 ## 宿主集成最小契约(通读后整理)
 
 openclaw 宿主必须提供、而记忆侧实际消费的:
