@@ -55,6 +55,52 @@ mem-plus 今天的形状是**上面一层薄适配、底下一整套平行实现
 
 自创的部分在下面,转接头混在上面某一层 —— 与判据 2 相反。
 
+## 记忆框架(2026-10-13 联网查证,docs.openclaw.ai/concepts/memory-architecture)
+
+**五层模型**,边界在 curated 与 episodic 之间:
+
+| 层 | 面 | 谁写 | 注入 |
+|---|---|---|---|
+| Instructions | `AGENTS.md` | 仅人 | 总是,会话开始 |
+| Curated core | `MEMORY.md`、`USER.md` | dreaming consolidation;或用户直接要求 | 会话开始,provenance 合格时,受预算限制 |
+| Episodic | `memory/YYYY-MM-DD.md`、会话 transcript | agent 工作中;memory flush;transcript capture | **从不**;只能按需检索 |
+| Prospective | standing intents(SQLite)、cron | `intent` 工具;调度任务 | 只在触发时 |
+| Review | `DREAMS.md`、dreaming 报告 | dreaming 各阶段 | 从不;给人读 |
+
+**关键安全性质:自动注入只限 curated 层。** 原文:「This restriction is a security property,
+not a tuning choice」。`MEMORY.md` 与 `USER.md` 合格;daily notes 与 transcript **永不**自动注入,
+无论匹配强度多高。这是防投毒的**结构性**防线,不是调参。
+
+**长期记忆只有一个主写者:dreaming consolidation pass。** 其余一切都是它的输入。
+
+**Dreaming 三阶段**(light / deep / REM,调度 sweep)。Deep 过两道闸:
+
+1. **确定性闸** —— 候选按加权信号排序(检索相关性、召回频次、查询多样性、时效、多日复现、
+   概念丰富度),须过全部阈值。`untrusted` / `system` **在构造任何 prompt 之前**就被结构性
+   排除:「This is a precondition, not a score penalty」。
+2. **consolidation 步** —— 门控候选 + 当前 `MEMORY.md` 交给一次模型轮次产出修订文件。
+   输出须过结构校验、不超 bootstrap 预算、不丢失超过有界比例的既有条目,否则回退 append-only。
+
+**写入安全**:替换 `MEMORY.md` 用乐观并发 —— 构造输入时捕获的内容哈希在原子 rename 前重新
+校验;期间被改动则本轮放弃重写、走 append 回退。
+
+**两条召回通道**:Lane 1 零模型调用(bootstrap 注入 / 排序检索 / trigger 注入,每轮至多 3 条);
+Lane 2 是真实子 agent 轮次,**阻塞式**,默认只在两个确定性条件同时成立时跑。
+
+**只有三个工具**:`memory_search`、`memory_get`、`intent`。
+
+**检索**:hybrid = 向量余弦 + BM25,`finalScore = vectorWeight * vectorScore + textWeight *
+textScore`;30 天召回半衰期;importance 1–10 写入时定一次;MMR λ=0.7 做多样性重排。
+
+**索引是可重建缓存** —— 删了会从文件重建。这是设计里最要紧的一个决定(文档明确:source of
+truth 是文件)。
+
+### 文档之间已发现的一处矛盾
+
+同一份文档族里,trigger 注入阈值 **0.65**(`concepts/memory-architecture`,docs.openclaw.ai)
+与 **0.72**(同一文档的 unpkg 2026.9.3 版本)并存。按 AGENTS.md 的规则**以代码为准**,待在
+通读代码时查真值。
+
 ## 接缝地图(2026-10-13 实测,308 个生产文件的外部 import)
 
 **174 个不同的外部模块。** 这是转接头工作量的真实规模,此前一直低估。
