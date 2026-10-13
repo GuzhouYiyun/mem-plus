@@ -1060,8 +1060,14 @@ export async function fuseRankings(params: {
     keyword.push({
       id: String(hit.unitId),
       path: hit.path,
-      startLine: hit.unitId,
-      endLine: hit.unitId,
+      // The hit's own line range, not `unitId`. These three fields used to be filled
+      // with the row id, which happened to be an integer and so looked plausible while
+      // pointing at nothing: `memory_get` cites `path#Lstart-Lend`, so every citation
+      // named a line number that had no relationship to the text it quoted. Upstream's
+      // lane entries carry `start_line`/`end_line` for the same reason
+      // (`memory-recall-metadata.ts` selects both from `memory_index_chunks`).
+      startLine: hit.startLine,
+      endLine: hit.endLine,
       source: hit.source,
       snippet: hit.text,
       // The unit's `<!-- project: ... -->` keys, not `hit.project`. `project` is the
@@ -1080,8 +1086,8 @@ export async function fuseRankings(params: {
     vector.push({
       id: String(hit.unitId),
       path: hit.path,
-      startLine: hit.unitId,
-      endLine: hit.unitId,
+      startLine: hit.startLine,
+      endLine: hit.endLine,
       source: hit.source,
       snippet: hit.text,
       projectKey: hit.projectKey ?? undefined,
