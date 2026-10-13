@@ -28,6 +28,7 @@ import { matchStandingIntentsForPrompt } from "./standing-intents.js";
 import { runDeepRecall, readDeepRecallConfig } from "./deep-recall.js";
 import { asSessionMessage, type PluginContext, type SessionMessageView } from "./opencode.js";
 import { activeProjectKeys, prepareActiveProjectKey } from "./project-key.js";
+import { noteDeepRecall } from "./recall-taint.js";
 
 /** OpenCode's `SystemPart` text shape, as the hook's `system` array accepts it. */
 type TextSystemPart = { readonly type: "text"; readonly text: string };
@@ -145,6 +146,15 @@ export async function installMemoryInjection(params: {
           log: params.log,
         }),
       });
+      // Upstream's turn taint, recorded at the seam where the recall is decided rather
+      // than read off a message marker, because this host's Lane 2 runs in the live
+      // session and OpenCode exposes no writable per-message metadata. Keyed on the
+      // prompt that opened this turn, which is the message upstream keys on. The
+      // snapshot writer withholds the whole turn from the transcript on that key, which
+      // is upstream's exclusion at `session-files.ts:788-794`. See `recall-taint.ts`.
+      if (deep.context) {
+        noteDeepRecall(event.sessionID, message, deep.context);
+      }
     } catch (error) {
       // A failed lookup must never delay or break the turn it annotates.
       params.log("memory recall aborted", error);

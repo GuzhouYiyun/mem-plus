@@ -51,17 +51,66 @@ capture);快照 unit 的 `kind` 是 `turn`,`origin_class` 由 `memory-path-prove
 - 确认 `MEMORY.md` 晋升链路上 `originClass = "untrusted"` 会被
   `isPromotionOriginBlocked` 拦住
 
-## P1 检索防自我放大的另一半
+## P0 自我学习回路 —— 已闭合(2026-10-13)
 
-上游除 taint 外还在入库前 redact。mem-plus 无 redact 步骤。若 P0 的标记链成立,这一层
-可能已被覆盖;若不成立则需补。**取决于 P0 的调查结果。**
+**上游的机制不是"标记后拦晋升",是入库时直接不存。** 这一条纠正了本文件初稿的
+判断。初稿写的是"`turnTainted` → `untrusted` → `isPromotionOriginBlocked` 三层",
+调研后两层的前提都不成立:
+
+- `turnTainted` 是**网络来源位**,不是记忆污染位。它的 `ToolResultContentSource`
+  联合类型只有一个成员 `"network"`(`packages/agent-core/src/types.ts:487`),web-search
+  / web-fetch / 全部 MCP 工具都声明它,而 `memory_search` / `memory_get` **明确不声明**
+  —— 有断言(`src/agents/cli-runner/prepare.test.ts:2654`)。`extensions/active-memory/`
+  对 `turnTainted` 零命中。
+- 上游真正的防线是 `isRecalledMemoryMessage`(`session-files.ts:453`),它读
+  `provenance.kind === "internal_system"` + `sourceTool ∈ {memory_search, memory_get}`。
+  **这个标记在 2026.9.9 全树没有生产者**:`InternalTurnSource` 是封闭联合类型,塞不进
+  `memory_search`(`src/auto-reply/templating.ts:316`),唯一出现处是测试 fixture。所以
+  上游这条保证目前是空的,`insideRecalledMemoryTurn` 运行时恒为 false。
+- 而它做的事是 `continue`(`session-files.ts:788-794`),不是打标:被污染轮次的全部
+  消息**根本不写进语料**。粒度是整轮,连触发它的那条 user 消息本身也不存(标记在
+  :781 置位,排除测试在 :788)。因此它不需要 provenance 列、不需要 origin class、
+  不需要晋升闸门 —— 没写过的东西无法被检索、晋升或重放。
+
+**照抄这个形状,不照抄缺失的生产者。** 落地:`plugin/src/recall-taint.ts` 按上游
+`session-files.ts:453,781,788-794` 的结构实现排除,`snapshot.ts` 在渲染时套用,
+`recall-inject.ts` 在 `prompt` 钩子里记录"这条提问触发了深召回"。判据挂在**开启该轮的
+user 消息**上,与上游同一位置;OpenCode 的 `ctx.session.message` 只读,插件无法给已发出
+的消息打标,故用提问文本作键 —— 这是该位置在 mem-plus 里唯一可区分的属性。
+
+**验证(探针已删):** 单测 12 项 + 端到端经 `renderSessionSnapshot` 10 项,全过。端到端
+读到落盘 markdown:污染轮的提问与 assistant 复述**都不在文件里**,同会话其余轮次完整保留,
+重复渲染结果一致(标记不在写快照时清空,否则下一次快照会把旧轮次当成干净的写回去)。
+`tsc plugin` 改动前后同为 4240 错、全在 `src/`(4097)与 `packages/`(143),`plugin/` 与
+`extensions/` 各 0,未引入新错。
+
+**为什么 mem-plus 更容易踩:** 上游 Lane 2 跑在**子会话**(`recall-run.ts:141` 给
+session key 加 `active-memory:` 前缀),污染的是子会话的 transcript,父对话干净。mem-plus
+的 Lane 2 直接用 `ctx.generate.text` 在**当前会话**跑(`deep-recall.ts`),结果和模型的
+复述一起落在本轮里,被 `snapshot.ts` 捕获。这不是 mem-plus 缺了上游的防线,而是同一个
+上游漏洞在 mem-plus 的架构下更容易踩到。
+
+## P1 上游的第二道防线:`turnTainted`(网络来源)—— 仍未搬,需要先定 schema
+
+上游还有一条**独立**的防线,mem-plus 没有:某个工具结果来自网络时,该 assistant 消息判
+`untrusted`(`classifySessionMessageOrigin`,`session-provenance.ts:9-11`),于是被
+`isPromotionOriginBlocked`(`dreaming-consolidation-candidates.ts:11-16`)结构性禁止晋升。
+后果是"网页上抓来的一句话不会被固化成永久记忆"。
+
+**mem-plus 搬不了这一条,原因是粒度。** mem-plus 的 `origin_class` 是
+`documents.origin_class`,**一个文件一个值**,由 `memory-path-provenance.ts` 按路径判定。
+一条快照里混着抓来的内容和自己的话,无法只标其中一条。上游是
+`memory_index_chunk_provenance` 按 `chunk_id`,**逐块**。
+
+补这一条要先给 `units` 加 `origin_class`,即 P2 的 schema 决定先于 P1。**不静默跳过,
+也不擅自改 schema** —— 记在这里等你定。
 
 ## P2 索引层与上游对齐(可选,视目标)
 
 mem-plus 的 `documents`/`units`/`units_fts`/`vectors` 是自建 schema,上游是
-`memory_index_*`。行为等价(刚验证:forget 的清理已按同一规则落地),但结构不同。若目标
-是"以后能持续对照上游",把 schema 对齐会让后续搬入零成本;若目标是"能跑就行",现状够用。
-**这一条要你定,不是技术问题。**
+`memory_index_*`。行为等价(已验证:forget 的清理按同一规则落地),但结构不同。若目标
+是"以后能持续对照上游",把 schema 对齐会让后续搬入零成本,并且顺带让 P1 可做;若目标是
+"能跑就行",现状够用。**这一条要你定,不是技术问题。**
 
 ## 已确认无法搬的(缺对应宿主接口,不需要改)
 
@@ -72,17 +121,27 @@ mem-plus 的 `documents`/`units`/`units_fts`/`vectors` 是自建 schema,上游�
 - 文件监听 —— 现为显式 `memory_reindex`
 - worker 架构 —— 现为单进程同步
 
-## 调研待做(本计划的事实基础)
+## 调研已完成(2026-10-13)
 
-1. OpenCode 是否有等价于 `turnTainted` 的轮次污染标记,或能否加
-2. 上游 `turnTainted` 的写入点在哪一层,与 retrieval 投递的先后关系
-3. 若 OpenCode 无此标记,P0 的最小可行形态是什么(例如:投递时记录本次注入的 unitId,
-   快照写入时检查内容是否包含这些 unit 的文本)
-4. mem-plus 快照 → 索引 → 晋升这条链路上,`origin_class` 目前实际取值与来源
+1. **OpenCode 有无 `turnTainted` 等价物** —— 无。二进制(`@opencode/cli` 2.0.27)与
+   `@opencode/schema` / `@opencode/plugin` 2.0.20 的类型定义里,`taint` / `provenance` /
+   `recalled` / `injected` / `fromMemory` 全部零命中。可用的落点有三个:`ctx.storage`
+   插件私有 KV、`ctx.session.update({metadata})`、消息创建时的 `metadata`;**给已发出的
+   assistant 消息打标不可行**,`session.message` 只读。结构性障碍:`context` 钩子不带
+   `messageID`,投递时不知道是哪个用户消息触发了这一轮 —— 这正是 P0 改用提问文本作键的
+   原因。
+2. **上游 `turnTainted` 的写入点** —— `packages/agent-core/src/turn-taint.ts:41-53`
+   `withAssistantTurnTaint`,四处写入,语义统一为"本轮有 `resultContentSource: "network"`
+   的工具结果"。与记忆召回无关。
+3. **P0 的最小可行形态** —— 已落地,见上。选的是上游自己的形状(整轮排除),不是
+   "检查内容是否包含注入文本",因为后者粒度更细但会漏掉改写过的复述。
 
 ## 验收口径(沿用 AGENTS.md)
 
 不靠类型门。每一项必须有:真实数据走过该路径 + 可复核的落盘证据。
 `MEMORY.md` 那层至今零验证 —— daily 层已实测(7 条真注解、reindex 后 `project_key`
 落库),promotion 写 `MEMORY.md` 注解这条路还没被真实数据走过,而泄漏恰好发生在那一层。
-**P0 完成前,这条不算验证过。**
+
+**P0 已闭合,但只在探针数据上验证过,尚未经真实会话走一遍。** 真实验证需要一个
+"提问触发深召回 → 该轮快照落盘"的会话,并复核落盘文件里没有那轮内容。**这一条没做完
+之前,P0 不算验证过。**

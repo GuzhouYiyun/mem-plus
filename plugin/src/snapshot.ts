@@ -22,6 +22,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { formatMemoryDreamingDay } from "../../extensions/memory-core/src/capture/day.js";
 import { memoryDir, titleSlug } from "./paths.js";
+import { excludeRecalledMemoryTurns } from "./recall-taint.js";
 import {
   asSessionMessage,
   type PluginContext,
@@ -132,7 +133,22 @@ export function renderSessionSnapshot(params: {
   ];
 
   let turns = 0;
-  for (const raw of messages) {
+  // Upstream's `insideRecalledMemoryTurn`, applied here because this is the seam where a
+  // transcript becomes durable text: `session-files.ts:781` recomputes the flag on every
+  // user message and `:788-794` drops every message while it holds. Keyed on the prompt
+  // that opened the turn, and dropping the turn whole is upstream's granularity -- the
+  // assistant's paraphrase of a recall is not a substring of the recall, so a fragment
+  // test would miss exactly the text the flag exists to keep out. See `recall-taint.ts`.
+  for (const raw of excludeRecalledMemoryTurns(
+    sessionID,
+    messages,
+    (message) => {
+      const view = asSessionMessage(message);
+      if (view.type !== "user") return undefined;
+      const text = (view.text ?? "").trim();
+      return text.length > 0 ? text : undefined;
+    },
+  )) {
     const message: SessionMessageView = asSessionMessage(raw);
     const created = iso(message.time?.created);
     if (message.type === "user") {
