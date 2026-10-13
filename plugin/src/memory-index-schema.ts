@@ -39,7 +39,9 @@ import {
 } from "../../packages/memory-host-sdk/src/host/memory-schema-base.js";
 import {
   ensureMemoryChunkFtsSchema,
+  ensureMemoryChunkFtsTriggers,
   ensureMemoryPathFtsSchema,
+  ensureMemoryPathFtsTriggers,
 } from "../../packages/memory-host-sdk/src/host/memory-schema-fts.js";
 import { encodeMemoryEmbedding } from "../../packages/memory-host-sdk/src/host/embedding-vector.js";
 
@@ -59,6 +61,13 @@ const TOKENIZE_CLAUSE = "";
  * Upstream's own builders are idempotent: `ensureMemoryChunkFtsSchema` drops and
  * rebuilds an FTS table whose stored columns do not match what the code expects, which
  * is how a schema change recovers without a separate migration step.
+ *
+ * THE TRIGGERS ARE NOT OPTIONAL. Upstream maintains both FTS indexes with triggers on
+ * `memory_index_sources` and `memory_index_chunks` rather than with a second write path
+ * (`memory-schema-fts.ts:145-181`). Creating the tables without the triggers yields an
+ * index where chunks exist and nothing is searchable -- a failure that looks like "search
+ * returns zero results" rather than like a schema problem, which is the same class of
+ * invisible cause the existing search error handling was written to avoid.
  */
 export function ensureMemoryIndexSchema(db: DatabaseSync): void {
   db.exec(
@@ -69,6 +78,8 @@ export function ensureMemoryIndexSchema(db: DatabaseSync): void {
   );
   ensureMemoryChunkFtsSchema({ db, ftsTable: "memory_index_chunks_fts", tokenizeClause: TOKENIZE_CLAUSE });
   ensureMemoryPathFtsSchema({ db, tokenizeClause: TOKENIZE_CLAUSE });
+  ensureMemoryChunkFtsTriggers(db);
+  ensureMemoryPathFtsTriggers(db);
 }
 
 /**
