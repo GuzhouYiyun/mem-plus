@@ -252,6 +252,36 @@ sqlite-vec 依赖(后者可选,缺了会退回进程内余弦)。
    `trigger-recall.ts` 37%。这两个是**我或前人搬的**,要逐行看剩下那 84%/63% 是什么:
    是接缝(合理)还是自创(要换回上游)。
 
+### L3 接缝:第二个语料(wiki)—— 已落地并验过功能等价
+
+上游 `MemorySource` 是封闭两值联合 `"memory" | "sessions"`(`host/types.ts`),mem-plus 有第二
+套语料(wiki)没有值可放。**这不是接缝能桥的命名差异,联合里没有它的位置** —— 属 L3。
+
+但它小,原因实测得到:联合是 TypeScript 收窄,不是存储约束。`memory_index_sources.source` 是
+`TEXT NOT NULL DEFAULT 'memory'`,数据库本来就能收第三个值并分开。落地在
+`plugin/src/memory-corpus.ts`,只做一件事:在 mem-plus 调上游的边界上把类型放宽一格。
+`memory` 用上游自己的值,所以上游每一个比较 `"memory"` 的查询、过滤与索引一行都不用改。
+
+**功能等价由六项实测支撑**(真实建库,非推演):存储接受第三值;两套语料各存一行互不覆盖
+(`UNIQUE (path, source)`);curated 白名单 `path IN ('MEMORY.md','USER.md')` 有 wiki 行在场
+时仍只认 1 行;按 `source` 过滤能单独取到 wiki;逐块 provenance 让 memory=agent、wiki=untrusted;
+`origin_class IN ('owner','agent')` 的可晋升计数为 1,wiki 被闸门挡住。
+
+**最后两条是这条接缝的关键**:架构文档称"untrusted 不得洗进 MEMORY.md"为结构性安全性质,
+而它成立靠的正是**逐块** provenance —— 这恰是 mem-plus 现在的逐文件 provenance 做不到的。
+
+**这条接缝顺带解掉登记在册的两项**:P1 的网络来源防线与 curated 层闸门,两者都因为逐块
+provenance 而从"不可做"变成"可做"。
+
+### 顺带查出的第四处「搬下来了在旁边另写一套」:路径约定
+
+第一遍测白名单得 n=0 而非 1,原因是路径形状不对。查实:**上游的 `memory_index_sources.path`
+存工作区相对路径**(curated 白名单字面就是 `path IN ('MEMORY.md','USER.md')`,配
+`UNIQUE (path, source)`),而 mem-plus 的 `documents.path` 是绝对路径。
+
+前三次是 schema、chunker、会话投影,这是第四次。**这个模式不是个别失误**,而是裁剪期的
+系统性做法:原件搬下来留着,旁边另写一套顶上。
+
 ## 偏离登记(照搬过程中确认的每一处)
 
 偏离必须写在这里,不留在代码注释里 —— 注释会过期,而且没人会读。判据 1 要求"抄不进来的写出
