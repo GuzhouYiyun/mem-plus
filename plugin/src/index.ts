@@ -47,6 +47,7 @@ import { readModelConfig, readServiceConfig, resolveEmbedAvailability } from "./
 import { readWikiConfig } from "./wiki/config.js";
 import { readWebConfig } from "./web/config.js";
 import { startWebServer } from "./web/server.js";
+import { forget as forgetHost } from "./forget.js";
 import { createServiceClient, type MemPlusService } from "./model/client.js";
 import { createLogger } from "./log.js";
 import { indexPath, openIndex } from "./memory-index.js";
@@ -301,6 +302,12 @@ export default Plugin.define({
             ...(embedAvailability.missingPath ? { missingPath: embedAvailability.missingPath } : {}),
             explicit: modelConfig.embedPathExplicit,
           },
+          // Upstream's `openclaw memory forget`. Exposed on the browser rather than
+          // as a tool, because upstream deliberately keeps it out of the model's
+          // reach: it rewrites the user's memory files irreversibly. `forget()`
+          // defaults `dryRun`, so this route previews unless asked otherwise.
+          forget: async (input) =>
+            (await forgetHost(input, index)) as unknown as Record<string, unknown>,
           reindex: retrieval.available
             ? async ({ embed, embedBudget }) => {
                 const tool = retrieval.tools.find((candidate) => candidate.name === "memory_reindex");

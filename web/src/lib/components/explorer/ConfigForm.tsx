@@ -3,6 +3,7 @@ import { Info, RefreshCw, ShieldCheck, TriangleAlert } from "lucide-react";
 import { fetchAPI } from "$lib/api";
 import { CONFIG_SECTIONS, isAction, isHeading, readPath, writePath, type ConfigField } from "$lib/config-schema";
 import { ReindexRow } from "$lib/components/explorer/ReindexRow";
+import { ForgetRow } from "$lib/components/explorer/ForgetRow";
 import { Alert, AlertDescription } from "$lib/components/ui/alert";
 import { Badge } from "$lib/components/ui/badge";
 import { Button } from "$lib/components/ui/button";
@@ -296,10 +297,14 @@ export function ConfigFormFields({
               {item.heading}
             </h4>
           ) : isAction(item) ? (
-            <ReindexRow
-              key={`${section.id}:${item.action}`}
-              embedEnabled={readPath(draft, "model.embed") !== false}
-            />
+            item.action === "forgetSessions" ? (
+              <ForgetRow key={`${section.id}:${item.action}`} />
+            ) : (
+              <ReindexRow
+                key={`${section.id}:${item.action}`}
+                embedEnabled={readPath(draft, "model.embed") !== false}
+              />
+            )
           ) : (
             <FieldRow
               key={`${section.id}:${item.key}`}

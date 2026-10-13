@@ -49,6 +49,17 @@ export type MemoryApiDeps = {
    * simply nothing to embed.
    */
   embedReady?: EmbedReadiness;
+  /**
+   * Upstream's `forgetMemoryEntries`, wired to the memory home. Only present when
+   * the plugin registered its retrieval runtime, same as `reindex`.
+   */
+  forget?: (input: {
+    sessionIds?: string[];
+    hookSources?: string[];
+    participants?: string[];
+    since?: string;
+    dryRun: boolean;
+  }) => Promise<Record<string, unknown>>;
 };
 
 /**
@@ -77,6 +88,88 @@ function ok(data: unknown): Response {
 
 function fail(error: string, status = 400): Response {
   return Response.json({ success: false, error }, { status });
+}
+
+/**
+ * What upstream exposes as `openclaw memory forget`, on the one surface mem-plus
+ * has. Upstream keeps it in the CLI and out of the model's reach on purpose: it
+ * rewrites the user's memory files irreversibly, so it belongs to a person making
+ * a deliberate choice, not to an agent that decides it wants to forget something.
+ * This endpoint is that person. It is deliberately NOT registered as a tool --
+ * `memory_reindex` has a tool because rebuilding an index loses nothing, and this
+ * does.
+ *
+ * `dryRun` is upstream's own safety valve and is required here: the default is a
+ * preview, and a caller must pass `dryRun: false` to actually delete.
+ */
+export async function forgetMemory(params: {
+  forget?: (input: {
+    sessionIds?: string[];
+    hookSources?: string[];
+    participants?: string[];
+    since?: string;
+    dryRun: boolean;
+  }) => Promise<Record<string, unknown>>;
+  log: (message: string, detail?: unknown) => void;
+  body: unknown;
+}): Promise<Response> {
+  const { forget, log, body } = params;
+  if (!forget) {
+    return fail(
+      "忘记功能不可用：本次运行未注册检索运行时。",
+      503,
+    );
+  }
+  const raw = (body ?? {}) as {
+    sessionIds?: unknown;
+    hookSources?: unknown;
+    participants?: unknown;
+    since?: unknown;
+    dryRun?: unknown;
+  };
+  // Upstream's guard is "at least one selector", and it is a hard error rather
+  // than an empty result -- forgetting with no selector would be a no-op that
+  // reads as a success. Enforced here too, before any work.
+  const readList = (value: unknown): string[] | null => {
+    if (value === undefined || value === null) return [];
+    if (!Array.isArray(value)) return null;
+    if (!value.every((entry) => typeof entry === "string")) return null;
+    return value as string[];
+  };
+  const sessionIds = readList(raw.sessionIds);
+  const hookSources = readList(raw.hookSources);
+  const participants = readList(raw.participants);
+  if (sessionIds === null || hookSources === null || participants === null) {
+    return fail("sessionIds / hookSources / participants 必须是字符串数组。", 400);
+  }
+  if (sessionIds.length + hookSources.length + participants.length === 0) {
+    return fail("请至少提供一个会话标识：sessionIds、hookSources 或 participants 之一。", 400);
+  }
+  const since = raw.since === undefined || raw.since === null ? undefined : String(raw.since);
+  const dryRun = raw.dryRun !== false;
+  try {
+    const report = await forget({
+      ...(sessionIds.length > 0 ? { sessionIds } : {}),
+      ...(hookSources.length > 0 ? { hookSources } : {}),
+      ...(participants.length > 0 ? { participants } : {}),
+      ...(since ? { since } : {}),
+      dryRun,
+    });
+    const artifacts = (report.artifacts ?? {}) as Record<string, number>;
+    const files = artifacts.memoryFiles ?? 0;
+    const entries = artifacts.memoryEntries ?? 0;
+    const keys = Array.isArray(report.entryKeys) ? report.entryKeys.length : 0;
+    log(
+      dryRun
+        ? `api forget preview: ${files} file(s), ${entries} entry(ies), ${keys} key(s)`
+        : `api forget applied: ${files} file(s), ${entries} entry(ies)`,
+    );
+    return ok(report);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    log("api POST /api/forget failed", detail);
+    return fail(detail, 500);
+  }
 }
 
 /**

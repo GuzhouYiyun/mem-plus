@@ -81,8 +81,15 @@ export type ConfigHeading = { readonly heading: string };
 
 /** A control the page renders itself. Not a setting: there is no key and no value. */
 export type ConfigAction = {
-  /** Rebuild the index and embed everything, via the same path `memory_reindex` takes. */
-  readonly action: "reindexWithVectors";
+  /**
+   * A control the page draws itself.
+   *
+   * `reindexWithVectors` rebuilds the index and embeds everything, via the same
+   * path `memory_reindex` takes. `forgetSessions` is upstream's `memory forget`
+   * on the surface mem-plus has; it sits in the promotion group because what it
+   * deletes is exactly what that group writes.
+   */
+  readonly action: "reindexWithVectors" | "forgetSessions";
 };
 
 /** True for a heading entry, which carries no setting. */
@@ -270,6 +277,13 @@ export const CONFIG_SECTIONS: readonly ConfigSection[] = [
       },
       { heading: "网页" },
       {
+        key: "web.enabled",
+        label: "启用",
+        kind: "boolean",
+        defaultValue: true,
+        help: "关掉 = 不开 4747 端口。agent 不需要这个页面，只有人看。",
+      },
+      {
         key: "web.port",
         label: "端口",
         kind: "number",
@@ -321,6 +335,153 @@ export const CONFIG_SECTIONS: readonly ConfigSection[] = [
         defaultValue: "",
         help: "留空 = ~/.config/opencode/mem-plus/wiki。",
       },
+      { heading: "压缩前落盘" },
+      {
+        key: "flush.enabled",
+        label: "启用",
+        kind: "boolean",
+        defaultValue: true,
+        help: "长对话被 OpenCode 压缩前，把上下文抽取后写进当日记忆文件，防止压缩把没记住的内容抹掉。",
+      },
+      {
+        key: "flush.model",
+        label: "抽取模型",
+        kind: "modelRef",
+        defaultValue: "",
+        help: "留空 = 用 OpenCode 当前的默认模型。",
+      },
+      // `flush.contextRatio` is deliberately absent, and that is upstream's shape
+      // rather than an omission. Upstream's knobs are `softThresholdTokens` (an
+      // absolute count, default 4000) and `forceFlushTranscriptBytes`; neither has a
+      // value mem-plus can feed -- see the header of plugin/src/flush-config.ts, which
+      // argues why the ratio replaces the first and why the second cannot be ported
+      // at all. A fraction field here would need a `decimal` kind this form does not
+      // have, because every number it edits is truncated to an integer. Leaving the
+      // ratio out of the UI is closer to upstream than approximating it.
+      { heading: "深度召回" },
+      {
+        key: "recall.enabled",
+        label: "启用",
+        kind: "boolean",
+        defaultValue: true,
+        help: "问题里出现召回意图（「之前怎么做的」「查一下」等）时，自动派一轮带工具的检索。",
+      },
+      {
+        key: "recall.mode",
+        label: "模式",
+        kind: "enum",
+        choices: ["escalate", "always", "off"],
+        choiceLabels: {
+          escalate: "按意图（默认）",
+          always: "总是召回",
+          off: "关闭",
+        },
+        defaultValue: "escalate",
+        help: "escalate = 只在提问像是要找记忆时才召回；always = 每轮都召回，更准也更费。",
+      },
+      {
+        key: "recall.promptStyle",
+        label: "提示风格",
+        kind: "enum",
+        choices: ["balanced", "strict", "contextual", "recall-heavy", "precision-heavy"],
+        defaultValue: "balanced",
+        help: "balanced 不额外加话术（上游如此）。precision-heavy 更克制，recall-heavy 更主动。",
+      },
+      {
+        key: "recall.timeoutMs",
+        label: "超时",
+        kind: "number",
+        defaultValue: 15000,
+        min: 250,
+        max: 120000,
+        help: "深度召回整体的最长等待，毫秒。超时记一次，连续超时触发熔断。",
+      },
+      {
+        key: "recall.maxSummaryChars",
+        label: "摘要上限",
+        kind: "number",
+        defaultValue: 220,
+        min: 40,
+        max: 1000,
+        help: "召回结果压成摘要后的最大字符数。",
+      },
+      {
+        key: "recall.circuitBreakerMaxTimeouts",
+        label: "熔断阈值",
+        kind: "number",
+        defaultValue: 3,
+        min: 1,
+        max: 20,
+        help: "连续这么多次超时后暂停深度召回一段时间。",
+      },
+      {
+        key: "recall.circuitBreakerCooldownMs",
+        label: "熔断冷却",
+        kind: "number",
+        defaultValue: 60000,
+        min: 5000,
+        max: 600000,
+        help: "熔断后暂停多久，毫秒。按模型计，不是按会话。",
+      },
+      { heading: "长期记忆晋升" },
+      {
+        key: "promotion.enabled",
+        label: "启用",
+        kind: "boolean",
+        defaultValue: true,
+        help: "每天第一个结束的对话触发一轮晋升，把够格的日常条目写进 MEMORY.md。",
+      },
+      {
+        key: "promotion.minScore",
+        label: "最低分",
+        kind: "number",
+        defaultValue: 0.75,
+        min: 0,
+        max: 1,
+        // The threshold and the caveat are upstream's own, quoted from
+        // `DEFAULT_MEMORY_DEEP_DREAMING_MIN_SCORE`'s calibration note
+        // (`src/memory-host-sdk/dreaming.ts:36`). mem-plus imports that constant
+        // rather than restating it, so this row cannot disagree with the reader.
+        help: "加权总分下限。0.75 是上游按「3 天/3 个不同查询的耐用事实得 0.750-0.756、重复填充 0.489-0.549、高相关一次性 0.529-0.606」标定的；条目少时达不到，需要调低才会晋升。",
+      },
+      {
+        key: "promotion.minRecallCount",
+        label: "最少召回次数",
+        kind: "number",
+        defaultValue: 3,
+        min: 0,
+        max: 100,
+        allowZero: true,
+      },
+      {
+        key: "promotion.minUniqueQueries",
+        label: "最少不同提问",
+        kind: "number",
+        defaultValue: 3,
+        min: 0,
+        max: 100,
+        allowZero: true,
+        help: "同一条被重复召回但总是同一个问题，不算证据。",
+      },
+      {
+        key: "promotion.limit",
+        label: "每轮上限",
+        kind: "number",
+        defaultValue: -1,
+        min: -1,
+        max: 1000,
+        help: "留空或 -1 = 不限。",
+      },
+      {
+        key: "promotion.maxAgeDays",
+        label: "最长天数",
+        kind: "number",
+        defaultValue: -1,
+        min: -1,
+        max: 3650,
+        help: "超过这么多天的条目不再晋升。-1 = 不限。",
+      },
+      { action: "forgetSessions" },
     ],
   },
 ];

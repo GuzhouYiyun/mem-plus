@@ -45,6 +45,7 @@ import {
   saveSettings,
   reindexMemory,
   savePromptFile,
+  forgetMemory,
   type MemoryApiDeps,
 } from "./api.js";
 import { WebAuth } from "./auth.js";
@@ -312,7 +313,20 @@ export async function startWebServer(
           }
         );
       }
-      // Writes are confined to three routes; everything else here is a read.
+      // Writes are confined to four routes; everything else here is a read.
+      if (pathname === "/api/forget" && request.method === "POST") {
+        try {
+          const body = await request.json().catch(() => ({}));
+          return await forgetMemory({ forget: api.forget, log, body });
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error);
+          log("api POST /api/forget failed", detail);
+          return new Response(JSON.stringify({ success: false, error: detail }), {
+            status: 500,
+            headers: { "content-type": "application/json; charset=utf-8" },
+          });
+        }
+      }
       if (pathname === "/api/reindex" && request.method === "POST") {
         try {
           const body = (await request.json().catch(() => ({}))) as { embed?: unknown; embedBudget?: unknown };
