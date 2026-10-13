@@ -35,44 +35,43 @@
 //   which is the same message upstream keys on, and which mem-plus knows the recall
 //   verdict for at the moment it runs.
 //
-// WHY THE KEY IS PROMPT TEXT
-//   Upstream's flag rides on the user message. The only property of a mem-plus user
-//   message that differs between a tainted turn and a clean one is its text, because
-//   whether Lane 2 ran is decided for that prompt and nowhere else. Keying on it keeps
-//   upstream's placement (the turn-opening message) and its granularity (the whole turn).
+// WHY THE KEY IS THE OPENING MESSAGE'S ID
+//   Upstream's flag rides on the user message. OpenCode hands the plugin exactly that at
+//   the `prompt` hook -- `SessionPrompt.messageID` -- and `SessionMessageView.id` carries
+//   the same identity back when the snapshot re-renders the transcript. So the turn is
+//   keyed the way upstream keys it, with no substitution.
 //
-//   Two identical prompts in one session share a verdict: if the text triggered recall on
-//   one turn it is excluded on both. The error is one-sided. Under-inclusion is the
-//   failure this whole file exists to prevent; over-inclusion costs one unstored turn.
+//   A previous revision of this file keyed on a digest of the prompt text, written after
+//   the belief that no message identity was reachable turned out to be wrong. It worked,
+//   but two identically-worded prompts in one session shared a verdict. A message ID does
+//   not collide.
 //
 // STICKINESS AND SCOPE
-//   A tainted prompt stays recorded for the life of the session and is never cleared.
+//   A tainted message ID stays recorded for the life of the process and is never cleared.
 //   Upstream's flag resets at the next user message, which is automatic here because the
-//   snapshot renderer walks messages in order and recomputes at each one. Clearing on
-//   snapshot write would be wrong: the next snapshot re-renders the whole transcript, so
-//   a cleared prompt would come back as clean and the earlier turn would be written then.
-//   The set is at most one entry per prompt that actually triggered recall.
-
-import { hashText } from "../../packages/memory-host-sdk/src/host/hash.js";
+//   snapshot renderer walks messages in order and recomputes at each one. Clearing after a
+//   snapshot would be wrong: the next snapshot re-renders the whole transcript, so a
+//   cleared ID would come back as clean and the earlier turn would be written then.
 
 /**
- * sessionID -> digests of the user prompts whose turn had recall injected.
+ * The IDs of the user messages whose turn had recall injected.
  *
  * Never persisted. Persistence is not wanted: the snapshot is written milliseconds after
- * the turn ends, and a session's taint set is exactly the set of prompts still visible in
- * its own transcript. A restart loses it, which costs the exclusion for turns already
- * snapshotted -- the same window upstream has, since its marker lives on the message and
- * is read while the same messages are being walked.
+ * the turn ends, and a session's taint set is exactly the set of turns still visible in its
+ * own transcript. A restart loses it, which costs the exclusion for turns already
+ * snapshotted -- the same window upstream has, since its marker rides on the message and is
+ * read while the same messages are being walked.
+ *
+ * Keyed by `SessionMessage.ID`, which OpenCode hands to the `prompt` hook
+ * (`SessionPrompt.messageID`). An earlier revision keyed on a digest of the prompt text,
+ * on the belief that no message identity was reachable; that was wrong, and it made two
+ * identically-worded prompts in one session share a verdict. A message ID has no such
+ * collision.
  */
-const taintedPrompts = new Map<string, Set<string>>();
-
-/** Prompt comparison ignores surrounding whitespace only, and nothing else. */
-function promptKey(text: string): string {
-  return hashText(text.trim());
-}
+const taintedTurns = new Set<string>();
 
 /**
- * Record that Lane 2 injected `recallText` into the turn opened by `prompt`.
+ * Record that Lane 2 injected recall into the turn opened by the user message `messageID`.
  *
  * Called once per prompt that produced a deep-recall block. Upstream excludes recalled
  * *results* from re-ingestion; the trigger and project blocks are not excluded, because
@@ -80,23 +79,15 @@ function promptKey(text: string): string {
  * re-learned, and the trigger block is a filtered view of curated entries rather than a
  * new claim.
  */
-export function noteDeepRecall(sessionID: string, prompt: string, recallText: string): void {
-  if (recallText.trim().length === 0) return;
-  let keys = taintedPrompts.get(sessionID);
-  if (!keys) {
-    keys = new Set<string>();
-    taintedPrompts.set(sessionID, keys);
-  }
-  keys.add(promptKey(prompt));
+export function noteDeepRecall(messageID: string): void {
+  taintedTurns.add(messageID);
 }
 
 /**
- * Upstream's `insideRecalledMemoryTurn`, for the turn that `prompt` opens.
- *
- * `prompt` is the text of a user message as it appears in the transcript being rendered.
+ * Upstream's `insideRecalledMemoryTurn`, as of the user message `messageID`.
  */
-export function isRecalledMemoryTurn(sessionID: string, prompt: string): boolean {
-  return taintedPrompts.get(sessionID)?.has(promptKey(prompt)) === true;
+export function isRecalledMemoryTurn(messageID: string): boolean {
+  return taintedTurns.has(messageID);
 }
 
 /**
@@ -108,16 +99,15 @@ export function isRecalledMemoryTurn(sessionID: string, prompt: string): boolean
  * flag before it collects any message content.
  */
 export function excludeRecalledMemoryTurns<T>(
-  sessionID: string,
   messages: readonly T[],
-  promptOf: (message: T) => string | undefined,
+  openingMessageIdOf: (message: T) => string | undefined,
 ): T[] {
   const kept: T[] = [];
   let insideRecalledMemoryTurn = false;
   for (const message of messages) {
-    const prompt = promptOf(message);
-    if (prompt !== undefined) {
-      insideRecalledMemoryTurn = isRecalledMemoryTurn(sessionID, prompt);
+    const openingId = openingMessageIdOf(message);
+    if (openingId !== undefined) {
+      insideRecalledMemoryTurn = isRecalledMemoryTurn(openingId);
     }
     if (insideRecalledMemoryTurn) continue;
     kept.push(message);
@@ -125,8 +115,7 @@ export function excludeRecalledMemoryTurns<T>(
   return kept;
 }
 
-/** For dispose, and for a session id that OpenCode will not hand back. */
-export function clearAllTurnTaints(sessionID?: string): void {
-  if (sessionID === undefined) taintedPrompts.clear();
-  else taintedPrompts.delete(sessionID);
+/** For dispose, and for a session OpenCode will not hand back. */
+export function clearAllTurnTaints(): void {
+  taintedTurns.clear();
 }

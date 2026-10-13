@@ -135,20 +135,17 @@ export function renderSessionSnapshot(params: {
   let turns = 0;
   // Upstream's `insideRecalledMemoryTurn`, applied here because this is the seam where a
   // transcript becomes durable text: `session-files.ts:781` recomputes the flag on every
-  // user message and `:788-794` drops every message while it holds. Keyed on the prompt
-  // that opened the turn, and dropping the turn whole is upstream's granularity -- the
-  // assistant's paraphrase of a recall is not a substring of the recall, so a fragment
-  // test would miss exactly the text the flag exists to keep out. See `recall-taint.ts`.
-  for (const raw of excludeRecalledMemoryTurns(
-    sessionID,
-    messages,
-    (message) => {
-      const view = asSessionMessage(message);
-      if (view.type !== "user") return undefined;
-      const text = (view.text ?? "").trim();
-      return text.length > 0 ? text : undefined;
-    },
-  )) {
+  // user message and `:788-794` drops every message while it holds. Keyed by that user
+  // message's ID, which is what upstream keys on and what the `prompt` hook already gave
+  // the recorder; dropping the turn whole is upstream's granularity -- the assistant's
+  // paraphrase of a recall is not a substring of the recall, so a fragment test would miss
+  // exactly the text the flag exists to keep out. See `recall-taint.ts`.
+  for (const raw of excludeRecalledMemoryTurns(messages, (message) => {
+    const view = asSessionMessage(message);
+    if (view.type !== "user") return undefined;
+    const id = view.id;
+    return typeof id === "string" && id.length > 0 ? id : undefined;
+  })) {
     const message: SessionMessageView = asSessionMessage(raw);
     const created = iso(message.time?.created);
     if (message.type === "user") {

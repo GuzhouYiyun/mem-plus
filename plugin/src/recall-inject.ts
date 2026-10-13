@@ -146,14 +146,13 @@ export async function installMemoryInjection(params: {
           log: params.log,
         }),
       });
-      // Upstream's turn taint, recorded at the seam where the recall is decided rather
-      // than read off a message marker, because this host's Lane 2 runs in the live
-      // session and OpenCode exposes no writable per-message metadata. Keyed on the
-      // prompt that opened this turn, which is the message upstream keys on. The
-      // snapshot writer withholds the whole turn from the transcript on that key, which
-      // is upstream's exclusion at `session-files.ts:788-794`. See `recall-taint.ts`.
+      // Upstream's turn taint, recorded at the seam where the recall is decided and keyed
+      // by the same thing upstream keys it by: the user message that opens the turn. The
+      // `prompt` hook carries that identity as `messageID`. The snapshot writer withholds
+      // the whole turn on that key, which is upstream's exclusion at
+      // `session-files.ts:788-794`. See `recall-taint.ts`.
       if (deep.context) {
-        noteDeepRecall(event.sessionID, message, deep.context);
+        noteDeepRecall(event.messageID);
       }
     } catch (error) {
       // A failed lookup must never delay or break the turn it annotates.
