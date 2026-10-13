@@ -1060,14 +1060,14 @@ export async function fuseRankings(params: {
     keyword.push({
       id: String(hit.unitId),
       path: hit.path,
-      // The hit's own line range, not `unitId`. These three fields used to be filled
-      // with the row id, which happened to be an integer and so looked plausible while
-      // pointing at nothing: `memory_get` cites `path#Lstart-Lend`, so every citation
-      // named a line number that had no relationship to the text it quoted. Upstream's
-      // lane entries carry `start_line`/`end_line` for the same reason
-      // (`memory-recall-metadata.ts` selects both from `memory_index_chunks`).
-      startLine: hit.startLine,
-      endLine: hit.endLine,
+      // `unitId`, deliberately -- see the note at the top of this function: it is the
+      // merge key `mergeHybridResults` keys on, not a line number. `SearchHit.startLine`
+      // and `endLine` are hard-coded to 0 in `rowToHit` because mem-plus's own `units`
+      // table has no line columns and `HIT_COLUMNS` never selects any, so there is
+      // nothing to read. Upstream's chunks carry `start_line` / `end_line` and
+      // `memory-recall-metadata.ts` selects both, which is what makes its citations real.
+      startLine: hit.unitId,
+      endLine: hit.unitId,
       source: hit.source,
       snippet: hit.text,
       // The unit's `<!-- project: ... -->` keys, not `hit.project`. `project` is the
@@ -1086,8 +1086,9 @@ export async function fuseRankings(params: {
     vector.push({
       id: String(hit.unitId),
       path: hit.path,
-      startLine: hit.startLine,
-      endLine: hit.endLine,
+      // Same merge key as the keyword lane above -- not a line number.
+      startLine: hit.unitId,
+      endLine: hit.unitId,
       source: hit.source,
       snippet: hit.text,
       projectKey: hit.projectKey ?? undefined,
