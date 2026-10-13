@@ -49,15 +49,20 @@ export type MemoryForgetArtifacts = {
   memoryLines: number;
   sessionCorpusFiles: number;
   sessionCorpusLines: number;
-  /** Always 0 here. See the module header: the index layer is not ported. */
+  /** Indexed units dropped by `forget.purge`. Filled from `planAndPurgeIndex`. */
   indexChunks: number;
-  /** Always 0 here. */
+  /** Indexed source rows dropped. Filled from `planAndPurgeIndex`. */
   indexSources: number;
-  /** Always 0 here. */
+  /** FTS rows dropped. Filled from `planAndPurgeIndex`. */
   ftsRows: number;
-  /** Always 0 here. */
+  /** Vector rows dropped, by cascade. Filled from `planAndPurgeIndex`. */
   vectorRows: number;
-  /** Always 0 here. */
+  /**
+   * Always 0, and that is a recorded divergence rather than an omission: upstream
+   * prunes `memory_embedding_cache` here, mem-plus has no such table. Its whole role
+   * upstream is to avoid re-embedding unchanged text, which a reindex does anyway.
+   * See `docs/port-plan.md`.
+   */
   embeddingCacheRows: number;
   shortTermEntries: number;
   seenHashScopes: number;
@@ -112,18 +117,30 @@ export type MemoryForgetParams = MemoryForgetSelector & {
     { entryKey: string; sessionId: string }[]
   >;
   /**
-   * Upstream's `forget.mark`, which records session tombstones and bumps
-   * `memory_index_state.revision`. Optional so a caller that cannot reach the agent
-   * database still gets the file scrub; upstream requires it.
+   * Upstream's `forget.mark`: records session tombstones and bumps
+   * `memory_index_state.revision`.
+   *
+   * Required, as upstream has it. An earlier revision made this optional "so a caller
+   * that cannot reach the agent database still gets the file scrub" -- that weakened
+   * upstream's guarantee for a caller that does not exist, since the host adapter
+   * always supplies it. Omitting it would skip the tombstone and leave the index
+   * revision un-advanced, which is exactly what the revision fence exists to detect.
    */
-  markForgotten?: (input: { agentId: string; sessionIds: readonly string[] }) => number;
+  markForgotten: (input: { agentId: string; sessionIds: readonly string[] }) => number;
   /**
-   * mem-plus's index, for `forget.purge`. Optional because upstream's purge reaches
-   * its index through a worker that borrows openclaw's agent database; here it is
-   * the plugin's own `index.db`. Absent when the retrieval runtime is not registered,
-   * and the file scrub still runs -- which is upstream's own degradation when the
-   * vector table is missing, except that here it leaves index rows to the next
-   * reindex instead of deleting them now.
+   * mem-plus's index, for `forget.purge`. Upstream reaches its index through a worker
+   * that borrows openclaw's agent database; here it is the plugin's own `index.db`.
+   *
+   * Optional, and the reason is the state of the world rather than the caller's
+   * choice: it is absent only when there is no index at all (the retrieval runtime is
+   * not registered). An absent index has no rows, so nothing is left holding the
+   * forgotten content -- there is no stale row for a later reindex to correct. That
+   * makes this upstream's own uninitialized-index path, where
+   * `openUninitializedMemoryDatabase` yields an empty database with nothing to purge.
+   *
+   * NOT the same as omitting it while an index exists: that would leave index rows
+   * still carrying the scrubbed content, searchable until the next reindex. The host
+   * adapter always passes the database when it has one (`plugin/src/forget.ts`).
    */
   indexDb?: import("node:sqlite").DatabaseSync;
 };
