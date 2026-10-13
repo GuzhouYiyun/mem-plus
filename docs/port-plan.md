@@ -95,11 +95,105 @@ textScore`;30 天召回半衰期;importance 1–10 写入时定一次;MMR λ=0.7
 **索引是可重建缓存** —— 删了会从文件重建。这是设计里最要紧的一个决定(文档明确:source of
 truth 是文件)。
 
-### 文档之间已发现的一处矛盾
+### 文档与代码的十处核对(2026-10-13 通读代码后)
 
-同一份文档族里,trigger 注入阈值 **0.65**(`concepts/memory-architecture`,docs.openclaw.ai)
-与 **0.72**(同一文档的 unpkg 2026.9.3 版本)并存。按 AGENTS.md 的规则**以代码为准**,待在
-通读代码时查真值。
+| # | 文档说法 | 代码真值 | 判定 |
+|---|---|---|---|
+| 1 | trigger 阈值 0.65 | `trigger-recall.ts:26` = **0.65** | ✅ 一致。**上一版记的"文档 0.65/0.72 并存"是错的** —— 0.72 在本 checkout 的任何文档里都不存在,只出现在 `trigger-recall.ts:22` 的注释里,说明它被否决过 |
+| 2 | "长期记忆只有一个主写者:dreaming consolidation" | `dreaming.ts:221` 是唯一调用者,但 `memory-forget.ts:497` 是第二个 `commitMemoryContent` 调用者 | ⚠️ **对自动流水线成立,但不是结构性强制** |
+| 3 | 30 天召回半衰期 | `memory-search.ts:122` `{enabled:true, halfLifeDays:30}` 正确,但 `temporal-decay.ts:8` 的文件内默认值是 `enabled:false` | ⚠️ 出货路径对,**代码内部自相矛盾** |
+| 4 | importance 乘数 | `importance.ts:6` `0.75 + i*0.05` | ✅ 一致(文档漏了 `0.75` 这个底) |
+| 5 | 三阶段顺序 light/deep/REM | `dreaming-phases.ts:1405-1406` 是 **light→REM,deep 在后** | ⚠️ **文档的顺序不对** |
+| 6 | episodic 永不自动注入 | `memory-recall-metadata.ts:231-232` SQL 路径白名单 + origin class | ✅ 一致,且**比文档说的更强** |
+| 7 | standing intents 有"可选的 trigger embedding" | `standing-intents.ts:103` 存的是字面 `null`;匹配只用 FTS | ⚠️ 字段存在但未使用,文档是 aspirational |
+| 8 | Lane 2 的"两个确定性条件" | `escalation.ts:82-97`:条件一 = lane 1 无强命中(第 93 行短路),条件二 = `hasRecallIntent(message)`(第 96 行)。纯函数,无模型无 I/O | ✅ 一致 |
+| 9 | untrusted/system 在构造 prompt 前排除 | `short-term-promotion.ts:124` 评分前;`dreaming-consolidation.ts:407` prompt 前 | ✅ 一致,两处 |
+| 10 | 会话种类门控 | `session-ingestion.ts:132` 对非 `interactive` 返回 null | ✅ 一致,机制不同 |
+
+## 融合深浅:逐处实测(2026-10-13 通读代码后)
+
+这是 L1/L2/L3 的判定依据,不是推测。
+
+### (a) 会话存储 —— **L3,接缝接不上**
+
+`session-files.ts:77-97` 的 `SessionFileEntry` 不是"读个 transcript",是**openclaw 会话库的
+记忆投影**:
+
+```ts
+  lineMap: number[];              // 每个内容行 → 1-indexed JSONL 源行号
+  messageTimestampsMs: number[];  // 每个内容行 → epoch ms,0 表示未知
+  lineProvenance: MemoryEntryProvenance[];  // 与内容行一一对应
+```
+
+`buildSessionEntry`(`:516-567`)的选项里有 `sessionKey` / `agentId` / `sessionId` /
+`storePath` —— 是**活的 SQLite 身份**,不是文件路径。一个函数里七个 openclaw 专有概念:incognito
+绑定、SQLite 会话身份、worker admission、secret-redaction registry 版本、冷存储恢复、
+`resetRecallCutoff` 符号、平台语义环境变量克隆。
+
+**判定:改写依赖方**。要自己实现 `content`/`lineMap`/`messageTimestampsMs`/`lineProvenance`。
+下游全部消费这个形状(`buildDailyIngestionResults`、`DAILY_INGESTION_SCORE = 0.62`、
+`SESSION_INGESTION_SCORE = 0.58`),所以它是**承重接口**。这也是 OpenCode 侧唯一能对上位的
+两个入口:`readSessionTranscriptCorpusInWorker`(异步)与
+`listSessionTranscriptCorpusEntriesForAgentSync`(同步)。
+
+**这一条改变了 P3 的性质**:`extensions/active-memory/` 的 `session.ts` / `transcript.ts` /
+`recall-run.ts` 都建立在这个接口上,所以 Lane 2 的搬入不是"补个 adapter",是 L3。
+
+### (b) cron 驱动 —— 接口可接,但**不接就跑不起来**
+
+`dreaming-cron.ts:81-87` 把整个需求定义成一个结构类型,鸭子类型判定在 `:193-207`:
+`{isEnabled?, list, add, update, remove}`。所以**接口是 L1**。
+
+但两个 openclaw 语义漏进了**行为**里:`sessionTarget: "isolated"` + `wakeMode: "now"`;
+以及 `before_agent_reply` 带 `ctx.trigger === "cron"` 与 `event.cleanedBody` 的 token 匹配。
+
+**判定:最省事的移植是砍掉 cron 那条臂** —— 换成普通 interval 直接调
+`runDreamingSweepPhases` + `runShortTermDreamingPromotion`,
+`reconcileShortTermDreamingCronJob` 整个丢掉(它只为迁移旧的 light/REM job 而存在,
+`dreaming-cron.ts:24-34`)。
+
+### (c) 工具注册 + 嵌入 provider —— **L1**
+
+`index.ts:250-274` 三次 `api.registerTool`。唯一 openclaw 类型依赖是
+`OpenClawPluginToolContext`,而实际消费的字段只有 8 个(`:157-167`)。嵌入 provider 是干净的
+工厂接口(`create` / `supportsMultimodalEmbeddings` / `shouldContinueAutoSelection`)。
+`acquireLocalService` **可以是 undefined** —— 纯 FTS 路径完全支持
+(`manager-search-orchestration.ts:408-412`)。
+
+### (d) 索引 schema —— SQL 可搬,**位置**是难点
+
+`memory_index_*` 的 SQL 是标准的(STRICT 表、FTS5、revision 计数器)。难点在
+**记忆索引住在 openclaw 每 agent 的共享 SQLite 里,与会话库同一个文件**
+(`openclaw-agent-db.paths.ts:53`),因而共享 WAL、共享 schema contract、共享 reader admission。
+`manager-db.ts:215-219` 还在这个共享文件上配记忆专属的 WAL 维护。
+
+**移植判定:让索引拥有自己的 `memory.sqlite`,丢掉
+`openOpenClawAgentDatabaseReadOnly`(`:247`)换成普通 open。** 这顺带解决 P2 里担心的
+schema-contract 读取器。搬不走的只剩三样:与共享文件的 WAL 协调、schema-contract 读取器、
+sqlite-vec 依赖(后者可选,缺了会退回进程内余弦)。
+
+### (e) 配置 —— L1,但形状是 openclaw 的
+
+两个配置面都要走:顶层 `cfg.memory.search` + per-agent 覆盖;以及
+`plugins.entries.<memorySlot>.config` —— 而 dreaming 配置是**相对 slot 解析**的
+(`dreaming.ts:340-349`,`slots.memory` 为 `"none"` 或未设时回落到 `"memory-core"`)。
+单 provider 移植可以硬编码,但多插件场景会静默读错对象。
+
+## 宿主集成最小契约(通读后整理)
+
+openclaw 宿主必须提供、而记忆侧实际消费的:
+
+`getRuntimeConfig`/`runtimeConfig`/`config` · `agentId` · `sessionKey` · `sessionId` ·
+`sandboxed` · `oneShotCliRun` · `conversationRecall` · `activeProjectKeys` ·
+`messageChannel` · `senderId` · `senderIsOwner` · `assertInvocationCurrent` ·
+`availableTools` · `citationsMode` · `contextWindowTokens` · `resolveSessionAgentIdStrict` ·
+`authorizeSearchHits` 往返 · cron 服务 · `subagent.complete({agentId, message,
+extraSystemPrompt, model?, timeoutMs})` · `openKeyedStore` CAS 存储(短期召回库)·
+每 agent 的 `workspaceDir` · `before_agent_reply` 带 `heartbeat`/`cron` 触发与 `cleanedBody`。
+
+**对应的 OpenCode 侧接缝**:`tool.execute.before/after`(`promise/tool.d.ts:38-53`)、
+`SessionMetadata`(durable、fork 继承)、`session.fork`、`ctx.websearch`、`ctx.mcp`、
+`ctx.storage`、`ctx.rpc`、`Tool.Result.metadata`。
 
 ## 接缝地图(2026-10-13 实测,308 个生产文件的外部 import)
 
