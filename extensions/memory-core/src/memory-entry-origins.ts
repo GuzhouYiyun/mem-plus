@@ -47,10 +47,55 @@ type MemoryOriginDatabase = {
 const TOMBSTONE_INSERT_BATCH_SIZE = 128;
 const ensuredDatabases = new WeakSet<DatabaseSync>();
 
+// UPSTREAM: `memory_index_state(id, revision)` from
+// `packages/memory-host-sdk/src/host/memory-schema-base.ts:91-94`, part of openclaw's
+// strict index schema, which mem-plus never adopted.
+//
+// WHO ACTUALLY NEEDS IT, MEASURED HERE RATHER THAN ASSUMED
+//   Exactly one function in this file touches the table:
+//   `recordMemorySessionTombstonesInDatabase` (:186-192), which bumps `revision`
+//   after inserting a tombstone. `recordMemoryEntryOrigins` and
+//   `reserveMemoryEntryOrigins` do NOT read or write it -- promotion's own path was
+//   never broken by the table's absence, and the probe in this change's evidence
+//   confirms it: two origin rows written, no throw, `revision` untouched at 0.
+//
+//   So the earlier claim that promotion's lineage writes were failing was wrong, and
+//   so was the inference that the empty `catch` in `plugin/src/promotion.ts:117` was
+//   hiding it. What the missing table actually blocked was upstream's forget: its
+//   `forget.mark` step records tombstones, so every forget would have thrown
+//   `no such table: memory_index_state` before it could touch a single file. That
+//   function had no caller in mem-plus, so nothing failed visibly until forget was
+//   ported and wired.
+//
+// DDL AND SEED, FROM UPSTREAM
+//   Upstream's table is `id INTEGER PRIMARY KEY CHECK (id = 1)`,
+//   `revision INTEGER NOT NULL`, `STRICT`, with no DEFAULT. Upstream seeds it
+//   explicitly and treats missing metadata as a rebuild request rather than
+//   defaulting (`manager-db.ts:131`: "Missing metadata requests a rebuild; never
+//   reuse an old revision (ABA)"). Reproduced as-is, including the missing DEFAULT:
+//   0 is the value a freshly built index starts at, and it is the only value that is
+//   safe for the increment above.
+function ensureMemoryIndexStateSchema(db: DatabaseSync): void {
+  if (tableExists(db, "memory_index_state")) {
+    return;
+  }
+  db.exec(`CREATE TABLE IF NOT EXISTS memory_index_state (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      revision INTEGER NOT NULL
+    ) STRICT`);
+  // `revision` is NOT NULL with no DEFAULT, so the row cannot be inserted without
+  // naming it. id is CHECK-constrained to 1, which is what upstream reads
+  // (`MEMORY_INDEX_STATE_ID`, `manager-db-kernel.ts:20`).
+  db.prepare("INSERT INTO memory_index_state (id, revision) VALUES (?, ?)").run(1, 0);
+}
+
 function openMemoryOriginDatabase(agentId: string): DatabaseSync {
   const db = openOpenClawAgentDatabase({ agentId }).db;
   if (!ensuredDatabases.has(db)) {
     ensureMemoryEntryOriginsSchema(db);
+    // Same wrapper as the origins schema, so it runs inside the same WeakSet guard:
+    // once per connection, and never on a database that already has the row.
+    ensureMemoryIndexStateSchema(db);
     ensuredDatabases.add(db);
   }
   return db;
@@ -166,6 +211,34 @@ export function recordMemoryEntryOrigins(params: {
   return runSqliteImmediateTransactionSync(db, () =>
     recordMemoryEntryOriginsInDatabase(db, params),
   );
+}
+
+/**
+ * UPSTREAM: `forget.mark` (`memory-forget-kernel.ts:32-51`) calls
+ * `recordMemorySessionTombstonesInDatabase(db, input)` on a connection its worker
+ * owns, then bumps `memory_index_state.revision` through the same handle.
+ *
+ * mem-plus has no forget worker, so the connection has to be opened here. This is
+ * the connection-owning counterpart to the `...InDatabase` function above, and it
+ * deliberately reuses `openMemoryOriginDatabase` so the origins schema, the
+ * tombstones table and the revision row are all ensured by one guard on one
+ * connection. Upstream's two-phase contract is preserved by the caller's ordering,
+ * not by this function: the tombstone commits before any file is rewritten, so a
+ * later failure leaves the marker durable for a retry
+ * (`memory-forget-kernel.ts:53`: "The earlier tombstone commit survives any failure
+ * of this separate purge").
+ */
+export function recordMemorySessionTombstones(params: {
+  agentId: string;
+  sessionIds: readonly string[];
+  reason?: string;
+  createdAt?: number;
+}): number {
+  if (params.sessionIds.length === 0) {
+    return 0;
+  }
+  const db = openMemoryOriginDatabase(params.agentId);
+  return recordMemorySessionTombstonesInDatabase(db, params);
 }
 
 function deleteMemoryEntryOrigins(params: {

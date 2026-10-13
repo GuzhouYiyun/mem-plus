@@ -1,7 +1,19 @@
 import { estimateUtf8Bytes, splitTextToUtf8ByteLimit } from "./embedding-input-limits.js";
 import { hasNonTextEmbeddingParts } from "./embedding-inputs.js";
 import { resolveEmbeddingMaxInputTokens } from "./embedding-model-limits.js";
-import type { EmbeddingProvider } from "./embeddings.types.js";
+// UPSTREAM: `./embeddings.types.js`, a 6-line re-export of openclaw's canonical
+// `src/plugins/embedding-provider-types.js`.
+//
+// WHY IT IS DECLARED INLINE INSTEAD. The alias module was removed by the trim
+// (3b4f6b6d, 2026-10-04) together with its own target: mem-plus has no
+// `src/plugins/embedding-provider-types.ts`, so restoring the alias verbatim would
+// trade one unresolved specifier for another. This file used only two of that
+// contract's fields, and both uses already narrow with
+// `Pick<..., "id" | "maxInputTokens">`, so the imported shape is exactly this.
+// Every field is upstream's, with upstream's optionality: `maxInputTokens` is
+// absent when the provider does not declare a limit, which is the branch
+// `resolveEmbeddingMaxInputTokens` below is written around.
+type EmbeddingProvider = { id: string; maxInputTokens?: number };
 import { hashText } from "./hash.js";
 import type { MemoryChunk } from "./internal.js";
 

@@ -109,7 +109,7 @@ const CONFIG_TEMPLATE = `{
     "enabled": true
     // "minScore": 0.75,
     // "minRecallCount": 3,
-    // "minUniqueQueries": 2,
+    // "minUniqueQueries": 3,
     // "limit": 10,
     // "maxAgeDays": 90
   }

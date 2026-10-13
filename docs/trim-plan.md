@@ -50,3 +50,45 @@ plugin-package-contract}` 全删。`node_modules/openclaw`(42 别名模块)+
 ## 偏离登记(执行中逐条追加)
 
 每条格式:`[D<n>] 上游行为 → 裁剪后行为(文件, 理由, memory-chain 章节对照)`。
+
+### 源码断裂(非偏离,是裁剪留下的坏引用;2026-10-13 全部闭环)
+
+四条都是逐字搬来的代码**依赖一个被裁掉的邻居**。性质与 `memory_index_state` 缺表相同:
+代码本身没搬错,被依赖的文件或 alias 没跟过来,且现有类型门覆盖不到 —— 只有静态
+导入扫描能稳定检出,运行时不会触发。
+
+| | 断裂点 | 缺失的依赖 | 处置 |
+|---|---|---|---|
+| **B1** | `extensions/active-memory/index.ts:47` 导入 `./trigger-recall.js` | `extensions/active-memory/trigger-recall.ts` | **删文件**,理由见下方 |
+| **B2** | `packages/memory-host-sdk/src/host/embedding-chunk-limits.ts:4` 导入 `./embeddings.types.js` | `embeddings.types.ts` | **改一行**,理由见下方 |
+| **B3** | 同 B2,`embedding-model-limits.ts:1` | 同 B2 | 同 B2 |
+| **B4** | `extensions/active-memory/doctor-contract-api.ts:2` 导入 `runtime-doctor-migrations` | 该 alias(`src/plugin-sdk/` 与 `node_modules/openclaw/plugin-sdk/` 均无) | **删文件**,同 B1 |
+
+#### 为什么 B1/B4 是删文件而不是补齐
+
+`extensions/active-memory/` 原有 15 个文件,其中 **13 个(3718 行)不在 `package.json` 的
+`files` 里** —— 安装后根本不存在于用户机器。它们是 openclaw 的插件入口与宿主适配层,而
+mem-plus 走 OpenCode 的插件系统,永不加载 openclaw 的插件机制;该目录只有 `escalation.ts`
+与 `types.ts` 被 `plugin/src/deep-recall.ts` 引用。删除前已核实:13 个文件无人引用,两个存活
+文件也不依赖它们。
+
+补齐也编译不过:上游 `trigger-recall.ts` 导出 7 个符号,mem-plus 的
+`plugin/src/trigger-recall.ts` 只有 5 个,缺的恰是 index.ts 唯一用到的两个
+(`forgetTriggerRecallRun`、`TriggerRecallSource`);两个 `resolveTriggerRecall` 的签名不可
+通约(上游收 `cfg/agentId/source/runId/requestKey/authorityFingerprint`,mem-plus 收
+`db/message/filters`)。所以这不是"缺东西",是**源码树比发布闭包多了 13 个从不参与运行
+的文件**。
+
+#### 为什么 B2/B3 是改一行而不是补文件
+
+`embeddings.types.ts` 是 6 行 re-export,转自 `src/plugins/embedding-provider-types.js`,
+而那个文件也被裁掉了 —— 补回来等于用一条断裂换另一条。两个文件只用 `id` 与
+`maxInputTokens`,且都已用 `Pick<EmbeddingProvider, "id" | "maxInputTokens">` 收窄,故就地
+声明这两个字段,字段名与可选性均照上游。
+
+`enforceEmbeddingMaxInputTokens` 是**活代码**:经
+`src/plugin-sdk/memory-core-host-engine-indexing.ts:9` 的 alias 被
+`plugin/src/memory-parse.ts` 调用 5 次。它打在这两个坏导入上 —— 类型门覆盖不到
+(`tsconfig.plugin.json` 只看 `plugin/`+`extensions/`+`bootstrap`,不含 `packages/`),
+运行时又只因类型擦除才没崩。验证:`probe-chunk-limits` 9 项(20 万字符切 98 块、零丢失、
+`hardMaxInputTokens` 只能收紧不能放宽)。

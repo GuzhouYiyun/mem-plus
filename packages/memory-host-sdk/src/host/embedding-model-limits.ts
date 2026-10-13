@@ -1,4 +1,7 @@
-import type { EmbeddingProvider } from "./embeddings.types.js";
+// UPSTREAM: `./embeddings.types.js`. See the same declaration and the same reason in
+// `embedding-chunk-limits.ts` -- the alias module and its target were both removed by
+// the trim, and this file uses the two fields upstream's contract would have given it.
+type EmbeddingProvider = { id: string; maxInputTokens?: number };
 
 // Provider input limits are byte-based approximations for pre-embedding chunk splitting.
 
