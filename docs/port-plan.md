@@ -179,6 +179,79 @@ sqlite-vec 依赖(后者可选,缺了会退回进程内余弦)。
 (`dreaming.ts:340-349`,`slots.memory` 为 `"none"` 或未设时回落到 `"memory-core"`)。
 单 provider 移植可以硬编码,但多插件场景会静默读错对象。
 
+## 对照:上游 288 个记忆生产文件 vs mem-plus 现有(2026-10-13 实测)
+
+上游记忆子系统 **288 个生产文件,52680 行**(排除 `.test.ts` 与 plugin 入口 `index.ts`)。
+逐文件按内容哈希比对,再对同名的按"上游有多少行在 mem-plus 里原样存在"估算改写幅度:
+
+| 状态 | 文件 | 行 | 占比 |
+|---|---|---|---|
+| **逐字节等于上游** | 36 | 3143 | **6%** |
+| 有同名文件但已改写 | 73 | 17285 | 33% |
+| **mem-plus 里没有** | **179** | **32252** | **61%** |
+
+**已搬进来的行只占 39%。** 换句话说:上游记忆逻辑的六成在 mem-plus 里根本不存在,而
+存在的那三分之一里又有三分之二被改写过。
+
+### 分子系统
+
+| 子系统 | 照抄 | 改写 | 缺失 | 已搬/总 |
+|---|---|---|---|---|
+| `short-term-promotion*`(晋升判定与应用) | 0 | 11 | 0 | **100%** |
+| `memory-host-sdk`(宿主 SDK:文件发现、schema、会话导出) | 21 | 36 | 28 | **82%** |
+| `dreaming*`(三阶段 sweep) | 3 | 8 | 6 | **72%** |
+| `memory-core/其余` | 9 | 7 | 59 | **24%** |
+| `memory-core/memory/`(**索引与检索**) | 2 | 8 | 75 | **5%** |
+| `active-memory`(Lane 2) | — | — | 11 | 见 P3 |
+
+**索引与检索层是空的** —— 上游 85 个文件,mem-plus 只有 10 个(2 照抄 + 8 改写),75 个缺失。
+这就是为什么 `plugin/src/memory-index.ts` 是自创的 1120 行:自创不是因为没得搬,是因为**只搬了
+十分之一,剩下的用一套自己的 schema 顶上**。上游的 `memory_index_*` schema 模块逐字节在树里
+却没人调(P2 已记)。
+
+`short-term-promotion*` 反而是 100% —— 11 个文件全部改写搬入,一行没漏。这是目前最干净的一块,
+也是判断"照搬能做到什么程度"的样本:它证明记忆逻辑本身可以整体搬过来。
+
+### 改写幅度最大的(上游行保留率最低)
+
+| 保留率 | 行 | 文件 | 性质 |
+|---|---|---|---|
+| 10% | 287 | `active-memory/config.ts` | L3 候选(配置解析) |
+| 16% | 520 | `memory-core/memory-forget.ts` | 我刚搬的,只 16% |
+| 17% | 6 | `memory-core/memory/index.ts` | 只是个 re-export 门面 |
+| 25% | 16 | `host/openclaw-runtime-sqlite.ts` | 躯干转接 |
+| 32% | 307 | `memory-entry-origins.ts` | |
+| 37% | 443 | `active-memory/trigger-recall.ts` | 我搬的,37% |
+| 42% | 387 | `host/openclaw-runtime-session.ts` | 躯干转接 |
+| 48% | 165 | `host/session-entry-projection.ts` | **L3 承重接口那一块** |
+| 67% | 598 | `host/session-transcript-corpus.ts` | **L3** |
+
+`session-entry-projection.ts` 与 `session-transcript-corpus.ts` 保留率低、又在 L3 承重路径上 ——
+这两处是 Lane 2 搬不动的真正原因,和 P3 的结论对上了。
+
+### 没有"100% 照抄的目录"
+
+不存在任何一个目录是整目录逐字节等于上游的。照抄率最高的 `short-term-promotion*` 也是 11 个
+文件全部**改写**后搬入(0 个照抄)。**所以"逐字节抄"在这个仓库里目前没有先例**,现有 36 个
+照抄文件是单个零散文件,不是成块的子系统。
+
+## 要改什么(对照结论,不是推测)
+
+按"能整体搬 / 要搬但需接缝 / 是 L3"三档,对照上面的表:
+
+1. **`short-term-promotion*` 已经做到的目标形态** —— 11 个文件全部搬入、一行没漏、0 个缺失。
+   这是**可复制的样板**:先搬一块完整子系统,不改写。
+2. **索引与检索层(75 个缺失)** —— 最大的一块空缺。schema 原件已在树里可调(P2),但
+   `memory/` 下 75 个文件要逐个判断:哪些是记忆逻辑(搬),哪些依赖共享 SQLite 的
+   WAL 协调与 reader admission(L3,解法是独立 `memory.sqlite`)。
+3. **`memory-core/其余` 59 个缺失** —— 含 `migration/`(8 个)与 `remote/`(1 个)。要先分清
+   哪些是记忆语义、哪些是 openclaw 的 doctor/setup 控制面。
+4. **L3 两处**(`session-entry-projection.ts`、`session-transcript-corpus.ts`)—— 不是"搬不过来",
+   是"改写依赖方"。这一档要先决定改写策略,再动手。
+5. **改写幅度低的已搬文件要复核** —— `memory-forget.ts` 只有 16% 上游行留在 mem-plus,
+   `trigger-recall.ts` 37%。这两个是**我或前人搬的**,要逐行看剩下那 84%/63% 是什么:
+   是接缝(合理)还是自创(要换回上游)。
+
 ## 宿主集成最小契约(通读后整理)
 
 openclaw 宿主必须提供、而记忆侧实际消费的:
