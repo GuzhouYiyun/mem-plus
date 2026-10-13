@@ -282,6 +282,47 @@ provenance 而从"不可做"变成"可做"。
 前三次是 schema、chunker、会话投影,这是第四次。**这个模式不是个别失误**,而是裁剪期的
 系统性做法:原件搬下来留着,旁边另写一套顶上。
 
+### 上游原件在树里没人用 —— 一次查完(2026-10-13)
+
+`packages/memory-host-sdk` 59 个文件、8071 行,静态扫描:
+
+| | 文件 |
+|---|---|
+| `plugin/`/`extensions/`/`web/` 直接用 | **7** |
+| 只有 SDK 内部引用 | **42** |
+| **完全无人引用** | **10 个,1919 行** |
+
+死的 10 个含两个大的:`host/session-files.ts`(924 行,**P1 那条 L3 承重接口本身**)、
+`host/memory-schema.ts`(727 行,上游的 schema 迁移与严格校验)。其余:`embedding-chunk-limits.ts`、
+`embedding-vectors.ts`、`remote-http.ts`、`runtime-core.ts`、`engine-sessions.ts`、
+`runtime-files.ts`、`status.ts`、`multimodal.ts`。
+
+**这修正了一个一直被持有的说法。** 我之前把 mem-plus 描述成"上面薄适配、底下平行实现";
+实测更准确的是:**上游原件整片搬下来、放着不用,旁边另写一套顶替。** schema、chunker、
+会话投影三次命中同一件事。
+
+**方向因此与"缺功能"相反**:大块原件在仓库里,只是没接。所以工作的框架不是"往里加功能",
+而是"把已经在的东西接上"。
+
+### 接线时必须照抄的三处 chunking 细节
+
+上游唯一的生产调用点是 `manager-index-preparation.ts:70`,其参数准备有三处不可省的语义:
+
+```ts
+const perEntry =
+  source === "memory" && (normalizedEntryPath === "MEMORY.md" || normalizedEntryPath === "USER.md");
+const indexingContent = source === "memory" ? stripMemoryAnnotationCarriers(content) : content;
+const chunkOptions = { ...chunking, perEntry };
+```
+
+- `perEntry` 按 **source + 路径**判,与 `memory-recall-metadata.ts:231` 的 curated 白名单同一
+  判据。印证了"上游按路径判候选层"。
+- **`stripMemoryAnnotationCarriers(content)`** —— memory 语料在进 chunker 前先剥掉注解载体。
+  mem-plus 把 `<!-- trigger: ... -->` / `<!-- importance: N -->` 原样留在 `unit.text` 里并进
+  FTS,所以 mem-plus 的索引里能搜到注解、trigger 命中会被注解文本干扰。**这是一处新的偏离,
+  接线时必须一并照抄,否则检索行为不等价。**
+- `MEMORY_CHUNKING_VERSION = 5` 是索引身份的一部分:切块规则变了要整库重建。
+
 ## 偏离登记(照搬过程中确认的每一处)
 
 偏离必须写在这里,不留在代码注释里 —— 注释会过期,而且没人会读。判据 1 要求"抄不进来的写出
