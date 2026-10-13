@@ -1,9 +1,102 @@
-# 计划:把 openclaw 的记忆模块完整接进 OpenCode(2026-10-13)
+# 计划:剥出 openclaw 的记忆子系统,插入 OpenCode(2026-10-13)
 
-**方向已定:不再是"裁剪到只剩记忆",而是"把 openclaw 的记忆插件整体拔下来、换掉接口、
-插入 OpenCode",实现与 openclaw 等价的行为。** 本文件取代 `trim-plan.md` 的 S2–S6
-裁剪路线 —— 那条路线是为"最小可用"设计的,与本计划的目标相反。`trim-plan.md` 保留为
-裁剪期的历史记录。
+## 目的(用户原话校准,2026-10-13)
+
+> 把 openclaw 的记忆插件拔下来装在 opencode 上。不是原封不动 —— 对 openclaw 来说这个
+> 记忆是它**体内的一个部件,融合在一起了**。我们做的是**把它剥干净,然后插入 opencode**。
+
+这修正了此前"整体照搬"的说法。三条判据:
+
+1. **逻辑、行为、常量、schema 都是 openclaw 的。** 能逐字节抄就逐字节抄;抄不进来的
+   写出理由。
+2. **自己写的代码只允许是接缝。** OpenCode 的插件钩子、文件路径、会话读写、模型调用、
+   配置、SQLite 运行时 —— 这些位置写适配层,除此之外不该有自己的实现。
+3. **任何一段行为都能指到出处**:openclaw 哪个文件哪一行,或者"这是接缝所以必须自己写"。
+
+**"剥"的单位不是文件,是接缝。** 每一处 import、每一次调用都要判:记忆逻辑(搬)还是
+openclaw 躯干(换掉)。同一个文件里两种都有 —— `recall.ts` 里"该不该召回"是记忆逻辑,
+"怎么开子会话、怎么读 transcript"是躯干。所以转接头不是一个顶层薄层,而是分散在搬进来
+的代码里的很多小接缝,每个接缝一个。
+
+## 现状与目的相反(2026-10-13 实测)
+
+mem-plus 今天的形状是**上面一层薄适配、底下一整套平行实现**:
+
+| | 实测 |
+|---|---|
+| 记忆子系统生产文件(openclaw 侧) | 308 |
+| 其中逐字节等于上游的文件 | **37** / 194 |
+| `plugin/src/memory-index.ts` | 1120 行自创,openclaw 无同名文件 |
+| `plugin/src/deep-recall.ts` | 25 KB 自创,顶替上游 `extensions/active-memory/` 17 文件 184 KB,原件已被删 |
+| `extensions/active-memory/` | 只剩 2 个文件(`escalation.ts`/`types.ts`,均逐字节等于上游),且是 `files` 里唯二被手工加进去的 |
+
+自创的部分在下面,转接头混在上面某一层 —— 与判据 2 相反。
+
+## 接缝地图(2026-10-13 实测,308 个生产文件的外部 import)
+
+**174 个不同的外部模块。** 这是转接头工作量的真实规模,此前一直低估。
+
+### E 类:纯工具库(~12 个)—— 不需要接缝,原样抄
+
+`@openclaw/normalization-core` 8 个子路径(agent-id / cjk-chars / error-coercion /
+node-crypto / number-coercion / record-coerce / string-coerce / utf16-slice)、
+`@openclaw/fs-safe` 4 个、`@openclaw/media-core/mime`、`@openclaw/retry`、
+`p-limit`、`p-map`、`typebox`。
+
+### D 类:plugin-sdk 门面(约 60 个)
+
+多数是 A/B/C 三类在 plugin-sdk 上的转发。其中 `memory-core-host-engine-*`(foundation /
+schema / indexing / storage / curated / embeddings / knn / fs / sessions)、
+`memory-host-search`、`memory-host-markdown`、`memory-host-core` —— **这些是记忆本身,
+不是躯干**,属于"原封不动"的部分。
+
+### A 类:openclaw 配置系统(~35 个)
+
+`config/config`、`config/paths`、`config/state-dir`、`config/types.memory`、
+`config/types.openclaw`、`config/types.secrets`、`config/types.tools`、
+`config/sessions/*`(11 个:accessor / paths / archive-compression / artifacts /
+main-session / session-accessor / session-canonical-key / session-cold-storage-read /
+session-cold-storage-state / session-history / session-incognito-binding /
+transcript-target-binding)、`config/byte-size`、`config/config-env-vars`、
+`plugins/config-schema`、`state/openclaw-agent-db.paths`、`plugin-state-runtime`。
+
+### B 类:openclaw 会话存储(~22 个)
+
+`config/sessions/session-accessor`、`session-cold-storage-read`、
+`transcript-target-binding`、`sessions/transcript-events`、`sessions/input-provenance`、
+`sessions/session-key-utils`、`routing/session-key`、`session-store-runtime`、
+`session-store-paths`、`session-transcript-runtime`、`session-transcript-hit`、
+`session-visibility`。
+
+### C 类:openclaw 运行时底座(~25 个)
+
+`infra/sqlite-wal` / `sqlite-strict` / `sqlite-transaction` / `sqlite-schema-contract` /
+`sqlite-schema-facts` / `kysely-sync`、`infra/net/ssrf` / `fetch-guard` / `proxy-env`、
+`logging/redact` / `secret-redaction-registry` / `subsystem`、
+`utils/run-with-concurrency` / `shell-argv`、`shared/global-singleton`、
+`infra/home-dir`、`infra/warning-filter`、`agents/current-time`。
+
+### 其他
+
+`agents/agent-roster` / `agent-scope` / `agent-settings` / `internal-runtime-context` /
+`memory-search` / `model-auth` / `workspace-access` / `workspace-default-path`、
+`auto-reply/heartbeat` / `strip-inbound-meta`、`cli/parse-duration`、
+`plugins/embedding-provider-types`、`plugins/memory-state`、`plugins/types`、
+`memory/root-memory-files`、`gateway-client/timeouts`、`auto`、`commander`。
+
+**注意:逃出包根的相对引用 0 个**(全是包说明符或同包相对),所以剥的时候不存在
+"记忆子系统偷偷用 openclaw 私有文件"的情况 —— 每一条都在上面列出了。
+
+## 施工顺序(按判据,不按子系统排队)
+
+1. **分类这 174 个模块**:记忆逻辑 / openclaw 躯干 / 纯工具库。产出物是本文件的表。
+2. **把躯干归并成接缝**:每个接缝写"openclaw 的 X ← OpenCode 的 Y",OpenCode 侧没有
+   对应物的才需要自己写胶水。A/B/C 共约 80 个模块,真正独立的接缝估计十几个。
+3. **逐个把自创实现换成对上游的调用**,自己那份收缩成接缝。先清点、再替换,不做半成品:
+   - 半成品的形态是"文件在但没人调"或"调用方指向不存在的导出",后者正是当初触发删除
+     `extensions/active-memory/` 的原因。
+   - `package.json` 的 `files` 是**逐文件列举**(全表 66 个 `extensions/*` 条目),搬回来的
+     每个文件都要单独加进去,否则装到用户机器上就是死的。
 
 ## 已完成(截至 2026-10-13,均在 git 内)
 
@@ -11,203 +104,129 @@
 |---|---|
 | 项目作用域写端+读端+注入过滤(跨仓库泄漏) | `6f48c887` |
 | `memory_index_state` 补表 + 4 处裁剪断裂 | `2ab81096` |
-| `memory forget` 全链 + 索引清理 | `80408f77` |
+| `memory forget` 全链 + 索引清理(照抄上游,`memory-forget-content.ts` 逐字节) | `80408f77` |
 | 配置表单 24→39 键 + 网页「忘记」入口 | `ea8e47b3` |
-| 全量导入扫描:记忆链 0 断裂 | 验证手段,非提交 |
+| 召回过的轮次不进快照(照 `session-files.ts:453,781,788-794` 的形状) | `f3895764` |
+| 召回标记改用 `messageID`(修正上一条用文本摘要的妥协键) | `c7f3d459` |
 
-## P0 自我学习回路(功能不等价,且会累积)
+**两个判断错误的更正**,都写进了代码注释:`turnTainted` 是网络来源位不是记忆污染位;
+上游 `isRecalledMemoryMessage` 的标记全树没有生产者。详见下面 P0。
 
-**上游为什么要有 session corpus。** 上游有 Lane 2(active-memory escalation):提问含召回
-意图时,agent 带 `memory_search` 跑一轮检索,结果拼进上下文。于是记忆会进对话。三层防线
-切断自我放大:
+## P0 自我学习回路 —— 已闭合
 
-1. `classifySessionMessageOrigin`(`session-provenance.ts:9-11`)—— 被召回污染的轮次,
-   消息判 `untrusted`
-2. `isPromotionOriginBlocked`(`dreaming-consolidation-candidates.ts:11-16`)——
-   `untrusted` / `system` **结构性禁止**晋升,不是扣分
-3. 入库前 redact,并删除"运行时标记为召回的上下文"
+**上游的机制不是"标记后拦晋升",是入库时直接不存。** 逐条核实:
 
-**mem-plus 的回路是通的。** `isShortTermMemoryPath` 的规则
-`memory/<proj>/<日期>-<任意后缀>.md` 同时匹配 daily entry 与 **session snapshot**;快照
-是完整对话原文(`snapshot.ts:189`),含 assistant 回复,因而含 Lane 2 检索出来的记忆:
+- `turnTainted` 是**网络来源位**(`ToolResultContentSource` 唯一成员 `"network"`),
+  `memory_search` 明确不声明它,断言在 `prepare.test.ts:2654`;
+  `extensions/active-memory/` 对它零命中。
+- 上游真正的防线 `isRecalledMemoryMessage`(`session-files.ts:453`)读
+  `provenance.sourceTool ∈ {memory_search, memory_get}`,但 `InternalTurnSource` 是封闭
+  联合类型塞不进去,全树唯一出现处是测试 fixture —— **上游这条保证运行时恒不触发**。
+- 它做的事是 `continue`(`:788-794`),不是打标:被污染轮次的全部消息根本不写进语料,
+  粒度是整轮,连触发它的那条 user 消息本身也不存(标记在 `:781` 置位、排除测试在 `:788`)。
 
-```
-memory_search 召回旧记忆 → 拼进提示词 → assistant 复述 → 快照落盘 → 索引为 kind=turn
-  → isShortTermMemoryPath 判定为候选 → recordShortTermRecalls 记录 → 进晋升候选池 → 晋升进 MEMORY.md
-```
+**照抄这个形状,不照抄缺失的生产者。** 落地在 `plugin/src/recall-taint.ts` 与
+`snapshot.ts`,判据挂在开启该轮的 user 消息上(上游同一位置)。探针 22 项全过。
 
-后果:一次检索被固化成永久记忆,之后每轮都在提示词里。且与项目作用域叠加 —— 晋升时
-`projectKey` 会带上,于是这条自我生成的记忆还被限定到那个仓库,更难被发现。
+## P1 上游的第二道防线:`turnTainted`(网络来源)—— 依赖 P2
 
-**现状:三层防线 mem-plus 一层都没有。** capture 只收用户输入挡不住它(路径是快照不是
-capture);快照 unit 的 `kind` 是 `turn`,`origin_class` 由 `memory-path-provenance.ts` 按
-**路径**判定,不看内容是否含召回结果。
+某工具结果来自网络时该 assistant 消息判 `untrusted`
+(`session-provenance.ts:9-11`),被 `isPromotionOriginBlocked`
+(`dreaming-consolidation-candidates.ts:11-16`)结构性禁止晋升。效果是"网页抓来的一句话不会
+被固化成永久记忆"。
 
-**要做的事(全部照抄上游,不自创):**
-- 引入 `classifySessionMessageOrigin` 及其依赖的 `__openclaw.turnTainted` 判定
-- 在 OpenCode 的消息通路上找到等价于 `turnTainted` 的落点 —— **这是关键未知项**,可能
-  需要 OpenCode 侧提供轮次污染标记,也可能存在已有字段可复用
-- 检索投递时给被注入的轮次打标,使写快照时能识别
-- 确认 `MEMORY.md` 晋升链路上 `originClass = "untrusted"` 会被
-  `isPromotionOriginBlocked` 拦住
+**它同时卡在两处**:
 
-## P0 自我学习回路 —— 已闭合(2026-10-13)
+- 粒度:mem-plus 的 `origin_class` 是 `documents.origin_class`,**一个文件一个值**;上游是
+  `memory_index_chunk_provenance` 按 `chunk_id`,**逐块**。一条快照里混着抓来的内容和自己的
+  话,无法只标其中一条。
+- 来源判定:上游靠自己的工具注册表逐个声明 `resultContentSource`,mem-plus 没有那张表。
 
-**上游的机制不是"标记后拦晋升",是入库时直接不存。** 这一条纠正了本文件初稿的
-判断。初稿写的是"`turnTainted` → `untrusted` → `isPromotionOriginBlocked` 三层",
-调研后两层的前提都不成立:
+**OpenCode 侧的落点已找到**(上一轮的调研结论,当时被我以"OpenCode 没有"草草否定):
 
-- `turnTainted` 是**网络来源位**,不是记忆污染位。它的 `ToolResultContentSource`
-  联合类型只有一个成员 `"network"`(`packages/agent-core/src/types.ts:487`),web-search
-  / web-fetch / 全部 MCP 工具都声明它,而 `memory_search` / `memory_get` **明确不声明**
-  —— 有断言(`src/agents/cli-runner/prepare.test.ts:2654`)。`extensions/active-memory/`
-  对 `turnTainted` 零命中。
-- 上游真正的防线是 `isRecalledMemoryMessage`(`session-files.ts:453`),它读
-  `provenance.kind === "internal_system"` + `sourceTool ∈ {memory_search, memory_get}`。
-  **这个标记在 2026.9.9 全树没有生产者**:`InternalTurnSource` 是封闭联合类型,塞不进
-  `memory_search`(`src/auto-reply/templating.ts:316`),唯一出现处是测试 fixture。所以
-  上游这条保证目前是空的,`insideRecalledMemoryTurn` 运行时恒为 false。
-- 而它做的事是 `continue`(`session-files.ts:788-794`),不是打标:被污染轮次的全部
-  消息**根本不写进语料**。粒度是整轮,连触发它的那条 user 消息本身也不存(标记在
-  :781 置位,排除测试在 :788)。因此它不需要 provenance 列、不需要 origin class、
-  不需要晋升闸门 —— 没写过的东西无法被检索、晋升或重放。
+| 上游 | OpenCode 对应 |
+|---|---|
+| 工具结果的网络来源 | `ctx.tool.hook("execute.after")`,带 `tool` + `sessionID` + `agent` + **`messageID`** + `id`,`after` 还给 `result: Tool.Result`(`@opencode/plugin` `promise/tool.d.ts:38-53`) |
+| 网络内容的身份 | `ctx.websearch` 是一等 domain,结果自带 `url` |
+| `message.provenance` | `SessionMetadata`:durable、任意键、JSON 值、**fork 时继承**(`schema/dist/session-metadata.d.ts`) |
+| Lane 2 的子会话 | `session.fork(input: SessionForkInput)`,`SessionFork.Boundary` 是 `{type:"before"\|"through", messageID}`(`client.d.ts:42`) |
 
-**照抄这个形状,不照抄缺失的生产者。** 落地:`plugin/src/recall-taint.ts` 按上游
-`session-files.ts:453,781,788-794` 的结构实现排除,`snapshot.ts` 在渲染时套用,
-`recall-inject.ts` 在 `prompt` 钩子里记录"这条提问触发了深召回"。判据挂在**开启该轮的
-user 消息**上,与上游同一位置;OpenCode 的 `ctx.session.message` 只读,插件无法给已发出
-的消息打标,故用提问文本作键 —— 这是该位置在 mem-plus 里唯一可区分的属性。
+`Tool.Result.metadata` 也是一条通道。`ctx.session` 目前的 `SessionDomain` Pick 未暴露
+`fork`,但 `ctx.rpc` 是通用 RPC 面。
 
-**验证(探针已删):** 单测 12 项 + 端到端经 `renderSessionSnapshot` 10 项,全过。端到端
-读到落盘 markdown:污染轮的提问与 assistant 复述**都不在文件里**,同会话其余轮次完整保留,
-重复渲染结果一致(标记不在写快照时清空,否则下一次快照会把旧轮次当成干净的写回去)。
-`tsc plugin` 改动前后同为 4240 错、全在 `src/`(4097)与 `packages/`(143),`plugin/` 与
-`extensions/` 各 0,未引入新错。
+**仍未定**:哪些工具算"网络来源"。上游自己的注册表规定 web-search/web-fetch/browser/
+firecrawl/全部 MCP 都算。OpenCode 侧可从 `ctx.websearch` 与 `ctx.mcp` 取,但"其它插件注册
+的工具"上游没规定 —— 不自己发明。
 
-**为什么 mem-plus 更容易踩:** 上游 Lane 2 跑在**子会话**(`recall-run.ts:141` 给
-session key 加 `active-memory:` 前缀),污染的是子会话的 transcript,父对话干净。mem-plus
-的 Lane 2 直接用 `ctx.generate.text` 在**当前会话**跑(`deep-recall.ts`),结果和模型的
-复述一起落在本轮里,被 `snapshot.ts` 捕获。这不是 mem-plus 缺了上游的防线,而是同一个
-上游漏洞在 mem-plus 的架构下更容易踩到。
+## P2 索引层 —— 上游原件已在树里,只是没人调
 
-## P1 上游的第二道防线:`turnTainted`(网络来源)—— 仍未搬,需要先定 schema
-
-上游还有一条**独立**的防线,mem-plus 没有:某个工具结果来自网络时,该 assistant 消息判
-`untrusted`(`classifySessionMessageOrigin`,`session-provenance.ts:9-11`),于是被
-`isPromotionOriginBlocked`(`dreaming-consolidation-candidates.ts:11-16`)结构性禁止晋升。
-后果是"网页上抓来的一句话不会被固化成永久记忆"。
-
-**mem-plus 搬不了这一条,原因是粒度。** mem-plus 的 `origin_class` 是
-`documents.origin_class`,**一个文件一个值**,由 `memory-path-provenance.ts` 按路径判定。
-一条快照里混着抓来的内容和自己的话,无法只标其中一条。上游是
-`memory_index_chunk_provenance` 按 `chunk_id`,**逐块**。
-
-补这一条要先给 `units` 加 `origin_class`,即 P2 的 schema 决定先于 P1。**不静默跳过,
-也不擅自改 schema** —— 记在这里等你定。
-
-## P2 索引层换成上游 `memory_index_*` —— 已勘察,未动手
-
-上游六个 schema 模块**全部已在 vendored 树里**(`packages/memory-host-sdk/src/host/`),
-import 全是本地的,断裂扫描 0:`memory-schema-base.ts`(92 行)、
-`memory-schema-fts.ts`(311)、`memory-schema-provenance.ts`(60)、
-`memory-schema-recall.ts`(78)、`memory-schema.ts`(691)、
+上游六个 schema 模块**逐字节已在 vendored 树中**,import 全本地:
+`memory-schema-base.ts`(92)、`memory-schema-fts.ts`(311)、
+`memory-schema-provenance.ts`(60)、`memory-schema-recall.ts`(78)、`memory-schema.ts`(691)、
 `memory-schema-storage-migration.ts`(419)。
 
-**因此 schema 层不需要手写一行 DDL**:直接调 `buildMemoryIndexStrictSchema({
+**因此 schema 层不需要手写一行 DDL** —— 直接调 `buildMemoryIndexStrictSchema({
 embeddingCacheTable, includeEmbeddingCache })`,FTS 调 `ensureMemoryChunkFtsSchema` /
-`ensureMemoryPathFtsSchema`。这比"照着抄"更可靠 —— 抄也会抄错。
+`ensureMemoryPathFtsSchema`。比"照着抄"更可靠,抄也会抄错。
 
-### 表的对应
+现状是它们只被 `packages/memory-host-sdk` 内部三个文件引用,`plugin/src/**` 零引用,同时
+另写了一套 `documents`/`units`/`units_fts`/`vectors`。**schema 搬下来了,在它旁边另起了一套。**
 
-| 上游 | mem-plus 现状 | 备注 |
-|---|---|---|
-| `memory_index_meta` (key/value) | — | 新增 |
-| `memory_index_sources` (id, path, source, hash, mtime, size) | `documents` | chunk 按 path+source 归属,**无 FK** |
-| `memory_index_chunks` (id TEXT UNIQUE, path, source, start_line, end_line, hash, model, text, **embedding BLOB NOT NULL**, updated_at) | `units` | `id` 从 INTEGER 变 TEXT |
-| `memory_index_chunk_provenance` (chunk_id, origin_class, session_kind, observed_at, supersedes_key) | `documents.origin_class/session_kind/observed_at/supersedes_key` | **粒度从文件变块,更细** —— P3 网络来源防线靠它 |
-| `memory_index_chunk_recall_metadata` (chunk_id, importance, triggers, project_key) | `units` 上的同名列 | 拆成侧表 |
-| `memory_index_chunks_fts` | `units_fts` | 见下,列不同 |
-| `memory_index_paths_fts` | — | 新增 |
-| `memory_index_chunks_vec` | `vectors` | |
-| `memory_index_state` | 已补 | |
-| `memory_embedding_cache` | — | 新增,可选 |
+`index.db` 全部可从磁盘重建(正文在 memory 文件里,血缘在 sidecar 文件里),所以**不需要数据
+迁移**,代价是一次 reindex。
 
-**嵌入列的坑**:`embedding BLOB NOT NULL` 看着会掐死无模型的全文安装,但上游在无向量时写
-**空 blob**(`memory-schema-storage-migration.ts:360` 的 `encodeMemoryEmbedding(... ?? [])`)。
-照抄这个约定即可,全文-only 不受影响。
+`embedding BLOB NOT NULL` 看着会掐死无模型的全文安装,但上游无向量时写**空 blob**
+(`memory-schema-storage-migration.ts:360` 的 `encodeMemoryEmbedding(... ?? [])`),
+照抄即可。
 
-### 上游的 schema 装不下的东西(逐条核对过)
+**照抄会真的删掉两样现在能用的东西**:
 
-| mem-plus | 上游有无 | 判断 |
-|---|---|---|
-| `documents.root` (home/wiki) | **无**。`MemorySource` 是封闭联合 `memory \| sessions`(`host/types.ts`),wiki 语料塞不进 `source` | 可从 `path` 推出(wiki 在另一个根下),无需列 |
-| `documents.project` (项目 slug) | **无**。上游只有 `recall_metadata.project_key`(来自注解的仓库身份,是另一回事) | 可从 `path` 相对 memory home 推出 |
-| `units.kind` (entry/turn/memory/wiki) | **无**。上游按路径判候选(`chunk.path IN ('MEMORY.md','USER.md')`、`isShortTermMemoryPath`) | 照上游改成按路径判 |
-| `units.entry_type` | **无** | 从条目正文注解里取,与上游 `extractCuratedEntryRecallMetadata` 读 trigger/importance 同一手法 |
-| `units.day` / `ts` | **无** | 从 heading 文本与路径日期推出 |
-| `units.marker` | **无** | 上游无此概念。dedup 需另寻(chunk `id` 或 hash) |
-| `units.tags` / `heading` 在 FTS 里可搜 | **无**。上游 FTS 列是 `text, id, path, source, model, start_line, end_line` | **真实功能损失**:`filters.tag` 全文搜标签会失效 |
+- `units.tags` / `units.heading` 在 mem-plus 的 FTS 里可搜;上游 FTS 列是
+  `text, id, path, source, model, start_line, end_line`,**没有 tags 也没有 heading**。
+- `units.marker` 无对应概念,而 mem-plus 的 capture 靠它防重复写入,还有唯一索引兜着。
 
-### 为什么不能分步做
+**上游 schema 装不下的六项**(可从前四项推出,后两项不行):
+`documents.root`(home/wiki,`MemorySource` 是封闭联合 `memory | sessions`)、
+`documents.project`、`units.kind`、`units.entry_type`、`units.day`/`ts`、`units.marker`。
 
-只建表不切换读写 = 发出一批没人读的死表,正是 AGENTS.md 记的那个坑
-(`extensions/active-memory/` 13 个死文件,3718 行,不进 `files`、永不加载)。
-反过来先切读再写 = 索引直接坏。所以这是一次改动:schema + writer + reader + 派生概念
-一起换。
+## P3 `extensions/active-memory/` 15 个文件 —— 试搬过,能编译,但不能只搬
 
-### 好消息:不需要数据迁移
+**已验证**(2026-10-13):15 个文件逐字节从 openclaw 复制进 `extensions/active-memory/` 后,
 
-`index.db` 全部可从磁盘重建 —— 正文在 memory 文件里,血缘在 `memory-artifact-provenance`
-的 sidecar 文件里。建新表、全量重写、丢旧表,首次打开时强制一次 reindex 即可。
-用户侧的代价是一次重建,不是一段迁移代码。
+- 相对 import 全部可解析 —— `index.ts` 缺的 `./trigger-recall.js` 有了,当初那两处断裂
+  是同一次删除造成的
+- 19 个 `openclaw/plugin-sdk/*` 依赖全部存在(`src/plugin-sdk/` 有,生成的 alias 树也有)
+- `tsc -p tsconfig.plugin.json`:0 条新错误,总数仍 4240,`active-memory` 内 0 条
 
-### 触及面(实测)
+**所以"裁剪期删掉它们"在类型门上找不到任何依据。**
 
-`plugin/src/` 下 14 个文件:`memory-index.ts`(1120 行,88 处引用)、`memory-parse.ts`(22)、
-`memory-forget.ts`(19)、`memory-tools.ts`(14)、`memory-scan.ts`(10)、`web/api.ts`(3)、
-`project-memory.ts`(2),加 `index.ts` / `paths.ts` / `project-key.ts` /
-`config-file.ts` / `wiki/config.ts` / `trigger-recall.ts` / `ReindexRow.tsx` /
-`translations.ts`。
+**但直接搬回来是错的**:`package.json` 的 `files` 是**逐文件列举**,`extensions/active-memory/`
+下只有 `escalation.ts` 和 `types.ts` 被手工加进去。那 15 个文件不在 `files` 里 = 打包带不走
+= 装到用户机器上就是死的,与当初被删时的处境一模一样。**已 `git clean` 撤回,不留半成品。**
 
-### 开工前需要定的两件事
+真正要处理的是双份 `trigger-recall`:
 
-1. **`units.tags` 的全文搜索**:上游 FTS 没有 tags 列。照上游 = 标签搜不了。是接受这个
-   损失,还是把 tags 拼进 `text` 索引(等于偏离上游)?
-2. **`units.marker` 的 dedup**:上游没有这个概念,而 mem-plus 的 capture 靠它防重复。
-   换成 chunk `id` 的生成规则,还是要另设?
+| | |
+|---|---|
+| `plugin/src/trigger-recall.ts` | 声明 `PORTED from openclaw extensions/active-memory/trigger-recall.ts (418 行)`,**已改写**,导 5 个符号 |
+| `extensions/active-memory/trigger-recall.ts` | 上游原件,导 7 个符号 |
 
-这两条是"照抄上游"会真的**删掉现有功能**的地方,不是我拿它当借口。
+差的是 `index.ts` 唯一要用的两个:`forgetTriggerRecallRun`、`TriggerRecallSource`。所以不是
+"改 import 指过去"就行 —— 得让 `plugin/src/` 那份改成转接上游,或直接删掉全部改用上游。
 
-## 已确认无法搬的(缺对应宿主接口,不需要改)
+## 已确认无法搬的(缺对应宿主接口)
 
 - CLI(`openclaw memory` 9 个子命令)—— OpenCode 无此运行时
 - gateway RPC(`memory.search/get/status`)—— 同上
+- cron 驱动的 dreaming —— OpenCode 无 cron,现为"新一天第一个 settle 的对话"(用户已确认可接受)
 - doctor 6 项迁移与检查 —— 裁剪期整体删除
-- cron 驱动的 dreaming —— OpenCode 无 cron,现为"新一天第一个 settle 的对话"
-- 文件监听 —— 现为显式 `memory_reindex`
 - worker 架构 —— 现为单进程同步
-
-## 调研已完成(2026-10-13)
-
-1. **OpenCode 有无 `turnTainted` 等价物** —— 无。二进制(`@opencode/cli` 2.0.27)与
-   `@opencode/schema` / `@opencode/plugin` 2.0.20 的类型定义里,`taint` / `provenance` /
-   `recalled` / `injected` / `fromMemory` 全部零命中。可用的落点有三个:`ctx.storage`
-   插件私有 KV、`ctx.session.update({metadata})`、消息创建时的 `metadata`;**给已发出的
-   assistant 消息打标不可行**,`session.message` 只读。结构性障碍:`context` 钩子不带
-   `messageID`,投递时不知道是哪个用户消息触发了这一轮 —— 这正是 P0 改用提问文本作键的
-   原因。
-2. **上游 `turnTainted` 的写入点** —— `packages/agent-core/src/turn-taint.ts:41-53`
-   `withAssistantTurnTaint`,四处写入,语义统一为"本轮有 `resultContentSource: "network"`
-   的工具结果"。与记忆召回无关。
-3. **P0 的最小可行形态** —— 已落地,见上。选的是上游自己的形状(整轮排除),不是
-   "检查内容是否包含注入文本",因为后者粒度更细但会漏掉改写过的复述。
 
 ## 验收口径(沿用 AGENTS.md)
 
 不靠类型门。每一项必须有:真实数据走过该路径 + 可复核的落盘证据。
-`MEMORY.md` 那层至今零验证 —— daily 层已实测(7 条真注解、reindex 后 `project_key`
-落库),promotion 写 `MEMORY.md` 注解这条路还没被真实数据走过,而泄漏恰好发生在那一层。
+`MEMORY.md` 那层至今零验证 —— daily 层已实测(7 条真注解、reindex 后 `project_key` 落库),
+promotion 写 `MEMORY.md` 注解这条路还没被真实数据走过,而泄漏恰好发生在那一层。
 
-**P0 已闭合,但只在探针数据上验证过,尚未经真实会话走一遍。** 真实验证需要一个
-"提问触发深召回 → 该轮快照落盘"的会话,并复核落盘文件里没有那轮内容。**这一条没做完
-之前,P0 不算验证过。**
+**P0 已闭合,但只在探针数据上验证过,尚未经真实会话走一遍。** 真实验证需要一个"提问触发深
+召回 → 该轮快照落盘"的会话,并复核落盘文件里没有那轮内容。**这条没做完之前,P0 不算验证过。**
