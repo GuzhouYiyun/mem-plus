@@ -105,12 +105,78 @@ session key 加 `active-memory:` 前缀),污染的是子会话的 transcript,父
 补这一条要先给 `units` 加 `origin_class`,即 P2 的 schema 决定先于 P1。**不静默跳过,
 也不擅自改 schema** —— 记在这里等你定。
 
-## P2 索引层与上游对齐(可选,视目标)
+## P2 索引层换成上游 `memory_index_*` —— 已勘察,未动手
 
-mem-plus 的 `documents`/`units`/`units_fts`/`vectors` 是自建 schema,上游是
-`memory_index_*`。行为等价(已验证:forget 的清理按同一规则落地),但结构不同。若目标
-是"以后能持续对照上游",把 schema 对齐会让后续搬入零成本,并且顺带让 P1 可做;若目标是
-"能跑就行",现状够用。**这一条要你定,不是技术问题。**
+上游六个 schema 模块**全部已在 vendored 树里**(`packages/memory-host-sdk/src/host/`),
+import 全是本地的,断裂扫描 0:`memory-schema-base.ts`(92 行)、
+`memory-schema-fts.ts`(311)、`memory-schema-provenance.ts`(60)、
+`memory-schema-recall.ts`(78)、`memory-schema.ts`(691)、
+`memory-schema-storage-migration.ts`(419)。
+
+**因此 schema 层不需要手写一行 DDL**:直接调 `buildMemoryIndexStrictSchema({
+embeddingCacheTable, includeEmbeddingCache })`,FTS 调 `ensureMemoryChunkFtsSchema` /
+`ensureMemoryPathFtsSchema`。这比"照着抄"更可靠 —— 抄也会抄错。
+
+### 表的对应
+
+| 上游 | mem-plus 现状 | 备注 |
+|---|---|---|
+| `memory_index_meta` (key/value) | — | 新增 |
+| `memory_index_sources` (id, path, source, hash, mtime, size) | `documents` | chunk 按 path+source 归属,**无 FK** |
+| `memory_index_chunks` (id TEXT UNIQUE, path, source, start_line, end_line, hash, model, text, **embedding BLOB NOT NULL**, updated_at) | `units` | `id` 从 INTEGER 变 TEXT |
+| `memory_index_chunk_provenance` (chunk_id, origin_class, session_kind, observed_at, supersedes_key) | `documents.origin_class/session_kind/observed_at/supersedes_key` | **粒度从文件变块,更细** —— P3 网络来源防线靠它 |
+| `memory_index_chunk_recall_metadata` (chunk_id, importance, triggers, project_key) | `units` 上的同名列 | 拆成侧表 |
+| `memory_index_chunks_fts` | `units_fts` | 见下,列不同 |
+| `memory_index_paths_fts` | — | 新增 |
+| `memory_index_chunks_vec` | `vectors` | |
+| `memory_index_state` | 已补 | |
+| `memory_embedding_cache` | — | 新增,可选 |
+
+**嵌入列的坑**:`embedding BLOB NOT NULL` 看着会掐死无模型的全文安装,但上游在无向量时写
+**空 blob**(`memory-schema-storage-migration.ts:360` 的 `encodeMemoryEmbedding(... ?? [])`)。
+照抄这个约定即可,全文-only 不受影响。
+
+### 上游的 schema 装不下的东西(逐条核对过)
+
+| mem-plus | 上游有无 | 判断 |
+|---|---|---|
+| `documents.root` (home/wiki) | **无**。`MemorySource` 是封闭联合 `memory \| sessions`(`host/types.ts`),wiki 语料塞不进 `source` | 可从 `path` 推出(wiki 在另一个根下),无需列 |
+| `documents.project` (项目 slug) | **无**。上游只有 `recall_metadata.project_key`(来自注解的仓库身份,是另一回事) | 可从 `path` 相对 memory home 推出 |
+| `units.kind` (entry/turn/memory/wiki) | **无**。上游按路径判候选(`chunk.path IN ('MEMORY.md','USER.md')`、`isShortTermMemoryPath`) | 照上游改成按路径判 |
+| `units.entry_type` | **无** | 从条目正文注解里取,与上游 `extractCuratedEntryRecallMetadata` 读 trigger/importance 同一手法 |
+| `units.day` / `ts` | **无** | 从 heading 文本与路径日期推出 |
+| `units.marker` | **无** | 上游无此概念。dedup 需另寻(chunk `id` 或 hash) |
+| `units.tags` / `heading` 在 FTS 里可搜 | **无**。上游 FTS 列是 `text, id, path, source, model, start_line, end_line` | **真实功能损失**:`filters.tag` 全文搜标签会失效 |
+
+### 为什么不能分步做
+
+只建表不切换读写 = 发出一批没人读的死表,正是 AGENTS.md 记的那个坑
+(`extensions/active-memory/` 13 个死文件,3718 行,不进 `files`、永不加载)。
+反过来先切读再写 = 索引直接坏。所以这是一次改动:schema + writer + reader + 派生概念
+一起换。
+
+### 好消息:不需要数据迁移
+
+`index.db` 全部可从磁盘重建 —— 正文在 memory 文件里,血缘在 `memory-artifact-provenance`
+的 sidecar 文件里。建新表、全量重写、丢旧表,首次打开时强制一次 reindex 即可。
+用户侧的代价是一次重建,不是一段迁移代码。
+
+### 触及面(实测)
+
+`plugin/src/` 下 14 个文件:`memory-index.ts`(1120 行,88 处引用)、`memory-parse.ts`(22)、
+`memory-forget.ts`(19)、`memory-tools.ts`(14)、`memory-scan.ts`(10)、`web/api.ts`(3)、
+`project-memory.ts`(2),加 `index.ts` / `paths.ts` / `project-key.ts` /
+`config-file.ts` / `wiki/config.ts` / `trigger-recall.ts` / `ReindexRow.tsx` /
+`translations.ts`。
+
+### 开工前需要定的两件事
+
+1. **`units.tags` 的全文搜索**:上游 FTS 没有 tags 列。照上游 = 标签搜不了。是接受这个
+   损失,还是把 tags 拼进 `text` 索引(等于偏离上游)?
+2. **`units.marker` 的 dedup**:上游没有这个概念,而 mem-plus 的 capture 靠它防重复。
+   换成 chunk `id` 的生成规则,还是要另设?
+
+这两条是"照抄上游"会真的**删掉现有功能**的地方,不是我拿它当借口。
 
 ## 已确认无法搬的(缺对应宿主接口,不需要改)
 
