@@ -879,6 +879,105 @@ promotion 条目被 scrub 掉、`searchText` 搜不到已删内容。
 没造成改动,但下一次不一定。两个根都要指走:`XDG_CONFIG_HOME` 给配置,`OPENCLAW_STATE_DIR` 给
 状态。
 
+## 参照物本身会过期:三次量「与上游的差异」都量错了对象(2026-10-14)
+
+这一节记的是一个**测量方法**的错,不是代码的错 —— 它污染了前面几笔的判断,所以放前面。
+
+起因:扫全树找「自称是 port、上游却有原件」的文件时,`extensions/memory-core/src/
+dreaming-phases.ts`(52 714 字节)排第一,看起来有 58 个 hunk 的本地改动,而且**文件头没有一句
+说明,`docs/port-plan.md` 里也没有登记**。按「照搬上游」的判据,这是最该清理的一处。
+
+三个日期放在一起才看清真相:
+
+| | 日期 |
+|---|---|
+| 本树 vendored 这份文件 | **2026-09-30**(`df09d576 Import memory subsystem from openclaw`) |
+| 本地 openclaw 检出 `d1ebf36cd` | **2026-10-08** |
+| 上游真实 HEAD 改这个文件 | **2026-10-13**(`c8c0e6fbc refactor(plugins): consolidate lifecycle and policy paths (#170596)`) |
+
+也就是说:那 58 个 hunk 里**大部分是上游自己 09-30→10-08 的改动**,mem-plus 只是没收到。而我
+用来当尺子的那个检出,本身也落后真实 HEAD 五天。
+
+(`github.com:443` 对 git 协议时通时不通,所以取历史用 `gh api`:`repos/openclaw/openclaw/
+commits?path=<file>` 拿提交列表,`contents/<file>?ref=<sha>` 拿那天的字节。本地检出是浅克隆,
+`--deepen` 在列 ref 阶段就断,只有 api 走得通。)
+
+**怎么定案的**:`gh api` 取回 09-30 那天的两个文件,和本树逐行比 —— 差异只有 119 行,不是 58 个
+hunk。分类之后,绝大部分是**无理由的风格改写**。
+
+### 撤掉的本地改写(以 09-30 上游为底重建,两份文件现在逐字节等于上游)
+
+`dreaming-phases.ts`:
+
+1. **`lines[index]!` → `typeof line !== "string"` 运行期检查(2 处)。** 两边 tsconfig 都开着
+   `noUncheckedIndexedAccess`(本树 `tsconfig.json` 与上游 `tsconfig.json` 都验过),所以上游的
+   `!` 是必需的,不是可以省的写法。改掉之后数组里有洞就从「抛错」变成「静默丢行」。
+2. **`flatMap` → `for` 循环**(3 处:`buildLightDreamingBody`、`buildRemReflections`、
+   `collectDailyIngestionBatches`)加 `.filter().map()` 类型守卫重构。纯风格,输出相同。
+3. **`collectSessionIngestionBatches({ ...params, state })` → 逐字段列举。** 展开写法不会被
+   漏字段,列举写法会。
+4. **`Math.max(1, Math.max(files.length, 1))`** —— 多套一层,等价。
+5. **两句自己加的注释。** 其中「Use the shared CJK-aware similarity helper so close-but-not-
+   identical CJK snippets do not slip past the dedupe threshold via the old ASCII-only path」
+   底下**根本没有代码差异**:`dedupeEntries` 的函数体与上游逐字节相同,上游本来就在调
+   `snippetSimilarity`。那句注释描述的是一个不存在的本地改动。
+6. **`primaryWorkspaceDir` 与 `nowMs?` 不是本地加的** —— 09-30 上游本来就有;10-08 上游把
+   `nowMs` 收紧成必填。差点照着 10-08 去「修」,那就是把上游的收紧当成自己的漏洞。
+
+`session-ingestion.ts`:**把 `sessionExclusionReason` 的 `policy` 与 `forgottenSessionIds`
+改成可选,并在没传时自己去查 `listMemorySessionTombstones`。** 上游两个参数都是必填,唯一的
+调用方(`dreaming-phases.ts`)两个都传,那条回退分支是死路 —— 而且它每次调用多一次数据库查询。
+一并撤掉,`listMemorySessionTombstones` 的 import 也随之消失(上游没有这条边)。
+
+### 一个我**没有**照搬的上游缺口,登记在此等人拍板
+
+本地被撤掉的一处是真实行为差异,不是风格:
+
+```ts
+// 本树(已撤):分块时除了行数上限,还看拼出来的 snippet 是否超长
+const shouldSplit = chunkLines.length > 0 &&
+  (chunkLines.length >= DAILY_INGESTION_MAX_CHUNK_LINES ||
+   candidateSnippet.length > DAILY_INGESTION_MAX_SNIPPET_CHARS);
+// 上游 09-30 与 10-08 都只有行数上限,所以单个块可以超出 snippet 上限
+if (chunkLines.length >= DAILY_INGESTION_MAX_CHUNK_LINES) { flushChunk(); }
+```
+
+按「照搬上游、不许自创」这条,现在代码是上游的形状,代价是每日语料的单块可能超过
+`DAILY_INGESTION_MAX_SNIPPET_CHARS`。要恢复那个上限,得先确认它进不进 `docs/memory-chain.md`
+的已知缺陷表 —— AGENTS.md 写的是「不静默修上游的已知缺陷」,而这一条没人记过,所以这次按规矩
+照搬并登记,而不是顺手留着。
+
+### 为什么不能直接跳到 10-08 或 HEAD
+
+上游 10-08 的 `dreaming-phases.ts` 已经在调 `resolveSessionIngestionFileCap`,而 10-08 的
+`session-ingestion.ts` 才导出它。追上去要连带把 `src/config/sessions` 整层同步到上游版本,而实测:
+
+- **3 个生产模块完全不在树里**:`session-memory-targets.ts`、`session-memory-targets.types.ts`、
+  `session-transcript-inventory-runtime.ts`;
+- **6 个在树里但内容不同**:`session-accessor.sqlite-contract.ts`(7 418 字节,树里**没有**)、
+  `session-accessor.sqlite-entry.ts`、`session-accessor.sqlite-history.ts`、
+  `session-accessor.sqlite-participant-read.ts`、`session-canonical-key.ts`、
+  `session-entry-read-runtime.ts`、`session-store-path.ts`。
+
+本树的 `src/plugin-sdk/memory-core-host-engine-sessions.ts` **与 09-30 上游逐字节相同**(一度被
+我误判成手写门面),它没有 `loadMemorySessionMetadataBatch` 是因为 09-30 的上游也没有 —— 那不是
+本地缺失。
+
+所以这和 `prompt.ts`、`trigger-recall.ts` 是同一类墙,但原因写下来了:**vendored 快照是 09-30,
+本地上游检出是 10-08,真实 HEAD 是 10-13;追上任何一档都要连带搬 openclaw 的会话存储层。**
+判定仍是「先量需求侧」:mem-plus 没有 session 语料、没有 agent 数据库的 worker 写入通道。
+
+验证:16 条断言全过,走真实入口 `runDreamingSweepPhases`。store 用宿主自己的
+`createStorageOpenKeyedStore`(`plugin/src/kv.ts:225`)包一个 Map 背的 `ctx.storage` ——
+`plugin/src/index.ts:155` 就是这么接线的,所以 keyed store、`observe`/`compareAndApply` 和
+workspace lock 跑的都是真代码,只有最外一圈被替掉。含:两份文件与 09-30 上游 SHA256 相同、
+`!` 断言回到两处、`flatMap` 三处回来、`{ ...params, state }` 回来、`session-ingestion` 不再自查
+tombstone、sweep 不抛错、返回形状就是上游的 `{ degradedPhases, pendingNarratives }` 且
+`degradedPhases === 0`(两个 phase 都没降级)、`MEMORY.md` 没被写坏。
+
+`ctx.storage` 需要四个方法而不是三个(`get`/`set`/`remove`/`scan`),`scan` 的分页形状是
+`{ entries, next }`(`plugin/src/kv.ts:72`)—— 记下来,下次接这个 store 不用再撞。
+
 ## 三个血管文件的归属(2026-10-14 逐个查过)
 
 `recall-inject.ts` / `recall-intent.ts` / `recall-taint.ts` 都**不是**可搬的自创器官:
