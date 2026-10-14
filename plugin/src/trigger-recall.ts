@@ -11,31 +11,60 @@
 //   (no query embedding), a hand-rolled phrase-overlap score, a hard cap, and a
 //   character budget on the block.
 //
-// WHAT MOVED, AND WHY
-//   1. The two loader functions. Upstream resolves a memory *provider* or a *search
-//      manager* from its own config surface and issues `search(..., lexicalOnly)` plus
-//      `listTriggerCandidates(...)`. mem-plus has its own index, so the two queries are
-//      `searchText` and `listTriggerCandidates` in `memory-index.ts`. The scoring,
-//      filtering, ordering and cap below are untouched.
-//   2. Delivery. Upstream injects the block into the system prompt of the turn that is
-//      already running. OpenCode V2's plugin type is `{ id, setup }` with no prompt hook,
-//      `ctx.agent.transform` takes a *synchronous* callback that receives only an agent
-//      editor (so it can neither await a search nor see the message), and
-//      `ctx.aisdk.hook` only wraps model *construction*. There is no per-request seam a
-//      plugin can push context through, so this is a pull: the caller asks.
-//   3. The run cache. Upstream memoises candidates per `runId` because several recall
-//      paths consult lane one within one agent run. mem-plus has no run identity, so
-//      there is nothing to memoise against and the map is gone.
+// WHAT IS UPSTREAM'S, VERBATIM
+//   The whole scoring half, unchanged and unchanged in shape: `TRIGGER_CANDIDATE_LIMIT` 24,
+//   `TRIGGER_INJECTION_LIMIT` 3, `MAX_TRIGGER_CONTEXT_CHARS` 1800,
+//   `STRONG_TRIGGER_MATCH_SCORE` 0.65, `normalizeWords`, `splitTriggerPhrases`,
+//   `prepareTriggerScorer` (0.85 for a single-word hit; otherwise
+//   `coverage * 0.8 + min(1, overlap / 2) * 0.2`, then `triggerScore * 0.8 + relevance * 0.2`),
+//   `isPromotedTrustedMemoryEntry`, `selectStrongTriggerMatches` and `buildTriggerRecallContext`.
+//   The predicates are upstream's term for term -- including the non-obvious
+//   `projectKeys?.length !== 0`, which *excludes* an annotated entry from the base lane
+//   because an annotated entry belongs to a project and may not be active here.
+//   The legacy lane's dedupe key is upstream's too:
+//   `${source}:${path}:${startLine}:${endLine}` (upstream `:326`) -- the RANGE, not the row id.
 //
-// NOT PORTED: the origin-class eligibility gate
-//   `isPromotedTrustedMemoryEntry` keeps `automaticRecall.eligible`, which upstream
-//   computes from the entry's stored provenance. mem-plus's index has no provenance
-//   column, so the check here is the structural equivalent -- only curated `MEMORY.md`
-//   units reach this file at all (see `listTriggerCandidates`) -- and the project-key
-//   half of the same predicate is verbatim.
+// TWO THINGS THAT WERE WRONG AND ARE NOW RIGHT
+//   1. The eligibility gate. An earlier version of this file said in a comment that mem-plus's
+//      index had no provenance column and that the gate had to be a structural stand-in. That
+//      was true then and is false now: provenance is per chunk in
+//      `memory_index_chunk_provenance`, `readMemoryRecallMetadata` returns it, and
+//      `isAutomaticMemoryEntryEligible` reads upstream's own values. A comment claiming a
+//      capability is missing is worse than no comment, because it is a licence to stop looking.
+//   2. The annotation carriers. Upstream's `toLegacyTriggerRecallHit` sets
+//      `excerpt: stripMemoryAnnotationCarriers(entry.snippet)`. That call is now here too, and
+//      it was measured to be a no-op: the chunker already strips carriers before chunking, and
+//      a probe over the real path found them absent from the candidate snippet. Kept because
+//      upstream's invariant is at this boundary and ours is two files away — see the note on
+//      `buildTriggerRecallContext`.
+//
+// WHAT MOVED, AND WHY -- each of these has no host contract, not a preference
+//   1. The two loaders. Upstream resolves a memory *provider* or a *search manager* from its
+//      own config surface and issues `search(..., lexicalOnly)` plus
+//      `listTriggerCandidates(...)`. mem-plus has its own index, so the two queries are
+//      `searchText` and `listTriggerCandidates` in `memory-index.ts`.
+//   2. The native lane, not written. `loadNativeTriggerRecallCandidates` needs
+//      `getActiveMemoryProvider`, `MemoryCallerContext`, `buildMemoryAudienceCacheIdentity`
+//      and the `MemoryProviderHit` contract. None of the four exists in this tree and none has
+//      a counterpart in OpenCode's plugin surface: there is no memory-plugin slot to select
+//      from, no caller-authority object to assert against, and no audience identity to cache on.
+//      Writing a single-lane version of a two-lane dispatcher would be a reimplementation, not a
+//      port, so the dispatcher is absent and `resolveTriggerRecall` goes straight to the lane
+//      that exists.
+//   3. The run cache. Upstream memoises candidates per `runId` because several recall paths
+//      consult lane one within one agent run, keyed by `authorityFingerprint` +
+//      `requestKey` + audience identity. mem-plus has no run identity and no request-local
+//      reuse to key on.
+//   4. Delivery. Upstream injects the block into the system prompt of the turn that is already
+//      running. OpenCode V2's plugin type is `{ id, setup }` with no prompt hook,
+//      `ctx.agent.transform` takes a *synchronous* callback that receives only an agent editor
+//      (so it can neither await a search nor see the message), and `ctx.aisdk.hook` only wraps
+//      model *construction*. There is no per-request seam a plugin can push context through, so
+//      this is a pull: the caller asks.
 import type { SearchHit } from "./memory-index.js";
 import { listTriggerCandidates, searchText, type SearchFilters } from "./memory-index.js";
 import { isAutomaticMemoryEntryEligible } from "../../packages/memory-host-sdk/src/host/types.js";
+import { stripMemoryAnnotationCarriers } from "../../packages/memory-host-sdk/src/host/curated-annotations.js";
 import { truncateUtf16Safe } from "../../packages/normalization-core/src/utf16-slice.js";
 
 const TRIGGER_CANDIDATE_LIMIT = 24;
@@ -187,12 +216,33 @@ export function buildTriggerRecallContext(matches: TriggerRecallMatch[]): string
   if (matches.length === 0) {
     return undefined;
   }
-  // Upstream's own line (`active-memory/trigger-recall.ts:113` in the upstream repo, and
-  // `:277` for the citation form): the excerpt, then the source label. `snippet` replaces
-  // the `text` field this used, and `citation` replaces the hand-built `#L${startLine}` --
-  // which now carries a real line range instead of a unit id wearing one.
+  // Upstream's own line (`active-memory/trigger-recall.ts:113`): the excerpt, then the source
+  // label, where `excerpt` is the projection produced by `toLegacyTriggerRecallHit`:
+  //
+  //   excerpt: stripMemoryAnnotationCarriers(entry.snippet)
+  //
+  // MEASURED: this call is a no-op today, and it is kept anyway. The chunker already strips the
+  // carriers before chunking (`memory-chunking.ts`, upstream
+  // `manager-index-preparation.ts:69`), and the recall metadata is extracted from the RAW lines
+  // while the chunk text is the stripped one -- so a candidate's `snippet` arrives here with
+  // no `<!-- trigger: ... -->` on it. A probe over the real path confirmed it: the candidate
+  // snippet was `"- Rolling deploys pause on the canary for ten minutes\n"`, carriers absent.
+  //
+  // It is kept rather than dropped for one reason: upstream's invariant lives at THIS boundary
+  // and ours currently lives two files away in the chunker. Upstream needs the strip here
+  // because a memory *provider* may hand back unstripped text. Deleting the call would make
+  // this file's correctness depend on a change nobody has made yet, in a module whose whole
+  // job is that strip. If the chunker's strip is ever removed, this still holds.
+  //
+  // It lives here rather than in a projection step because mem-plus has no `MemoryProviderHit`
+  // projection to strip in; this is the same value read at the same place upstream reads it.
+  //
+  // `citation` replaces the hand-built `#L${startLine}` and now carries a real line range.
   const summary = matches
-    .map((entry) => `- ${entry.snippet.trim()} (Source: ${entry.citation ?? entry.path})`)
+    .map(
+      (entry) =>
+        `- ${stripMemoryAnnotationCarriers(entry.snippet).trim()} (Source: ${entry.citation ?? entry.path})`,
+    )
     .join("\n");
   return buildPromptPrefix(truncateUtf16Safe(summary, MAX_TRIGGER_CONTEXT_CHARS));
 }
@@ -266,15 +316,26 @@ export async function resolveTriggerRecall(params: {
         db: params.db,
         onError: params.onError,
       });
-      // Upstream keys this dedupe on the provider reference; the index's identity is the
-      // chunk row id, which is a hash over `(source, path, startLine, endLine, text, model)`
-      // -- so two corpora holding the same bytes get different ids and both survive, which is
-      // what separating them by `source` is for.
+      // Upstream's dedupe, verbatim from `active-memory/trigger-recall.ts:323-330`:
+      //
+      //   new Map([...triggerCandidates, ...retrieved].map((entry) => [
+      //     `${entry.source}:${entry.path}:${String(entry.startLine)}:${String(entry.endLine)}`,
+      //     entry,
+      //   ])).values()
+      //
+      // The RANGE is the identity, not the row id. That distinction became load-bearing with
+      // the read switch: `chunkId` is a hash over `(source, path, startLine, endLine, text,
+      // model)`, so the same range written under two different models is two rows with two ids,
+      // and keying on the id would inject the same memory twice. `source` is in the key, so
+      // the same bytes under two corpora stay separate -- which is upstream's model, and the
+      // reason corpora are separated by the column rather than by precedence.
       const entries = new Map<string, SearchHit>();
       for (const entry of [...triggerCandidates, ...retrieved]) {
-        const existing = entries.get(entry.chunkId);
-        if (!existing || (existing.triggers ?? null) === null) {
-          entries.set(entry.chunkId, entry);
+        const key = `${entry.source}:${entry.path}:${String(entry.startLine)}:${String(entry.endLine)}`;
+        // "the scored retrieval copy of a chunk replaces its unscored trigger candidate",
+        // upstream's comment. The scored copy comes second, so it wins.
+        if (!entries.has(key) || (entries.get(key)?.triggers ?? null) === null) {
+          entries.set(key, entry);
         }
       }
       return [...entries.values()];
