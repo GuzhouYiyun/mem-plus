@@ -61,8 +61,8 @@ function normalizeScopeAccountId(accountId: string | undefined): string {
 }
 
 export function normalizeCreatorSender(value: string): string {
-  const creatorSender = readKnownCreatorSender(value);
-  if (!creatorSender) {
+  const creatorSender = value.trim();
+  if (!creatorSender || creatorSender.toLowerCase() === "unknown") {
     throw new Error("creating sender is unavailable for this turn");
   }
   return creatorSender;
@@ -106,35 +106,59 @@ export function encodeStandingIntentSenderScope(params: {
   ] satisfies StoredSenderScope);
 }
 
-function parseStoredScope(value: string | null, length: number): string[] | null {
+function parseStoredChannelScope(value: string | null): {
+  scope: IntentScope;
+  identity: string | null;
+} {
+  if (value === null) {
+    return { scope: "anywhere", identity: null };
+  }
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (Array.isArray(parsed) && parsed.length === 5) {
+      const [version, scope, provider, accountId, identity]: unknown[] = parsed;
+      if (
+        version === "v1" &&
+        (scope === "channel" || scope === "conversation") &&
+        typeof provider === "string" &&
+        provider.length > 0 &&
+        typeof accountId === "string" &&
+        accountId.length > 0 &&
+        typeof identity === "string" &&
+        identity.length > 0
+      ) {
+        return { scope, identity };
+      }
+    }
+  } catch {}
+  // Standing-intent storage is unreleased. Untagged rows are not a compatibility
+  // contract and must fail closed rather than collapsing provider/conversation scopes.
+  return { scope: "anywhere", identity: null };
+}
+
+function parseStoredSenderScope(value: string | null): string | null {
   if (value === null) {
     return null;
   }
   try {
     const parsed = JSON.parse(value) as unknown;
-    if (
-      Array.isArray(parsed) &&
-      parsed.length === length &&
-      parsed[0] === "v1" &&
-      parsed.every((entry): entry is string => typeof entry === "string" && entry.length > 0)
-    ) {
-      return parsed;
+    if (!Array.isArray(parsed) || parsed.length !== 4) {
+      return null;
     }
-  } catch {}
-  return null;
-}
-
-function parseStoredChannelScope(value: string | null): {
-  scope: IntentScope;
-  identity: string | null;
-} {
-  const parsed = parseStoredScope(value, 5);
-  if (parsed && (parsed[1] === "channel" || parsed[1] === "conversation")) {
-    return { scope: parsed[1], identity: parsed[4]! };
+    const [version, provider, accountId, senderId]: unknown[] = parsed;
+    return version === "v1" &&
+      typeof provider === "string" &&
+      provider.length > 0 &&
+      typeof accountId === "string" &&
+      accountId.length > 0 &&
+      typeof senderId === "string" &&
+      senderId.length > 0
+      ? senderId
+      : null;
+  } catch {
+    // See parseStoredChannelScope: raw sender ids are not globally safe identities.
+    return null;
   }
-  // Standing-intent storage is unreleased. Untagged rows are not a compatibility
-  // contract and must fail closed rather than collapsing provider/conversation scopes.
-  return { scope: "anywhere", identity: null };
 }
 
 export function rowToIntent(row: StandingIntentRow): StandingIntent {
@@ -146,7 +170,7 @@ export function rowToIntent(row: StandingIntentRow): StandingIntent {
     triggerEmbedding: row.trigger_embedding,
     scope: channelScope.scope,
     channelScope: channelScope.identity,
-    senderScope: parseStoredScope(row.sender_scope, 4)?.[3] ?? null,
+    senderScope: parseStoredSenderScope(row.sender_scope),
     creatorSender: readKnownCreatorSender(row.creator_sender),
     status: row.status,
     expiresAt: row.expires_at,
@@ -174,6 +198,14 @@ export function tokenizeIntentText(text: string): string[] {
   return text.toLowerCase().match(/[\p{L}\p{N}_-]+/gu) ?? [];
 }
 
+function buildFtsQuery(promptTokens: ReadonlySet<string>): string | null {
+  const unique = [...promptTokens];
+  if (unique.length === 0) {
+    return null;
+  }
+  return unique.map((token) => `"${token.replaceAll('"', '""')}"`).join(" OR ");
+}
+
 export type StandingIntentMatchInput = {
   promptTokens: string[];
   ftsQuery: string;
@@ -190,8 +222,9 @@ export function prepareStandingIntentMatch(params: {
   senderId?: string;
   nowMs?: number;
 }): StandingIntentMatchInput | undefined {
-  const promptTokens = [...new Set(tokenizeIntentText(params.prompt))];
-  if (promptTokens.length === 0) {
+  const promptTokens = new Set(tokenizeIntentText(params.prompt));
+  const ftsQuery = buildFtsQuery(promptTokens);
+  if (!ftsQuery) {
     return undefined;
   }
   const channel = params.channel?.trim() || undefined;
@@ -226,8 +259,8 @@ export function prepareStandingIntentMatch(params: {
         })
       : undefined;
   return {
-    promptTokens,
-    ftsQuery: promptTokens.map((token) => `"${token.replaceAll('"', '""')}"`).join(" OR "),
+    promptTokens: [...promptTokens],
+    ftsQuery,
     channelScopes: [...channelScopes],
     senderScope: storedSenderScope,
     nowMs: params.nowMs,
