@@ -978,6 +978,90 @@ tombstone、sweep 不抛错、返回形状就是上游的 `{ degradedPhases, pen
 `ctx.storage` 需要四个方法而不是三个(`get`/`set`/`remove`/`scan`),`scan` 的分页形状是
 `{ entries, next }`(`plugin/src/kv.ts:72`)—— 记下来,下次接这个 store 不用再撞。
 
+## 「按 09-30 完成」的全量普查(2026-10-14 实测)
+
+上一节查明参照物会过期之后,顺手把整棵记忆树量了一遍 —— 不再是一个文件一个文件地撞。
+
+量具:`node scripts/audit-upstream-drift.mjs [--ref <sha>] [--stage <dir>] [--json <file>]`。
+判据是**逐字节**:git blob SHA 是文件字节的哈希,拿上游整棵树(`gh api
+repos/openclaw/openclaw/git/trees/<sha>?recursive=1`,一次调用)的 SHA 和本树的 SHA 对比,不用
+下载任何文件内容。自检过:三个已知逐字节相同的文件
+(`src/plugin-sdk/memory-core-host-engine-sessions.ts`、`extensions/active-memory/types.ts`、
+`extensions/memory-core/src/memory-forget-content.ts`)全部判为相同,零假阳性 —— 两边行尾归一化
+若有差异,这里会暴露成假的「不同」。
+
+排序按**真实差异行数**,不按文件大小。这一点是量出来的:记忆路径上最大的那个文件对快照只差
++2/-2 行,而 33 KB 的文件可能只差一行;按大小排会把活派到错的文件上。
+
+### 结果(参照 `6daee6e4bd`,2026-09-30)
+
+| | |
+|---|---|
+| 记忆路径本地文件 | **177** |
+| 与 09-30 上游逐字节相同 | **111**(62%) |
+| 有差异 | **66** |
+| 差异总量 | **+1989 / -2151 行** |
+| 上游有、本树没有 | 1241 个代码文件(绝大多数是测试文件,本仓库有意不搬,**不是偏离**) |
+
+前 20 名(这一栏就是接下来要做的活,按顺序):
+
+| +行 | -行 | 文件 |
+|---|---|---|
+| 537 | 477 | `extensions/memory-core/src/memory-forget.ts` |
+| 37 | 651 | `src/plugin-sdk/session-transcript-runtime.ts` |
+| 303 | 209 | `extensions/memory-core/src/memory-entry-origins.ts` |
+| 84 | 86 | `packages/memory-host-sdk/src/host/internal.ts` |
+| 50 | 80 | `src/plugin-sdk/memory-host-core.ts` |
+| 91 | 37 | `packages/memory-host-sdk/src/host/query-expansion.ts` |
+| 69 | 43 | `extensions/memory-core/src/standing-intents.ts` |
+| 79 | 19 | `extensions/memory-core/src/memory-budget.ts` |
+| 9 | 68 | `extensions/memory-core/src/memory-session-tombstones.ts` |
+| 53 | 20 | `extensions/memory-core/src/dreaming-dreams-file.ts` |
+| 36 | 29 | `extensions/memory-core/src/short-term-promotion-artifacts.ts` |
+| 19 | 42 | `extensions/memory-core/src/memory/manager-cpu-entrypoints.ts` |
+| 40 | 20 | `extensions/memory-core/src/short-term-promotion.ts` |
+| 36 | 22 | `extensions/memory-core/src/short-term-promotion-stats.ts` |
+| 36 | 13 | `extensions/memory-core/src/dreaming-narrative.ts` |
+| 37 | 8 | `packages/memory-host-sdk/src/host/session-files.ts` |
+| 21 | 23 | `packages/memory-host-sdk/src/runtime-core.ts` |
+| 13 | 28 | `extensions/memory-core/src/dreaming-state.ts` |
+| 31 | 6 | `extensions/memory-core/src/concept-vocabulary.ts` |
+| 26 | 11 | `extensions/memory-core/src/short-term-promotion-utils.ts` |
+
+### 逐个看下来,漂移分三类 —— 第三类需要人拍板
+
+**一、注释与风格噪音。** 回退。`memory-budget.ts` 把上游的一行注释扩成了三段文件头;
+`dreaming-phases.ts` 的 `flatMap` 换循环(上一节已撤)。
+
+**二、血管。** 保留并登记。`memory-entry-origins.ts` 的 303 行主要是:**上游全 async 走 worker
+(`createLazyRuntimeModule` / `resolveRuntimeWorkerUrl` / `resolveStateDir`),本树全 sync 直连
+`DatabaseSync`**,并多导出 `recordMemorySessionTombstonesInDatabase`、
+`recordMemorySessionTombstones`、`deleteMemoryEntryOriginsInDatabase` 三个 `...InDatabase`
+函数 —— 上游把它们关在 worker 里,而 mem-plus 没有 worker,`memory-forget.ts`(上游经 worker 跑)
+要直接调。`memory-session-tombstones.ts` 本树小 1940 字节,是因为 `recordMemorySessionTombstonesInDatabase`
+**整段原样搬到了 `memory-entry-origins.ts`** —— 逐行读过,分批插入(128 个绑定一批)、事务、
+`memory_index_state.revision` 栅栏、上游那句「A shadow index can have no published chunks yet」
+的注释,全都在。搬,不是丢。
+
+**三、本地真修了上游的 bug,而且没登记。** **这是需要拍板的一类。** 例子:
+
+`memory-budget.ts` 的 `parseMemoryBlocks`:上游判断「这一段是不是自动提升出来的」只看
+`currentDate && isGeneratedPromotionBlock(...)`,setext 下划线那支也只看 `currentDate`。本树加了
+一个独立的 `currentKind` 标记,两处都改成 `currentKind === "promotion" && ...`。差别是实质的:
+上游只要见过一个日期标题,紧跟其后的**任何** setext 标题或子节都可能被当成 promotion 段,
+而 compaction 会丢「最旧的自动提升段」—— 于是一段**不是**自动提升的内容可能被当成提升段丢掉。
+本树的版本不会。
+
+`extensions/active-memory/escalation.ts` +12/-0、只增不改,像是加了新逻辑。
+
+这类既不是「能抄就抄」也不是「血管」,按 AGENTS.md「不静默修上游的已知缺陷」的口径,应该照搬
+上游并登记;但 `memory-budget.ts` 那条我倾向保留(它防的是数据丢失),所以**摆出来等决定,没有
+替用户定**。要给上游提 issue 也得有依据 —— `memory-budget.ts` 的注释里引了
+`See issue #73691`,那正是上游给同一个常量 `DEFAULT_MEMORY_FILE_MAX_CHARS` 留的编号。
+
+`src/plugin-sdk/session-transcript-runtime.ts` 单独记一笔:本树 1945 字节,上游 24 267 字节
+(-651 行)。这是有意砍掉的一整块(会话转录的运行时),不是逐行改写,判定为「宿主不需要所以没搬」。
+
 ## 三个血管文件的归属(2026-10-14 逐个查过)
 
 `recall-inject.ts` / `recall-intent.ts` / `recall-taint.ts` 都**不是**可搬的自创器官:
