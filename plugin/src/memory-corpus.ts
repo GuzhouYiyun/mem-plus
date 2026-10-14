@@ -58,9 +58,9 @@ export const CURATED_SOURCE: MemPlusSource = "memory";
 /**
  * Which tree on disk a file belongs to.
  *
- * This lived in `memory-parse.ts` and moved here when the parser stopped being the index's
- * reader. It is a property of where a file lives, which is this module's subject, and the
- * parser now imports it rather than declaring it.
+ * This lived in a parser that is now deleted, because the index stopped needing one: it
+ * chunked through upstream's `chunkMarkdown` and indexed `memory_index_chunks`. It is a
+ * property of where a file lives, which is this module's subject.
  *
  * `"home"` is the memory home -- the curated `MEMORY.md` / `USER.md` plus every project's
  * daily files. `"wiki"` is the imported document corpus. The name says tree rather than

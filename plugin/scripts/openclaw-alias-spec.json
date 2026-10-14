@@ -4,26 +4,35 @@
     "@openclaw/normalization-core": {
       "/record-coerce": "packages/normalization-core/src/record-coerce.ts",
       "/error-coercion": "packages/normalization-core/src/error-coercion.ts",
-      "/promise-like": "packages/normalization-core/src/promise-like.ts",
-      "/result": "packages/normalization-core/src/result.ts",
-      ".": "packages/normalization-core/src/index.ts",
-      "/number-coercion": "packages/normalization-core/src/number-coercion.ts",
-      "/mountinfo-path": "packages/normalization-core/src/mountinfo-path.ts",
       "/cjk-chars": "packages/normalization-core/src/cjk-chars.ts",
       "/utf16-slice": "packages/normalization-core/src/utf16-slice.ts",
       "/node-crypto": "packages/normalization-core/src/node-crypto.ts",
-      "/boolean-coercion": "packages/normalization-core/src/boolean-coercion.ts",
+      "/number-coercion": "packages/normalization-core/src/number-coercion.ts",
+      "/promise-like": "packages/normalization-core/src/promise-like.ts",
+      "/result": "packages/normalization-core/src/result.ts",
+      ".": "packages/normalization-core/src/index.ts",
+      "/mountinfo-path": "packages/normalization-core/src/mountinfo-path.ts",
       "/string-coerce": "packages/normalization-core/src/string-coerce.ts",
-      "/home-dir": "packages/normalization-core/src/home-dir.ts",
+      "/boolean-coercion": "packages/normalization-core/src/boolean-coercion.ts",
       "/agent-id": "packages/normalization-core/src/agent-id.ts",
-      "/string-normalization": "packages/normalization-core/src/string-normalization.ts",
       "/code-points": "packages/normalization-core/src/code-points.ts",
       "/grapheme": "packages/normalization-core/src/grapheme.ts",
+      "/home-dir": "packages/normalization-core/src/home-dir.ts",
+      "/string-normalization": "packages/normalization-core/src/string-normalization.ts",
       "/json-schema": "packages/normalization-core/src/json-schema.ts",
+      "/json-coercion": "packages/normalization-core/src/json-coercion.ts",
       "/stable-stringify": "packages/normalization-core/src/stable-stringify.ts",
       "/agent-run-terminal-outcome": "packages/normalization-core/src/agent-run-terminal-outcome.ts",
-      "/expect": "packages/normalization-core/src/expect.ts",
-      "/json-coercion": "packages/normalization-core/src/json-coercion.ts"
+      "/expect": "packages/normalization-core/src/expect.ts"
+    },
+    "@openclaw/media-core": {
+      "/mime": "packages/media-core/src/mime.ts",
+      "/inline-image-data-url": "packages/media-core/src/inline-image-data-url.ts",
+      "/base64": "packages/media-core/src/base64.ts",
+      "/constants": "packages/media-core/src/constants.ts"
+    },
+    "@openclaw/retry": {
+      ".": "packages/retry/src/index.ts"
     },
     "@openclaw/net-policy": {
       "/redact-sensitive-url": "packages/net-policy/src/redact-sensitive-url.ts",
@@ -45,15 +54,6 @@
       ".": "packages/session-url-contract/src/index.ts",
       "/session-key-normalization": "packages/session-url-contract/src/session-key-normalization.ts"
     },
-    "@openclaw/media-core": {
-      "/mime": "packages/media-core/src/mime.ts",
-      "/inline-image-data-url": "packages/media-core/src/inline-image-data-url.ts",
-      "/base64": "packages/media-core/src/base64.ts",
-      "/constants": "packages/media-core/src/constants.ts"
-    },
-    "@openclaw/retry": {
-      ".": "packages/retry/src/index.ts"
-    },
     "@openclaw/ai": {
       "/transports": "packages/ai/src/transports.ts",
       "/diagnostics": "packages/ai/src/utils/diagnostics.ts",
@@ -62,8 +62,8 @@
       "/internal/shared": "packages/ai/src/internal/shared.ts"
     },
     "@openclaw/llm-core": {
-      "/event-stream": "packages/llm-core/src/utils/event-stream.ts",
       "/diagnostics": "packages/llm-core/src/utils/diagnostics.ts",
+      "/event-stream": "packages/llm-core/src/utils/event-stream.ts",
       ".": "packages/llm-core/src/index.ts",
       "/types": "packages/llm-core/src/types.ts"
     }

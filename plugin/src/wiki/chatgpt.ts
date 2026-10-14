@@ -286,11 +286,15 @@ function toRecord(conversation: Record<string, unknown>): ConversationRecord | n
 /**
  * Render one page.
  *
- * The frontmatter is what the wiki reader turns into a title, tags and an entry
- * type (`plugin/src/memory-parse.ts`), so it carries the triage metadata rather
- * than repeating it in prose. `status: draft` is openclaw's marker for "imported,
- * not yet reviewed" and is kept so the provenance of an imported page stays
- * visible in the file itself.
+ * `status: draft` is openclaw's marker for "imported, not yet reviewed" and is kept so the
+ * provenance of an imported page stays visible in the file itself.
+ *
+ * The rest of the frontmatter is inert as far as search is concerned, and saying so plainly
+ * is better than implying otherwise: the wiki corpus is chunked by upstream's own `chunkMarkdown`
+ * and indexed into `memory_index_chunks`, which carries no title, no tags and no entry type.
+ * Those were mem-plus's `units` columns, produced by the parser that was removed when the read
+ * side moved. The fields stay here because the file is what a human reads, and because
+ * upstream's own frontmatter handling is keyed on the document rather than the index.
  */
 function renderPage(record: ConversationRecord, sourcePath: string): string {
   const frontmatter = YAML.stringify({

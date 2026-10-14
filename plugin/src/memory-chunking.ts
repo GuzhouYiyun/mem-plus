@@ -5,12 +5,13 @@
 // byte-identical, previously unreferenced by `plugin/`). This file supplies its one
 // argument and does not reimplement it.
 //
-// WHY THE CHUNKER, AND NOT mem-plus's `memory-parse.ts`
-//   `memory-index.ts` indexes `MemoryUnit[]`, produced by mem-plus's own parser. Upstream
-//   indexes `MemoryChunk[]`, produced by `chunkMarkdown`. The two are not the same
-//   object: upstream's carries `startLine` / `endLine` / `hash` / `embeddingInput`, which
-//   are exactly the columns `memory_index_chunks` stores. Translating `MemoryUnit` into
-//   that row shape would be inventing a mapping upstream does not have.
+// WHY THE CHUNKER, AND NOT A PARSER OF OUR OWN
+//   This host used to index `MemoryUnit[]`, produced by a mem-plus parser of its own. That
+//   parser is deleted: the read side moved to `memory_index_chunks` and nothing reads the
+//   other shape. The two were not the same object -- upstream's `MemoryChunk` carries
+//   `startLine` / `endLine` / `hash` / `embeddingInput`, which are exactly the columns
+//   `memory_index_chunks` stores, so translating `MemoryUnit` into that row shape would have
+//   been inventing a mapping upstream does not have.
 //
 // THE DEFAULTS ARE UPSTREAM'S, READ NOT GUESSED
 //   `src/agents/memory-search.ts` resolves `chunking: { tokens: 400, overlap: 80 }`. Those

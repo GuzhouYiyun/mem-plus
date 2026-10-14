@@ -226,7 +226,7 @@ function dayOf(hit: SearchHit): string {
  *
  * What changed, and why it is a contraction rather than a regression:
  *   - `### N. <heading>` is gone. Upstream's chunk has no heading field; the parser that
- *     produced mem-plus's headings is `memory-parse.ts`, which is being retired. Writing a
+ *     produced mem-plus's headings is a parser that is now deleted. Writing a
  *     new parser to recover headings from chunk text would be adding back something upstream
  *     does not have, which is a divergence, not a seam.
  *   - `Tags: a, b, c` is gone, for the same reason: tags were a `units` column.
