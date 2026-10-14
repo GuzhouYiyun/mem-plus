@@ -144,6 +144,12 @@ Var InstallFlags
 ; so. See SecDeps and the Finish page section.
 Var KeptVectors
 
+; Payload files this install removed because the previous one had written them and this
+; one no longer ships them. Counted so the install log says how many, which is the only
+; place it can be said: MUI2 offers no way to add a line to the finish page (see the
+; MUI_FINISHPAGE_RUN note above), so it goes to the instfiles progress pane instead.
+Var RemovedPayloadFiles
+
 ; ------------------------------------------------------------------- where --
 ; OpenCode discovers plugins by scanning <config>/plugins/*, and "config" is not
 ; always ~/.config/opencode. Measured on this machine with `opencode debug paths`
@@ -165,6 +171,73 @@ Var KeptVectors
 ;
 ; An env var is read at install time, not compile time, so this has to be runtime
 ; code: `!ifenv` would test the build machine, which is the wrong machine.
+; ---------------------------------------------------------------- upgrade --
+; Delete every path the PREVIOUS install recorded, then let the payload rewrite
+; what is still current. See the call site in SecMain for why this is not a
+; comparison against the new list.
+;
+; NSIS *does* have loops and string functions -- the older comment in build.ps1 said
+; otherwise and was wrong -- so this is a plain FileOpen/FileRead loop with no plugin,
+; which matters because the uninstaller has to keep working with nothing but makensis.
+;
+; The three guards are the whole safety argument:
+;   1. no manifest -> first install, nothing to do, and $INSTDIR may not exist yet;
+;   2. every path is a RELATIVE one from the manifest, so no ".." can appear and the
+;      delete cannot climb out of $INSTDIR. The lists are generated from the staged
+;      payload tree, so a traversal is not expressible.
+;   3. directories use RMDir with no /r, so a directory that still holds anything --
+;      the user's models/ if it ever ends up on that list, a file this release did not
+;      record -- survives rather than being taken with it.
+Function RemoveStalePayload
+  StrCpy $RemovedPayloadFiles 0
+  ClearErrors
+  FileOpen $0 "$INSTDIR\.mem-plus-payload-files.txt" r
+  IfErrors no_previous_install 0
+  DetailPrint "清理上一版本的插件文件……"
+  read_files:
+    FileRead $0 $1
+    IfErrors files_done
+    ; FileRead returns the line WITH its terminator still attached. Verified against this
+    ; NSIS 3.13 build with an instrumented copy of this loop: a manifest whose first line is
+    ; `bootstrap.ts` yields those 11 characters plus an LF, so `Delete "$INSTDIR\$1"` names
+    ; a path ending in a newline, matches nothing, and fails silently -- the install reports
+    ; success and the stale file is still there. That is the whole reason this line exists,
+    ; and it is invisible from the installer's own output: the loop counts its iterations,
+    ; so a run that deleted nothing looks exactly like a run that worked.
+    ;
+    ; `StrCpy v v -1` drops the last character, which is exactly the terminator and nothing
+    ; else. build.ps1 writes both lists LF-only and fails the build if a CR reaches them, so
+    ; there is never a second character to drop.
+    StrCpy $1 "$1" -1
+    ${If} $1 != ""
+      Delete "$INSTDIR\$1"
+      IntOp $RemovedPayloadFiles $RemovedPayloadFiles + 1
+    ${EndIf}
+    Goto read_files
+  files_done:
+    FileClose $0
+  ClearErrors
+  FileOpen $0 "$INSTDIR\.mem-plus-payload-dirs.txt" r
+  IfErrors no_previous_install
+  read_dirs:
+    FileRead $0 $1
+    IfErrors dirs_done
+    StrCpy $1 "$1" -1
+    ${If} $1 != ""
+      RMDir "$INSTDIR\$1"
+    ${EndIf}
+    Goto read_dirs
+  dirs_done:
+    FileClose $0
+  ; The count, because the progress pane is the only surface MUI2 leaves open (see the
+  ; Var comment). A user whose install removed 300 files should be able to see that it
+  ; did, rather than infer it later from a plugin that finally stopped loading a stale
+  ; module.
+  DetailPrint "已清理上一版本的 $RemovedPayloadFiles 个文件。"
+  ; The lists themselves are this install's to replace, and File /oname below does.
+  no_previous_install:
+FunctionEnd
+
 Function ResolveInstallDir
   ; The compile-time default, spelled out again so the comparison below has
   ; something to compare against. Keep the two byte-identical or every install
@@ -253,10 +326,28 @@ SectionIn RO
   RMDir /r "$INSTDIR\..\..\mem-plus.__stage"
   RMDir /r "$INSTDIR\..\..\mem-plus.__old"
 
+  ; Before the payload, not after: this is what makes an upgrade an upgrade. A plain
+  ; overwrite leaves every file the OLD release wrote that the NEW release dropped, and
+  ; a stale module is not inert -- Node's resolver will load `plugin/src/memory-parse.js`
+  ; from a release that deleted `memory-parse.ts` exactly as if it were current. Silent,
+  ; and only visible as behaviour that does not match the version you installed.
+  ;
+  ; The old release recorded what it wrote; delete exactly that, then write the whole
+  ; payload. Deliberately NOT a comparison against the new list: anything still current
+  ; is rewritten a moment later, so the answer cannot drift from what was actually
+  ; installed, and there is no "is this still ours?" test to get wrong.
+  Call RemoveStalePayload
+
   SetOutPath "$INSTDIR"
   ; Recursive: the package is ~2550 files (the vendored openclaw tree) and every
   ; one of them is loaded at runtime.
   File /r "payload\*"
+
+  ; Record what THIS install wrote, so the next one can do the same. Written after the
+  ; payload, and the lists are in $INSTDIR because that is where the next install reads
+  ; them from -- /oname with SetOutPath "$INSTDIR" puts them there directly.
+  File /oname=.mem-plus-payload-files.txt "payload-files.txt"
+  File /oname=.mem-plus-payload-dirs.txt "payload-dirs.txt"
 
   WriteRegStr HKCU "Software\mem-plus" "InstallDir" "$INSTDIR"
 
@@ -491,6 +582,12 @@ Section "Uninstall"
   ; one can only be removed when it is empty. Anything that survives is therefore
   ; the user's, and the check below says so instead of leaving a silent leftover.
   Delete "$INSTDIR\Uninstall.exe"
+  ; The two upgrade lists, by name. They are not in payload-manifest.nsh because they
+  ; are not payload -- build.ps1 writes them into $INSTDIR at install time, not into
+  ; payload\ -- and leaving them would mean the next install after an uninstall reads a
+  ; record of a tree that is no longer there.
+  Delete "$INSTDIR\.mem-plus-payload-files.txt"
+  Delete "$INSTDIR\.mem-plus-payload-dirs.txt"
   !include "payload-manifest.nsh"
 
   ; The manifest covers the payload only. These two are created by `npm install` in

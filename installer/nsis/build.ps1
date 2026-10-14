@@ -77,17 +77,24 @@ Write-Output "    payload $files files, $([math]::Round(((Get-ChildItem $payload
 # uninstaller removes what it installed and nothing else. Generated here, from the
 # tree that was just staged, so the two cannot drift.
 #
-# NSIS has no directory enumeration and no loop, and its own manual (4.9.1.9)
-# warns that "RMDir /r $INSTDIR in the uninstaller is not safe ... The user can
-# also put other files in the installation folder and wouldn't expect them to get
-# deleted along with the program." That is exactly the situation here: users put
-# the bge-m3 model (~2.2 GB) in <plugin root>/models, which defaultModelDir()
-# looks there for before falling back to the state root.
+# NSIS cannot enumerate a directory, and its own manual (4.9.1.9) warns that
+# "RMDir /r $INSTDIR in the uninstaller is not safe ... The user can also put other
+# files in the installation folder and wouldn't expect them to get deleted along
+# with the program." That is exactly the situation here: users put the bge-m3 model
+# (~2.2 GB) in <plugin root>/models, which defaultModelDir() looks there for before
+# falling back to the state root. (An earlier version of this comment also claimed
+# NSIS has no loop, which is false -- it has loop/loopend and the string functions,
+# and RemoveStalePayload in installer.nsi is one. Only enumeration is missing, and
+# that is the part this design turns on.)
 #
 # Compile-time inclusion rather than a runtime manifest read: makensis then checks
 # every line, and there is no FileOpen/FileRead loop or plugin in the uninstaller.
 # It also means a user file can never be "uninstalled by omission" -- if it is not
 # in this list, it is not ours and nothing touches it.
+#
+# This list is for UNINSTALL and is deliberately not reused for upgrade, because it
+# enumerates the payload as of THIS build, and an upgrade needs what the PREVIOUS
+# build wrote. That is what payload-files.txt below is for.
 #
 # Scope limit worth knowing: this covers the PAYLOAD only. node_modules and
 # package-lock.json are produced by `npm install` at install time, so they are not
@@ -119,6 +126,67 @@ foreach ($d in $dirs) {
 
 Set-Content (Join-Path $nsisDir "payload-manifest.nsh") -Value ($manifest -join "`r`n") -Encoding ascii -NoNewline
 Write-Output "    manifest $($manifest.Count - 3) paths ($files files, $($dirs.Count) dirs)"
+
+# payload-files.txt / payload-dirs.txt are the RUNTIME counterpart of that manifest, and they
+# exist for one reason: an overwrite install leaves behind anything the OLD release wrote that
+# the NEW release no longer contains. Measured on this repo: 20 of the 66 files the read-side
+# switch deleted were payload files (memory-parse.ts, three transitive dependencies, ...), and
+# a stale copy of any of them is loaded by Node's resolver exactly as if it were current --
+# silent, and only visible as behaviour that does not match the version you installed.
+#
+# The mechanism is the one every installer in this class uses, and it deliberately does NOT
+# compare old against new: each install first deletes every path the PREVIOUS install recorded,
+# then writes the whole payload. Files that still exist are immediately rewritten; files that
+# no longer exist are simply gone. There is no "is this still ours?" test to get wrong, and the
+# answer cannot drift from what was actually written.
+#
+# Two files rather than one tagged file: at read time NSIS cannot tell a path from a directory
+# without touching the disk, and a wrong guess here deletes or skips the wrong thing.
+#
+# Both are plain ASCII with no quotes or dollars, same as payload-manifest.nsh, and the same two
+# checks enforce it.
+$fileList = New-Object System.Collections.Generic.List[string]
+foreach ($f in (Get-ChildItem $payload -Recurse -File | Sort-Object FullName)) {
+  $rel = $f.FullName.Substring($rootLen)
+  if ($rel -match '[$"]') { throw "payload path needs NSIS escaping: $rel" }
+  if ($rel -match '[^\x20-\x7E]') { throw "payload path is not plain ASCII: $rel" }
+  $fileList.Add($rel.Replace('/', '\'))
+}
+$dirList = New-Object System.Collections.Generic.List[string]
+foreach ($d in $dirs) {
+  $rel = $d.FullName.Substring($rootLen)
+  $dirList.Add($rel.Replace('/', '\'))
+}
+# Both lists are LF-only, and that is load-bearing rather than cosmetic. NSIS's FileRead
+# returns a line WITH its terminator still attached -- measured on this NSIS 3.13 build with
+# an instrumented copy of the installer's read loop -- so a CRLF list would leave "\r\n"
+# inside every path and a LF list still leaves "\n". The installer drops exactly one
+# character (`StrCpy v v -1`), which is correct only while the terminator is one byte wide.
+# So the separator is written as LF and the result is checked, rather than assumed: a CR
+# reaching either file fails the build instead of producing an installer that reports
+# success and deletes nothing.
+$nl = "`n"
+$fileList = New-Object System.Collections.Generic.List[string]
+foreach ($f in (Get-ChildItem $payload -Recurse -File | Sort-Object FullName)) {
+  $rel = $f.FullName.Substring($rootLen)
+  if ($rel -match '[$"]') { throw "payload path needs NSIS escaping: $rel" }
+  if ($rel -match '[^\x20-\x7E]') { throw "payload path is not plain ASCII: $rel" }
+  $fileList.Add($rel.Replace('/', '\'))
+}
+$dirList = New-Object System.Collections.Generic.List[string]
+foreach ($d in $dirs) {
+  $rel = $d.FullName.Substring($rootLen)
+  $dirList.Add($rel.Replace('/', '\'))
+}
+# A trailing separator is appended so the final line is not the one that trips the EOF check
+# before its Delete runs.
+$filesTxt = ($fileList -join $nl) + $nl
+$dirsTxt = ($dirList -join $nl) + $nl
+foreach ($pair in @(@("payload-files.txt", $filesTxt), @("payload-dirs.txt", $dirsTxt))) {
+  if ($pair[1].Contains("`r")) { throw "$($pair[0]) must be LF-only: NSIS FileRead keeps the terminator" }
+  Set-Content (Join-Path $nsisDir $pair[0]) -Value $pair[1] -Encoding ascii -NoNewline
+}
+Write-Output "    runtime lists $($fileList.Count) files, $($dirList.Count) dirs (LF-only, verified)"
 
 # version.nsh is generated rather than committed: the version lives in
 # package.json and must not be duplicated by hand. Built with explicit newlines --
