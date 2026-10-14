@@ -235,6 +235,55 @@ sqlite-vec 依赖(后者可选,缺了会退回进程内余弦)。
 文件全部**改写**后搬入(0 个照抄)。**所以"逐字节抄"在这个仓库里目前没有先例**,现有 36 个
 照抄文件是单个零散文件,不是成块的子系统。
 
+## 读侧收缩:字段映射表(2026-10-14 已核实)
+
+上游 `MemorySearchResult`(`packages/memory-host-sdk/src/host/types.ts`)全部 15 个字段:
+`path` / `startLine` / `endLine` / `score` / `vectorScore?` / `textScore?` / `snippet` /
+`source` / `importance?` / `triggers?` / `projectKey?` / `originClass?`(deprecated)/
+`citation?` / `provenance?`。
+
+**没有 `heading` / `tags` / `marker` / `entryType` / `ts` / `documentKind`。**上游不是缺这些,
+是从来没有过 —— mem-plus 的 `SearchHit` 是它的**超集**,多出 8 个字段。
+
+> 我第一次说「上游没有 heading/tags」时,理由是从 chunk 表的列**推**出来的,那是错的依据。
+> AGENTS.md 新写的硬门槛就是为了这条:推的不算,读类型定义才算。
+
+### 收缩映射
+
+| `SearchHit`(现) | 上游对应 | 来源列 | 处置 |
+|---|---|---|---|
+| `unitId: number` | `id` | `memory_index_chunks.id`(TEXT) | 改 `chunkId: string`,六字段哈希 |
+| `path`(绝对) | `path` | `c.path` | 改相对路径(已验:上游那条字面白名单能命中) |
+| `startLine`/`endLine`(**硬写 0**) | 同名 | `c.start_line`/`c.end_line` | **首次真正有数据** —— 闭合「引用行号无数据支撑」那条偏离 |
+| `root` | `source` | `c.source` | 换成上游的值域 `memory`/`sessions`/`wiki` |
+| `documentKind` | 无 | — | **删** |
+| `day` | 无 | basename 日期 | 由路径派生,保留为过滤用 |
+| `ts` | 无 | — | **删** |
+| `entryType` | 无 | — | **删** |
+| `tags` | 无 | — | **删**,`filters.tag` 一并消失 |
+| `marker` | 无 | — | **删**(已退役,见 P2) |
+| `heading` | 无 | — | **删** |
+| `triggers`/`importance`/`projectKey` | 同名 | `memory_index_chunk_recall_metadata` | JOIN 取 |
+| `provenance.*` | 同名 | `memory_index_chunk_provenance` | JOIN 取,**逐块**,粒度变细 |
+| `curatedRoot` | 无 | `c.path IN ('MEMORY.md','USER.md')` | 改为上游那条字面判定 |
+| `project`(目录 slug) | 无 | `memory/` 后的段 | 保留为过滤用 |
+| (无) | `citation` | `path#L{start}-L{end}` | **新增**,替掉自创的来源行 |
+| (无) | `snippet` | `c.text` 截断 | 现由 `text` 顶,改为上游的截断 |
+
+### 收缩的真实代价(如实记)
+
+每条命中不再有 `### N.<heading>` 标题行,不再有 `Tags: a, b, c`,来源行从
+`Source: <path> (unit N, <marker>)` 变为上游的 `citation`,而
+`filters.kind`/`filters.entryType`/`filters.tag` 三个过滤维度消失。
+
+**换来 2 个真实字段**:`startLine`/`endLine` 上游 chunk 表真有,mem-plus 硬写 0 —— 所以模型
+第一次能拿到真实行号,`memory_get` 的引用才第一次指得准。**用 8 个自创字段换 2 个真实字段。**
+
+### 不要做的事
+
+**不要自己写一个「从 chunk 文本里把 heading 解析出来」的解析器。** 那是把上游**没有**的东西自己补
+回来,属于偏离,不属于「血管不兼容的接缝」。按目的答案从一开始就是收缩,不需要问。
+
 ## 要改什么(对照结论,不是推测)
 
 按"能整体搬 / 要搬但需接缝 / 是 L3"三档,对照上面的表:
