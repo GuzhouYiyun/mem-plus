@@ -650,9 +650,11 @@ embeddingCacheTable, includeEmbeddingCache })`,FTS 调 `ensureMemoryChunkFtsSche
 `documents.root`(home/wiki,`MemorySource` 是封闭联合 `memory | sessions`)、
 `documents.project`、`units.kind`、`units.entry_type`、`units.day`/`ts`、`units.marker`。
 
-## P3 `extensions/active-memory/` 15 个文件 —— 试搬过,能编译,但不能只搬
+## P3 `extensions/active-memory/` —— 两堵墙,都撞过了,都不该再试
 
-**已验证**(2026-10-13):15 个文件逐字节从 openclaw 复制进 `extensions/active-memory/` 后,
+### 第一堵(2026-10-13):打包带不走
+
+**已验证**:15 个文件逐字节从 openclaw 复制进 `extensions/active-memory/` 后,
 
 - 相对 import 全部可解析 —— `index.ts` 缺的 `./trigger-recall.js` 有了,当初那两处断裂
   是同一次删除造成的
@@ -665,7 +667,40 @@ embeddingCacheTable, includeEmbeddingCache })`,FTS 调 `ensureMemoryChunkFtsSche
 下只有 `escalation.ts` 和 `types.ts` 被手工加进去。那 15 个文件不在 `files` 里 = 打包带不走
 = 装到用户机器上就是死的,与当初被删时的处境一模一样。**已 `git clean` 撤回,不留半成品。**
 
-真正要处理的是双份 `trigger-recall`:
+### 第二堵(2026-10-14):运行期装不进来 —— 而类型门是绿的
+
+这一堵只针对 `prompt.ts`(14421 字节)与 `query.ts`(7753 字节)。两个文件逐字节复制进来后,
+`tsc` 报**自有路径 0 错**,与第一堵那次一样。**但 `import` 一次就抛:**
+
+```
+Cannot find module 'C:\...\src\agents\model-thinking-default.js'
+  imported from C:\...\src\plugin-sdk\agent-runtime.ts
+```
+
+链是:`prompt.ts` → `./query.js`(只为一个 20 行的 `extractTextContentParts`)→
+顶层 `import ... from "openclaw/plugin-sdk/agent-runtime"`(为一个**无关**的 `getModelRef`)→
+alias shim `export * from "../../../src/plugin-sdk/agent-runtime.ts"` →
+import 12 个 `../agents/*.js` 与 `../tts/tts.js`,这些**上游有、这棵树没 vendor**。
+
+顺着再走上游树,传递闭包 **8794 个文件**。
+
+**为什么这堵墙更该被记住**:它与第一堵的性质不同。第一堵是"门绿但打包不带",这一堵是
+**"门绿但模块加载不了"** —— 而 `tsconfig.plugin.json` 验的是**类型**,验不出**加载**。
+新增的 17 条类型错误全在 `src/plugin-sdk/agent-runtime.ts` 的 `TS2307`,落在 AGENTS.md 记的
+那 434 个不可解析 specifier 之内,看起来像裁剪的正常产物,极易被当成无害噪声放过去。
+
+> 上一条里"19 个 `openclaw/plugin-sdk/*` 依赖全部存在"这句是对的,但它只验了 **shim 存在**。
+> **shim 存在 ≠ shim 能加载** —— shim 的转发目标才是真正要能解析的东西。
+
+**结论:按规则(`openclaw 有源码就不许自己改`),这两份保持不搬**,`deep-recall.ts` 与
+`trigger-recall.ts` 里那份誊写保留,理由写在代码里。绕过只有两条路,都不允许:改它们的
+import,或补出 8794 个模块。**解除阻塞的判据是清楚的**:要么这棵树补齐 `src/agents/*` 与
+`src/tts/*`(取消裁剪),要么上游把 `extractTextContentParts` 拆到不依赖 agent-runtime 的模块。
+两者都不是 mem-plus 该单方面做的。
+
+**能搬的已经搬了**:`types.ts` 的依赖闭包是 **0 个新文件**,十三个常量已从上游那份读。
+
+### 双份 `trigger-recall`
 
 | | |
 |---|---|

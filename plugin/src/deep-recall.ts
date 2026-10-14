@@ -10,15 +10,27 @@
 //   dead memory tool is noticed -- not the user's conversation history.
 //
 // WHAT IS CALLED DIRECTLY HERE
-//   `escalation.ts` imports and runs unchanged (it has zero SDK dependencies), so
-//   `resolveRecallEscalationDecision` and `hasRecallIntent` are upstream's own functions.
-//   The text of the recall prompt and the summary normalisation below are copied verbatim out
-//   of `prompt.ts`, because that *module* cannot be imported here: it reaches
-//   `openclaw/plugin-sdk/agent-runtime`, whose `../agents/model-thinking-default.js` the trim
-//   removed. The prompt text is the part that carries policy; the module plumbing around it
-//   is not reachable. The constants it needs (`NO_RECALL_VALUES`,
-//   `TIMEOUT_BOILERPLATE_PATTERNS`, the tag names, the outcome texts) come from `types.ts` and
-//   are reproduced with upstream's values.
+//   `escalation.ts` and `types.ts` are vendored in this tree byte-identical to upstream and load
+//   cleanly, so `resolveRecallEscalationDecision`, `hasRecallIntent` and every constant below are
+//   upstream's own values, not copies.
+//   `prompt.ts` is NOT vendored, and the block below is still transcribed out of it. The reason is
+//   measured, not guessed, and it is a RUNTIME wall rather than a type wall:
+//
+//     prompt.ts -> ./query.js            (only for extractTextContentParts, a 20-line function)
+//                -> openclaw/plugin-sdk/agent-runtime   (top-level, for an unrelated getModelRef)
+//                -> src/plugin-sdk/agent-runtime.ts
+//                -> ../agents/model-thinking-default.js   <- absent from this trimmed tree
+//
+//   Copying `prompt.ts` and `query.ts` in verbatim was tried on 2026-10-14: `tsc` reported zero
+//   new errors in our own paths, and `import`ing the module threw `Cannot find module
+//   '.../src/agents/model-thinking-default.js'` immediately. The transitive closure of that shim in
+//   the upstream tree is 8794 files, so unblocking it means either restoring the trim or upstream
+//   moving `extractTextContentParts` somewhere agent-runtime-free -- neither is ours to do.
+//   `types.ts` by contrast has a closure of ZERO new files, which is why it is vendored and this
+//   is not.
+//
+//   The prompt text is the part that carries policy, so it is transcribed with upstream's wording.
+//   Modifying the vendored copy to drop the import is not an option: these files are openclaw's.
 //
 // WHY THE LOOP IS WRITTEN HERE
 //   Upstream gets a real tool loop because `runEmbeddedAgent` dispatches to the host's agent
@@ -91,11 +103,11 @@ const MAX_TOOL_ROUNDS = 4;
 // --- upstream prompt / summary text, copied verbatim ------------------------------
 // `ASSISTANT_CHITCHAT_PATTERNS`, `ACTIVE_MEMORY_RECALL_OUTCOME_TEXT`,
 // `buildPromptStyleLines`, `buildRecallPrompt`, `normalizeActiveSummary`, `truncateSummary`,
-// `buildPromptPrefix` and `buildRecallOutcomePrefix` are all upstream's `prompt.ts`. That file
-// is NOT vendored here, so they are transcribed. `ActiveMemoryPromptStyle` -- the union those
-// switch on -- did live in `types.ts`, so it is imported from there rather than redeclared: a
-// locally declared copy of a union that upstream defines once is exactly the kind of second
-// source of truth that drifts.
+// `buildPromptPrefix`, `buildRecallOutcomePrefix` and `escapeXml` are upstream's `prompt.ts`,
+// transcribed here because that module cannot be vendored -- see the header note for the measured
+// reason and the 8794-file closure. `ActiveMemoryPromptStyle`, the union these switch on, DID live
+// in `types.ts`, so it is imported from there rather than redeclared: a locally declared copy of a
+// union upstream defines once is exactly the kind of second source of truth that drifts.
 
 /** Upstream's `buildPromptStyleLines`. */
 function buildPromptStyleLines(style: ActiveMemoryPromptStyle): string[] {
