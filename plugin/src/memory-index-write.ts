@@ -39,7 +39,6 @@
 //   carry `untrusted` while the curated rows carry `agent` in the same database.
 import type { DatabaseSync } from "node:sqlite";
 import { hashText } from "../../packages/memory-host-sdk/src/host/hash.js";
-import { encodeMemoryEmbedding } from "../../packages/memory-host-sdk/src/host/embedding-vector.js";
 import { chunkEmbeddingColumn } from "./memory-index-schema.js";
 import { chunkMemorySource, DEFAULT_MEMORY_CHUNKING } from "./memory-chunking.js";
 import type { MemPlusSource } from "./memory-corpus.js";
@@ -127,14 +126,26 @@ export function writeSourceChunks(params: {
   // metadata unconditionally for the same reason its candidate query can then say
   // `metadata.triggers is not null` instead of having to distinguish "no row" from "no
   // triggers" -- which would be indistinguishable anyway.
-  // `memory_index_chunks_vec` is a virtual table from the optional sqlite-vec extension,
-  // so it does not exist until the extension is loaded -- upstream's `vectorReady` flag is
-  // exactly this, and `buildMemoryIndexStrictSchema` deliberately does not create it. The
-  // statement is therefore prepared lazily on the first embedding and skipped entirely when
-  // there is none, which is what makes a keyword-only install work under upstream's schema.
-  let insertVector: ReturnType<DatabaseSync["prepare"]> | undefined;
-  let vectorReady = false;
-  let vectorUnavailable = false;
+  //
+  // `memory_index_chunks_vec` IS NOT WRITTEN, AND THAT IS MEASURED RATHER THAN ASSUMED.
+  //   It is a virtual table from the optional `sqlite-vec` extension, which upstream loads
+  //   through `packages/memory-host-sdk/src/host/sqlite-vec.ts` (vendored here, byte-identical,
+  //   exporting `loadSqliteVecExtension`). That loader needs the `sqlite-vec` npm package plus
+  //   upstream's `memory.search.store.vector.extensionPath` setting. Measured 2026-10-14:
+  //   the package is not installed, not a dependency, and the setting has no counterpart in this
+  //   project. So the table does not exist, every `prepare` on it throws, and an earlier version
+  //   of this function carried a hand-written `vectorReady` / `vectorUnavailable` gate that
+  //   swallowed the throw -- a branch that looked alive in the source and had never once
+  //   succeeded. It is deleted rather than wired up.
+  //
+  //   WHY DELETING IS RIGHT, MEASURED: nothing is lost but an index shape. Upstream's schema
+  //   declares `embedding BLOB NOT NULL` on `memory_index_chunks` and `buildMemoryIndexStrictSchema`
+  //   does not create the vec table, so the embedding is stored on the chunk row either way --
+  //   which is what `storeVector` writes and what `searchVector` reads. Vector search works
+  //   without the extension; it does a bounded scan (`candidateLimit`, default 20 000) instead of
+  //   a KNN lookup. The live index holds 1 996 units across 24 documents, and a bounded scan over
+  //   that is not a cost worth a native extension and a new setting. If that ever changes, the
+  //   fix is upstream's own loader plus a dependency decision, not a revived local branch.
   const upsertSource = db.prepare(
     `INSERT INTO memory_index_sources (path, source, hash, mtime, size)
      VALUES (?, ?, ?, ?, ?)
@@ -177,23 +188,6 @@ export function writeSourceChunks(params: {
         provenance.supersedesKey ?? null,
       );
       insertRecall.run(id, chunk.importance, chunk.triggers, chunk.projectKey);
-      if (embedding && embedding.length > 0) {
-        if (!vectorReady && !vectorUnavailable) {
-          try {
-            insertVector = db.prepare(
-              "INSERT OR REPLACE INTO memory_index_chunks_vec (id, embedding) VALUES (?, ?)",
-            );
-            vectorReady = true;
-          } catch {
-            // The extension is absent. Upstream reports this as "vector index
-            // unavailable" and keeps the chunk row; the embedding column already holds
-            // the bytes, so a later reindex with the extension loaded can pick them up.
-            // Failing the whole write here would be strictly worse than losing the vector.
-            vectorUnavailable = true;
-          }
-        }
-        if (insertVector) insertVector.run(id, encodeMemoryEmbedding(embedding));
-      }
       written += 1;
     }
     upsertSource.run(relativePath, source, params.hash, params.mtime, params.bytes);
@@ -207,6 +201,9 @@ export function writeSourceChunks(params: {
 
 /** Remove every row for one `(path, source)`, including the vectors behind them. */
 export function clearSource(db: DatabaseSync, relativePath: string, source: MemPlusSource): number {
+  // No per-row vector deletes: `memory_index_chunks_vec` is never written, so there is nothing
+  // in it to clear. See the note in `writeSourceChunks` for why that is a measured fact rather
+  // than a gap. The chunk rows carry the embedding on themselves and go with the DELETE below.
   const ids = (
     db.prepare("SELECT id FROM memory_index_chunks WHERE path = ? AND source = ?").all(relativePath, source) as {
       id: string;
@@ -217,14 +214,6 @@ export function clearSource(db: DatabaseSync, relativePath: string, source: MemP
   const own = !db.isTransaction;
   if (own) db.exec("BEGIN");
   try {
-    for (const id of ids) {
-      // Same extension gating as the insert: the table may not exist in this build.
-      try {
-        db.prepare("DELETE FROM memory_index_chunks_vec WHERE id = ?").run(id);
-      } catch {
-        /* vector table not present */
-      }
-    }
     db.prepare("DELETE FROM memory_index_chunks WHERE path = ? AND source = ?").run(relativePath, source);
     db.prepare("DELETE FROM memory_index_sources WHERE path = ? AND source = ?").run(relativePath, source);
     if (own) db.exec("COMMIT");

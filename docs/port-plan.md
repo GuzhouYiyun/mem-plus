@@ -787,36 +787,32 @@ import,或补出 8794 个模块。**解除阻塞的判据是清楚的**:要么�
 > 4240 = 基线。留一个来源不明的桩在树里,比留着 17 条明确的 `TS2307` 更糟 —— 后者至少
 > 说清了缺什么。
 
-## 待用户拍板:sqlite-vec(2026-10-14 实测,这是个取舍不是缺陷)
+## sqlite-vec:那段分支已删,因为它不是取舍(2026-10-14)
 
-`memory-index-write.ts` 里 130-197 行那段手写的 `vectorReady` / `vectorUnavailable` 门,
-**永远走不通**,已实测:
+我先把它写成「需要用户拍板的取舍」,那是**没看活区数据就提问**,该纠正。
+
+`memory-index-write.ts` 里那段手写的 `vectorReady` / `vectorUnavailable` 门已删。删之前把四件事
+都测了:
 
 - `sqlite-vec` **未安装**,也**不在 `dependencies` 里**;
 - 上游的加载器 `packages/memory-host-sdk/src/host/sqlite-vec.ts` 在树里且逐字节相同,导出
   `loadSqliteVecExtensionFromPath` 与 `loadSqliteVecExtension`,但它要那个 npm 包;
 - 上游的配置键(`memory.search.store.vector.extensionPath`)在 mem-plus 里**零出现**;
-- 于是 `memory_index_chunks_vec` 这个虚拟表**不存在**,对它的 `db.prepare` **确实抛错**,
-  而写入路径把那个错吞掉 —— 源码里那段分支看着是活的,运行期一次都没成功过。
+- 于是 `memory_index_chunks_vec` 不存在,对它的 `db.prepare` **确实抛错**,而旧代码把那个错吞掉
+  —— **源码里那段分支看着是活的,运行期一次都没成功过。**
 
-**但功能没缺。** 上游的 schema 把 embedding 放在 chunk 行上(`embedding BLOB NOT NULL`,
-`memory-schema-base.ts`),所以:
+**为什么删掉不算功能损失**,三条都是量的:
 
-- 写入在 vec 表缺席时照常成功(探针:written=2);
-- `storeVector` 写的是 chunk 行的 `embedding` 列;
-- `searchVector` 读那个列,**在没有 sqlite-vec 的情况下照常返回命中**。
+1. 上游的 schema 声明 `embedding BLOB NOT NULL`,`buildMemoryIndexStrictSchema` 也不建那个
+   vec 表 —— embedding 本来就存在 chunk 行上。探针:vec 表缺席时写入照常成功(`written=2`),
+   `storeVector` 写那个列,`searchVector` 读那个列并返回命中。
+2. **活区索引 1 996 行、24 个文件**(2026-10-14 实测)。有界扫描(`candidateLimit` 默认 20 000)
+   在这个量级上花不掉可测量的时间,近邻索引换不来什么。
+3. **活区有向量的行数是 0** —— 按 AGENTS.md,没有 `bge-m3` 模型时向量检索一直是关的。
 
-所以缺的不是功能,是**索引形态**:上游在 `vectorReady` 时走 `runVectorKnn` 的近邻索引,
-mem-plus 永远走 `searchChunksByEmbedding` 的全表扫描(带 `candidateLimit` 20000 的上限)。
+所以缺的只是一个索引形态,代价是一个可选原生扩展加一个新设置项。删。
 
-**两个选项,都需要用户定,我不单方面决定**:
-
-1. **加依赖 + 配置面** —— 把 `sqlite-vec` 加进 `dependencies`,照上游的形状开一个
-   `memory.search.vector.extensionPath`,然后调上游那份加载器。代价是安装体积与一个可选原生
-   扩展(AGENTS.md:「The user is the user」—— 不该替用户往安装里塞可选原生扩展)。
-2. **删掉那段分支** —— 它现在恒失败,留着只是让人以为 KNN 路径在。代价是将来要加回来。
-
-倾向 2,因为 1 要动用户的安装,而收益只是一个索引形态;但这是取舍不是对错。
+`clearSource` 里那段逐行删 vec 表的循环一起去掉了:那张表里从来没有东西可清。
 
 ## 三个血管文件的归属(2026-10-14 逐个查过)
 
