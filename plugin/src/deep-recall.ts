@@ -56,6 +56,7 @@ import {
   ACTIVE_MEMORY_CLOSE_TAG,
   ACTIVE_MEMORY_CONTEXT_HEADER,
   ACTIVE_MEMORY_OPEN_TAG,
+  DEFAULT_MAX_CACHE_ENTRIES,
   NO_RECALL_VALUES,
   TIMEOUT_BOILERPLATE_PATTERNS,
   type ActiveMemoryPromptStyle,
@@ -331,24 +332,74 @@ export function readDeepRecallConfig(options: unknown): DeepRecallConfig {
 
 export type DeepRecallOutcome = { readonly context: string } | { readonly context: null; readonly reason: string };
 
-/** Upstream's circuit breaker, keyed as it is: model, not session. */
+/**
+ * Upstream's circuit breaker, transcribed with upstream's three behaviours.
+ *
+ * WHY TRANSCRIBED RATHER THAN CALLED
+ *   Upstream's lives in `recall-state.ts`, whose runtime closure is 15 files / 134.5 KB --
+ *   `src/config/sessions/session-accessor.sqlite-*`, `src/plugins/memory-audience.ts`,
+ *   `memory-provider-adapter.ts`, `memory-runtime.ts`. That is openclaw's session store and its
+ *   memory-provider runtime, neither of which OpenCode has. Importing four small functions would
+ *   mean shipping 134.5 KB of machinery nothing here calls, which is the same trade P3 already
+ *   recorded as wrong for the 15 active-memory files. So the four functions are transcribed and
+ *   the gap is written down rather than papered over.
+ *
+ * THREE BEHAVIOURS THE FIRST TRANSCRIPTION LOST, now restored
+ *   1. Cooldown expiry RESETS. Upstream `isCircuitBreakerOpen` deletes the entry when the
+ *      cooldown has lapsed and returns false. The old version only compared, so the stale count
+ *      survived: after a lapse the next failure incremented from it and the breaker re-opened on
+ *      the first retry instead of after `circuitBreakerMaxTimeouts` fresh ones.
+ *   2. `recordCircuitBreakerTimeout` SWEEPS. Upstream deletes every entry whose cooldown has
+ *      lapsed on each record. Without it, entries for models that are no longer used are never
+ *      removed -- the map only ever grew.
+ *   3. It is BOUNDED. Upstream evicts the oldest key once the map passes
+ *      `DEFAULT_MAX_CACHE_ENTRIES` (1000, from the vendored `types.ts`), and reinserts the
+ *      written key so a refreshed one is newer than its peers. Both are there now.
+ *
+ * THE ONE DIVERGENCE LEFT, and it is the key
+ *   Upstream's key is `buildCircuitBreakerKey(agentId, provider?, model?)` =
+ *   `` `${agentId}:${provider ?? "unknown"}/${model ?? "unknown"}` `` -- per (agent, provider,
+ *   model). This one is `` `${providerID}/${id}` ``, with no agent segment, because the OpenCode
+ *   call path carries no agent identity: `runDeepRecall` receives `ctx`, `model` and the message
+ *   text, and the agent name only exists on a `SessionMessageView`, which this path never
+ *   receives. So one agent's timeouts can open the breaker for another's. Registered in
+ *   `docs/port-plan.md`; the fix is to plumb the agent through, not to guess a value for it.
+ *
+ * `nowMs` stays a parameter where upstream calls `Date.now()` inline. That is a deliberate
+ * deviation in the other direction: the decay and the breaker are both time-dependent, and an
+ * injectable clock is what lets a probe assert them instead of sleeping.
+ */
 const breakers = new Map<string, { consecutiveTimeouts: number; lastTimeoutAt: number }>();
 
 function breakerOpen(key: string, config: DeepRecallConfig, nowMs: number): boolean {
   const entry = breakers.get(key);
-  if (!entry) return false;
-  return (
-    entry.consecutiveTimeouts >= config.circuitBreakerMaxTimeouts &&
-    nowMs - entry.lastTimeoutAt < config.circuitBreakerCooldownMs
-  );
+  if (!entry || entry.consecutiveTimeouts < config.circuitBreakerMaxTimeouts) {
+    return false;
+  }
+  if (nowMs - entry.lastTimeoutAt >= config.circuitBreakerCooldownMs) {
+    // Cooldown expired — reset and allow one attempt through, upstream's behaviour.
+    breakers.delete(key);
+    return false;
+  }
+  return true;
 }
 
-function noteTimeout(key: string, nowMs: number): void {
+function noteTimeout(key: string, nowMs: number, cooldownMs: number): void {
+  for (const [entryKey, entry] of breakers) {
+    if (nowMs - entry.lastTimeoutAt >= cooldownMs) breakers.delete(entryKey);
+  }
   const entry = breakers.get(key);
+  // Reinsert keeps refreshed keys newer than peers, so the capacity eviction below drops the
+  // genuinely stale one rather than an arbitrary one.
+  breakers.delete(key);
   breakers.set(key, {
     consecutiveTimeouts: (entry?.consecutiveTimeouts ?? 0) + 1,
     lastTimeoutAt: nowMs,
   });
+  if (breakers.size > DEFAULT_MAX_CACHE_ENTRIES) {
+    const oldestKey = breakers.keys().next().value;
+    if (oldestKey !== undefined) breakers.delete(oldestKey);
+  }
 }
 
 function noteSuccess(key: string): void {
@@ -492,7 +543,7 @@ export async function runDeepRecall(params: {
     if (reply.text === null) {
       // Upstream's outcome for a recall that did not finish in time: say so rather than
       // pretend there is no memory.
-      noteTimeout(breakerKey, Date.now());
+      noteTimeout(breakerKey, Date.now(), config.circuitBreakerCooldownMs);
       return { context: buildRecallOutcomePrefix("unavailable") };
     }
     const turn = parseTurn(reply.text);

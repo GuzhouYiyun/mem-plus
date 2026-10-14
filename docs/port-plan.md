@@ -787,8 +787,55 @@ import,或补出 8794 个模块。**解除阻塞的判据是清楚的**:要么�
 > 4240 = 基线。留一个来源不明的桩在树里,比留着 17 条明确的 `TS2307` 更糟 —— 后者至少
 > 说清了缺什么。
 
-`session-policy.ts`(9 个文件)与 `recall-state.ts`(21 个文件 / 158 KB,会拖进
-`src/config/sessions/*` 与 `src/routing/*`)还没搬。
+`session-policy.ts` 与 `recall-state.ts` 都不搬(2026-10-14 实测,按需求侧先量的)
+
+**先量需求侧,再量供给侧。** 两个文件的闭包都不大(9 与 15 个文件),但先要问「mem-plus 有没有
+这个概念」:
+
+| 上游导出 | mem-plus 有没有对应物 |
+|---|---|
+| `resolveChatType` / `isAllowedChatId` / `isActiveMemoryGloballyEnabled(cfg)` | **无**。mem-plus 不是聊天客户端,没有 channel/telegram/discord 概念,也没有 `OpenClawConfig` |
+| `resolveCommandSessionKey` / `formatActiveMemoryCommandHelp` | **无**。全树搜不到任何命令注册 |
+| `isSessionActiveMemoryDisabled` / `setSessionActiveMemoryDisabled` | **无**。没有按会话禁用的概念 |
+| `shouldSkipActiveMemoryForHarnessSession` | **无**。OpenCode 没有 harness 会话 |
+| `buildCircuitBreakerKey` / `isCircuitBreakerOpen` / `recordCircuitBreakerTimeout` / `resetCircuitBreaker` | **有** —— 对着 `deep-recall.ts` 里手写的 `breakers` map |
+| `buildCacheKey` / `getCachedResult` / `setCachedResult` / `shouldCacheResult` | **无**。mem-plus 的 recall 没有 run 身份,没有可键的请求内复用(trigger-recall 头部已记同一原因) |
+| `resolveActiveRecallForRun` / `forgetActiveRecallRun` / `buildMemoryAudienceCacheIdentity` | **无**。同上,且没有 audience 概念 |
+
+`session-policy.ts` 17 个导出里**零个**有对应物;`recall-state.ts` 17 个里 4 个有。
+
+**结论:两个都不搬。** 搬 `session-policy.ts` 是加 9 个文件没人调 —— 正是 P3 记过的那 13 个死文件
+那一类。搬 `recall-state.ts` 是加 15 个文件 / 134.5 KB,其中 11 个是 openclaw 的会话访问器
+(`src/config/sessions/session-accessor.sqlite-*`、`session-delivery-generation.ts`、
+`session-incognito-binding.ts`)与 memory provider 运行时(`src/plugins/memory-audience.ts`、
+`memory-provider-adapter.ts`、`memory-runtime.ts`)—— 那是 L3 边界,OpenCode 有自己的会话模型
+也没有 memory 插件槽。为四个小函数背 134.5 KB 的死机构不划算。
+
+**那四个函数改为「誊写但补齐上游行为」**,这一刀做完了(见下)。
+
+### 断路器:誊写的那份丢了三条上游行为,已补
+
+| | 上游 | 誊写版原来 | 现在 |
+|---|---|---|---|
+| 冷却到期 | `isCircuitBreakerOpen` **删条目**并返回 false | 只比较,**计数残留** | 删条目 |
+| 记录时 | 扫一遍,删掉所有冷却已过的键 | 不扫,只增长 | 扫 |
+| 容量 | 超 `DEFAULT_MAX_CACHE_ENTRIES` 删最旧,且**重插**被写的键 | 无上限 | 有,且重插 |
+
+第一条是真实的行为差异:冷却过去后旧计数还在,下一次失败从它往上加,于是**第一次重试就重新
+打开断路器**,而不是要攒够 `circuitBreakerMaxTimeouts` 次。恢复后第一次成功会 `noteSuccess`
+清掉它,所以只在「冷却后第一次又失败」时暴露 —— 不容易发现,但确实是错的方向。
+
+`nowMs` 仍是参数而上游内联 `Date.now()`,这是**反方向的刻意偏离**:断路器与时间衰减都是时间相关
+的,可注入的时钟才能让探针断言它们,而不是去睡。
+
+**剩下的一处偏离:键没有 agent 段。** 上游是
+`buildCircuitBreakerKey(agentId, provider?, model?)` = `` `${agentId}:${provider ?? "unknown"}/${model ?? "unknown"}``,
+即按 (agent, provider, model) 三元组;这里是 `` `${providerID}/${id}` ``。
+
+原因是调用路径上没有 agent 身份,**不是没去找**:`runDeepRecall` 收到的是 `ctx`、`model` 与消息
+文本;`SessionMessageView.agent` 确实存在,但那是**消息**上的字段,而 `recall-inject.ts` 的调用点
+拿到的是 `event` 与 `message` 字符串,没有那条 `SessionMessageView`。所以一个 agent 的超时可能
+把另一个 agent 的断路器打开。**修法是把 agent 接进来,不是猜一个值填上去。**
 
 ### 双份 `trigger-recall`
 
