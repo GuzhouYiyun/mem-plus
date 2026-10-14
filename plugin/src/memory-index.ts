@@ -1302,16 +1302,6 @@ export function search(params: {
   });
 }
 
-/** One unit with its full text, for `memory_get`. */
-export function getUnit(db: DatabaseSync, unitId: number): SearchHit | null {
-  const row = db
-    .prepare(
-      `SELECT ${HIT_COLUMNS} FROM units u JOIN documents d ON d.id = u.document_id WHERE u.id = ?`,
-    )
-    .get(unitId) as Record<string, unknown> | undefined;
-  return row ? rowToHit(row) : null;
-}
-
 export function indexStats(db: DatabaseSync): IndexStats {
   const count = (sql: string): number =>
     (db.prepare(sql).get() as { n: number }).n;

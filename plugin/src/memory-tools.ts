@@ -26,7 +26,7 @@ import type { DatabaseSync } from "node:sqlite";
 import type { Plugin } from "@opencode/plugin";
 import type { MemPlusService } from "./model/client.js";
 import {
-  getUnit,
+  
   indexStats,
   search,
   storeVector,
@@ -526,14 +526,12 @@ async function runGet(deps: RetrievalDeps, input: RawInput): Promise<{
   if (!db) {
     return { content: "Memory search is unavailable: no `node:sqlite` in this runtime.", metadata: {} };
   }
-  // `unitId` is the deprecated spelling and still resolves, because a transcript that
-  // learned the old contract has no other way to reach the unit. It is tried only when
-  // no path was given; upstream requires `path` and knows nothing about unit ids.
-  const unitId = input["unitId"];
-  if (str(input, "path") === undefined && typeof unitId === "number" && Number.isFinite(unitId)) {
-    return runGetByUnit(deps, Math.trunc(unitId));
-  }
-
+  // Upstream's `memory_get` takes `path` and nothing else that identifies a chunk: its index
+  // is chunk-keyed and those ids are not model-facing, so a self-invented `unitId` parameter
+  // was the one thing here with no upstream counterpart. It was already marked Deprecated
+  // and is now gone rather than kept, along with `runGetByUnit` and `index.getUnit`, which
+  // existed only to serve it. A transcript that learned the old contract has to go through
+  // `path` now, which is what upstream requires.
   const path = str(input, "path");
   if (path === undefined) {
     return {
@@ -581,46 +579,6 @@ async function runGet(deps: RetrievalDeps, input: RawInput): Promise<{
   };
 }
 
-async function runGetByUnit(
-  deps: RetrievalDeps,
-  id: number,
-): Promise<{ content: string; metadata: Record<string, unknown> }> {
-  const db = deps.db;
-  if (!db) {
-    return { content: "Memory search is unavailable: no `node:sqlite` in this runtime.", metadata: {} };
-  }
-  const hit = getUnit(db, id);
-  if (!hit) {
-    return {
-      content:
-        `No unit ${id}. It may have been reindexed away; ` +
-        "run memory_reindex and search again.",
-      metadata: { error: "not found", unitId: id },
-    };
-  }
-  // Built by appending rather than by filtering a literal array: the blank lines
-  // are what markdown needs between a heading, a label and a body, and a
-  // `filter(part !== "")` sweep removes exactly the separators it should keep.
-  const body: string[] = [`# ${hit.heading || "(untitled)"}`, ""];
-  const label = [hit.entryType, dayOf(hit), hit.project, hit.path].filter(Boolean).join(" · ");
-  if (label) body.push(`\`${label}\``);
-  if (hit.tags.length > 0) body.push(`Tags: ${hit.tags.join(", ")}`);
-  body.push("", hit.text);
-
-  return {
-    content: body.join("\n"),
-    metadata: {
-      unitId: hit.unitId,
-      project: hit.project,
-      path: hit.path,
-      day: hit.day,
-      type: hit.entryType,
-      tags: hit.tags,
-      marker: hit.marker,
-      deprecated: true,
-    },
-  };
-}
 
 async function runReindex(
   deps: RetrievalDeps,
@@ -871,11 +829,7 @@ export function buildMemoryTools(deps: RetrievalDeps): RetrievalTools {
         path: { type: "string", description: "The memory file path a memory_search result reported." },
         from: { type: "integer", minimum: 1, description: "First line to read. Default 1." },
         lines: { type: "integer", minimum: 1, description: "How many lines to read." },
-        // Kept so an existing transcript still resolves. Upstream has no unit ids --
-        // its index is chunk-keyed and its ids are not model-facing -- so this is the
-        // one parameter here with no upstream counterpart.
-        unitId: { type: "number", description: "Deprecated: read by `path` instead." },
-      },
+        },
       required: ["path"],
       additionalProperties: false,
     },
