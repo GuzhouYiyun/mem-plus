@@ -177,7 +177,8 @@ export function selectStrongTriggerMatches(
       (left, right) =>
         right.matchScore - left.matchScore ||
         left.path.localeCompare(right.path) ||
-        left.unitId - right.unitId,
+        left.startLine - right.startLine ||
+        left.chunkId.localeCompare(right.chunkId),
     )
     .slice(0, TRIGGER_INJECTION_LIMIT);
 }
@@ -186,8 +187,12 @@ export function buildTriggerRecallContext(matches: TriggerRecallMatch[]): string
   if (matches.length === 0) {
     return undefined;
   }
+  // Upstream's own line (`active-memory/trigger-recall.ts:113` in the upstream repo, and
+  // `:277` for the citation form): the excerpt, then the source label. `snippet` replaces
+  // the `text` field this used, and `citation` replaces the hand-built `#L${startLine}` --
+  // which now carries a real line range instead of a unit id wearing one.
   const summary = matches
-    .map((entry) => `- ${entry.text.trim()} (Source: ${entry.path}#L${entry.startLine})`)
+    .map((entry) => `- ${entry.snippet.trim()} (Source: ${entry.citation ?? entry.path})`)
     .join("\n");
   return buildPromptPrefix(truncateUtf16Safe(summary, MAX_TRIGGER_CONTEXT_CHARS));
 }
@@ -261,14 +266,15 @@ export async function resolveTriggerRecall(params: {
         db: params.db,
         onError: params.onError,
       });
-      // Eligible provider facts win; between equally eligible copies the scored one
-      // keeps its relevance. Upstream keys the dedupe on the provider reference; the
-      // index's identity is `unitId`.
-      const entries = new Map<number, SearchHit>();
+      // Upstream keys this dedupe on the provider reference; the index's identity is the
+      // chunk row id, which is a hash over `(source, path, startLine, endLine, text, model)`
+      // -- so two corpora holding the same bytes get different ids and both survive, which is
+      // what separating them by `source` is for.
+      const entries = new Map<string, SearchHit>();
       for (const entry of [...triggerCandidates, ...retrieved]) {
-        const existing = entries.get(entry.unitId);
+        const existing = entries.get(entry.chunkId);
         if (!existing || (existing.triggers ?? null) === null) {
-          entries.set(entry.unitId, entry);
+          entries.set(entry.chunkId, entry);
         }
       }
       return [...entries.values()];

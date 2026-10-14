@@ -39,8 +39,18 @@ import {
   MEMORY_CHUNKING_VERSION,
   type MemoryChunk,
 } from "../../packages/memory-host-sdk/src/host/markdown-chunks.js";
-import { stripMemoryAnnotationCarriers } from "../../packages/memory-host-sdk/src/host/curated-annotations.js";
+import {
+  extractCuratedEntryRecallMetadata,
+  stripMemoryAnnotationCarriers,
+} from "../../packages/memory-host-sdk/src/host/curated-annotations.js";
 import { CURATED_SOURCE, type MemPlusSource } from "./memory-corpus.js";
+
+/** A chunk plus the recall annotations upstream reads from the lines it spans. */
+export type ChunkWithRecall = MemoryChunk & {
+  readonly importance: number | null;
+  readonly triggers: string | null;
+  readonly projectKey: string | null;
+};
 
 /** Upstream's resolved defaults, verbatim from `src/agents/memory-search.ts`. */
 export const DEFAULT_MEMORY_CHUNKING = { tokens: 400, overlap: 80 } as const;
@@ -57,8 +67,33 @@ function isCuratedPath(source: MemPlusSource, relativePath: string): boolean {
  * Upstream's chunking step, in upstream's order.
  *
  * The relative path is the workspace-relative one, because `perEntry` compares it against
- * `MEMORY.md` / `USER.md` literally; mem-plus's existing index stored absolute paths, which
- * is recorded as a divergence in `docs/port-plan.md`.
+ * `MEMORY.md` / `USER.md` literally; mem-plus's old index stored absolute paths, which is
+ * recorded as a divergence in `docs/port-plan.md`.
+ *
+ * The recall metadata is extracted per chunk span, from upstream's
+ * `manager-index-preparation.ts:82-97`:
+ *
+ *   const start = chunk.entryStartLine ?? chunk.startLine;
+ *   const end   = chunk.entryEndLine   ?? chunk.endLine;
+ *   metadata = extractCuratedEntryRecallMetadata({
+ *     curatedRoot:        pathClassification.curatedRoot,
+ *     projectScopeEligible: source === "memory" && normalizedEntryPath.toUpperCase() !== "USER.MD",
+ *     sourceLines: sourceLines.slice(start - 1, end),
+ *   });
+ *
+ * Three details that are upstream's and are kept:
+ *   - `entryStartLine` / `entryEndLine` are preferred over `startLine` / `endLine`. Under
+ *     `perEntry` the chunker reports the entry's span rather than the fragment's, which is
+ *     what makes an annotation anywhere in the entry reach every fragment of it.
+ *   - `sourceLines` is `[]` for any source other than `memory` (`manager-index-preparation.ts:60`),
+ *     so a wiki or session chunk never acquires recall metadata.
+ *   - `USER.md` is excluded from project scoping (`toUpperCase() !== "USER.MD"`), which is
+ *     not a typo in the transcription: it is upstream's rule, and it is why a project key in
+ *     `USER.md` does not scope to the project.
+ *
+ * The per-span cache is upstream's too (`:77`) and is not merely an optimisation here: a long
+ * entry produces many fragments that share one span, and parsing the annotations once per
+ * fragment is what upstream avoids.
  */
 export function chunkMemorySource(params: {
   readonly content: string;
@@ -66,15 +101,33 @@ export function chunkMemorySource(params: {
   /** Workspace-relative, POSIX separators. */
   readonly relativePath: string;
   readonly chunking?: { readonly tokens: number; readonly overlap: number };
-}): MemoryChunk[] {
+}): ChunkWithRecall[] {
   const perEntry = isCuratedPath(params.source, params.relativePath);
   const indexingContent =
     params.source === CURATED_SOURCE ? stripMemoryAnnotationCarriers(params.content) : params.content;
-  const chunks = chunkMarkdown(indexingContent, {
+  const baseChunks = chunkMarkdown(indexingContent, {
     ...(params.chunking ?? DEFAULT_MEMORY_CHUNKING),
     perEntry,
+  }).filter((chunk) => chunk.text.trim().length > 0);
+  const sourceLines =
+    params.source === CURATED_SOURCE ? params.content.replace(/\r\n/gu, "\n").split("\n") : [];
+  const bySpan = new Map<string, ReturnType<typeof extractCuratedEntryRecallMetadata>>();
+  return baseChunks.map((chunk) => {
+    const start = chunk.entryStartLine ?? chunk.startLine;
+    const end = chunk.entryEndLine ?? chunk.endLine;
+    const span = `${start}:${end}`;
+    let metadata = bySpan.get(span);
+    if (!metadata) {
+      metadata = extractCuratedEntryRecallMetadata({
+        curatedRoot: perEntry,
+        projectScopeEligible:
+          params.source === CURATED_SOURCE && params.relativePath.toUpperCase() !== "USER.MD",
+        sourceLines: sourceLines.slice(start - 1, end),
+      });
+      bySpan.set(span, metadata);
+    }
+    return Object.assign(chunk, metadata);
   });
-  return chunks.filter((chunk) => chunk.text.trim().length > 0);
 }
 
 export { MEMORY_CHUNKING_VERSION };

@@ -54,3 +54,22 @@ export const WIKI_SOURCE = "wiki" satisfies MemPlusSource;
 
 /** The curated corpus, which is also the only one eligible for automatic injection. */
 export const CURATED_SOURCE: MemPlusSource = "memory";
+
+/**
+ * Which tree on disk a file belongs to.
+ *
+ * This lived in `memory-parse.ts` and moved here when the parser stopped being the index's
+ * reader. It is a property of where a file lives, which is this module's subject, and the
+ * parser now imports it rather than declaring it.
+ *
+ * `"home"` is the memory home -- the curated `MEMORY.md` / `USER.md` plus every project's
+ * daily files. `"wiki"` is the imported document corpus. The name says tree rather than
+ * corpus on purpose: the two values differ by directory, and the mapping to a `source`
+ * column is {@link sourceOf}'s job, not this type's.
+ */
+export type IndexRoot = "home" | "wiki";
+
+/** The `source` column value a root is written under. */
+export function sourceOf(root: IndexRoot): MemPlusSource {
+  return root === "wiki" ? WIKI_SOURCE : CURATED_SOURCE;
+}

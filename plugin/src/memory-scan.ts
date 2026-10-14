@@ -19,12 +19,13 @@ import type { Dirent } from "node:fs";
 import path from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { homeProjectSlug, memoryFile, MEMORY_DIR_NAME, memoryHomeDir } from "./paths.js";
-import { indexDocument, indexAppendedTail, pruneMissing, type DocumentProvenance, type IndexRoot } from "./memory-index.js";
+import { indexDocument, indexAppendedTail, memoryRelativePath, pruneMissing, type DocumentProvenance, type IndexRoot } from "./memory-index.js";
 import {
   clearMemoryArtifactProvenance,
   readMemoryArtifactProvenance,
 } from "./memory-artifact-provenance.js";
 import { resolveMemoryPathClassification } from "./memory-path-provenance.js";
+import { sourceOf } from "./memory-corpus.js";
 import { sha256Hex } from "../../packages/normalization-core/src/node-crypto.js";
 
 /** Guard against a pathological tree; a memory directory is never this large. */
@@ -149,47 +150,51 @@ export type ReindexReport = {
 };
 
 /**
- * Documents whose size and mtime match what was indexed last time.
+ * Sources whose size and mtime match what was indexed last time, keyed by the
+ * memory-home-RELATIVE path the index stores.
  *
- * A NULL `content` means the row predates the mirror-hash migration, so it is
- * reported as changed even when size and mtime agree. That costs one extra read
- * per legacy document, once, and it is what lets a single `memory_reindex`
- * repair an index that already holds duplicates.
+ * The keys are relative because `memory_index_sources.path` is, and the caller walks
+ * absolute paths -- so `reindexFiles` relativises each discovered file before looking it up.
+ * Getting that backwards is silent: an absolute path matches no relative key, every file
+ * looks changed, and a `memory_reindex` re-chunks the whole memory home every time.
+ *
+ * `classified` is now per chunk rather than per document, and the reason for keeping it is
+ * unchanged. A missing provenance is not a reason to skip: provenance is classified from the
+ * file's PATH, not its bytes, so it stays valid when the content changes -- which is why
+ * skipping on bytes+mtime is sound for everything else. But a file indexed before the
+ * classifier was reachable has no class at all, and skipping it forever meant its NULL could
+ * never be repaired. `isPromotedTrustedMemoryEntry` rejects a NULL class, so every such
+ * document stayed invisible to lane 1c no matter what was asked. Measured 2026-10-11: 15 of
+ * 15 documents NULL, on an index that `memory_reindex` reported as fully up to date.
+ *
+ * A source with no chunks at all counts as unclassified, so an empty row is repaired rather
+ * than skipped forever.
  */
-function unchangedDocuments(
+function unchangedSources(
   db: DatabaseSync,
   root: IndexRoot,
 ): Map<string, { bytes: number; mtime: number; classified: boolean }> {
   const rows = db
-    .prepare("SELECT path, bytes, mtime, content, origin_class FROM documents WHERE root = ?")
-    .all(root) as {
+    .prepare(
+      `SELECT s.path AS path, s.size AS size, s.mtime AS mtime,
+              EXISTS (SELECT 1
+                        FROM memory_index_chunks c
+                        JOIN memory_index_chunk_provenance p ON p.chunk_id = c.id
+                       WHERE c.path = s.path AND c.source = s.source) AS classified
+         FROM memory_index_sources s
+        WHERE s.source = ?`,
+    )
+    .all(sourceOf(root)) as {
     path: string;
-    bytes: number;
+    size: number;
     mtime: number;
-    content: string | null;
-    origin_class: string | null;
+    classified: number;
   }[];
   return new Map(
-    rows
-      .filter((row) => row.content !== null)
-      .map((row) => [
-        row.path,
-        {
-          bytes: row.bytes,
-          mtime: row.mtime,
-          // A missing provenance is not a reason to skip.
-          //
-          // Provenance is classified from the file's PATH, not its bytes, so it stays
-          // valid when the content changes -- which is why skipping on bytes+mtime is
-          // sound for everything else. But a document indexed before the classifier was
-          // reachable has no class at all, and skipping it forever meant its NULL could
-          // never be repaired. `isPromotedTrustedMemoryEntry` rejects a NULL class, so
-          // every such document stayed invisible to lane 1c no matter what was asked.
-          // Measured 2026-10-11: 15 of 15 documents NULL, on an index that `memory_reindex`
-          // reported as fully up to date.
-          classified: typeof row.origin_class === "string",
-        },
-      ]),
+    rows.map((row) => [
+      row.path,
+      { bytes: row.size, mtime: row.mtime, classified: row.classified === 1 },
+    ]),
   );
 }
 
@@ -263,8 +268,17 @@ export async function reindexFiles(params: {
    * curated, what is system-owned and what is merely agent-written.
    */
   memoryHome?: string;
+  /**
+   * The embedding model to record on every chunk row.
+   *
+   * `model` is part of a chunk's identity upstream, so it has to be the same string the
+   * embed pass uses -- a reindex that wrote a different one would re-id every chunk and
+   * orphan every vector already stored. Omitted means upstream's `"fts-only"`, which is
+   * what a keyword-only install wants.
+   */
+  model?: string;
 }): Promise<ReindexReport> {
-  const known = unchangedDocuments(params.db, params.root);
+  const known = unchangedSources(params.db, params.root);
   const seen = new Set<string>();
   let indexed = 0;
   let skipped = 0;
@@ -273,7 +287,11 @@ export async function reindexFiles(params: {
 
   for (const entry of params.files) {
     seen.add(entry.file);
-    const previous = known.get(entry.file);
+    // The index keys on the memory-home-relative path; the scanner walks absolute ones.
+    // `upstreamRelativePath` is not exported -- `indexDocument` applies it -- so the same
+    // relativisation is done here by exporting it from `memory-index.ts`.
+    const relative = memoryRelativePath(entry.file);
+    const previous = known.get(relative);
     if (
       previous &&
       previous.bytes === entry.bytes &&
@@ -294,6 +312,7 @@ export async function reindexFiles(params: {
         bytes: entry.bytes,
         mtime: entry.mtime,
         provenance: await classify(params.memoryHome, entry, text),
+        ...(params.model ? { model: params.model } : {}),
       });
       units += result.written;
       if (result.mirrored) mirrored += 1;

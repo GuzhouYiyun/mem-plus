@@ -284,6 +284,78 @@ sqlite-vec 依赖(后者可选,缺了会退回进程内余弦)。
 **不要自己写一个「从 chunk 文本里把 heading 解析出来」的解析器。** 那是把上游**没有**的东西自己补
 回来,属于偏离,不属于「血管不兼容的接缝」。按目的答案从一开始就是收缩,不需要问。
 
+## 读侧收缩 —— 已完成(2026-10-14)
+
+索引读写两侧现在完全走上游的表。mem-plus 的 `documents` / `units` / `units_fts` / `vectors`
+四张表不再被创建、不再被写入、不再被读取;若存在于旧库中会被原样忽略(`DROP TABLE`
+不是打开索引时该对别人创建的文件做的事)。
+
+### 换上的上游原件(全部调用,零抄写)
+
+| 用途 | 上游函数 | 位置 |
+|---|---|---|
+| 六列 chunk 投影 | `projectMemorySearchRow` | `manager-search-shared.ts:15` —— **未 vendored,按原文誊写** |
+| citation | `formatCitation` | `tools.citations.ts:41` —— **未 vendored,按原文誊写** |
+| provenance + 召回标注 | `readMemoryRecallMetadata` | `memory-recall-metadata.ts:71` |
+| trigger 候选 | `readCuratedMemoryTriggerCandidates` | `memory-recall-metadata.ts:113` |
+| 项目记忆候选 | `readCuratedProjectMemoryCandidates` | `memory-recall-metadata.ts:127` |
+| 逐块召回标注提取 | `extractCuratedEntryRecallMetadata` | `curated-annotations.ts:114` |
+| 向量编解码 + 余弦 | `encode`/`decodeMemoryEmbedding`、`cosineSimilarity` | `embedding-vector.ts` |
+| snippet 截断 | `truncateUtf16Safe` | `normalization-core/src/utf16-slice.ts` |
+
+只有前两行是誊写:`extensions/memory-core/src/memory/` 在本树只有 8 个文件
+(`hybrid`/`importance`/`keyword-query`/`manager-cpu-entrypoints`/`mmr`/`project-ranking`/
+`temporal-decay`/`tokenize`),`manager-search-shared.ts` 与 `tools.citations.ts` 都不在其中。
+
+### 读侧映射(照上表执行完毕)
+
+| 旧(自创) | 新(上游) |
+|---|---|
+| `unitId: number` | `chunkId: string`(六字段哈希) |
+| `text` | `snippet`(`truncateUtf16Safe(text, 600)`) |
+| `heading` / `tags` / `marker` / `entryType` / `ts` / `documentKind` / `curatedRoot` / `root` | **全部删除** |
+| `startLine`/`endLine` 硬写 0 | **真数据**,首次真正选出 |
+| `HIT_COLUMNS` 自选 20 列 | `hitColumns()` 六列,与 `manager-search.ts:348` 同 |
+| `filtersSql` 用 `d.`/`u.` 列 | 全部从 `path` 与 `source` 派生 |
+| 手写 JOIN provenance | `readMemoryRecallMetadata(ids)` 一次批查 |
+| 手写候选 SQL | 上游三个 reader |
+| `vectors(unit_id,dim,vec)` | `memory_index_chunks.embedding` |
+| 余弦手写点积循环 | 上游 `cosineSimilarity` |
+| `byId: Map<number,hit>` + `entry.startLine` 当行 id 载体 | `source:path:startLine:endLine` 范围键 |
+
+`filters.kind` / `filters.entryType` / `filters.tag` 三个过滤维度随字段一起消失。
+`fuseRankings` 的注释此前说「上游按 `source:path:startLine:endLine` 合并」——**那是错的**,
+读 `hybrid.ts:90` 才知道合并键是 `id`,范围键只用于 `selectHybridSearchResults` 去重。
+现在两条都用对了。
+
+## 本刀暴露的三件事(都不是想出来的,是查出来的)
+
+**1. FTS5 虚拟表不能起别名。** 第一版 `hitColumns("f")` + `FROM memory_index_chunks_fts f`
+让**每一次搜索都返回 0 条**,只报 `text search failed`。实测:`f.source = 'memory'` 这种同一条
+SELECT 里最平凡的列引用都报 `no such column: f`。必须用表名 —— 这就是上游
+`manager-search.ts` 一律写 `${params.ftsTable}` 而从不 `AS` 的原因。
+
+**2. `memory_index_chunks.embedding` 是 `BLOB NOT NULL`,而且表是 `STRICT`。**
+「没有向量」是**零长 BLOB**,不是 NULL。第一版写的 `WHERE embedding IS NULL` 永远匹配不到,
+会把整个索引报成「已嵌入」—— 和上一刀那个静默失效的 revision 栅栏同一类错误。
+无模型时的 `model` 值是上游的字面量 **`"fts-only"`**(`manager-reindex-state.ts:164`),
+不是我原来写的空串。
+
+**3. `substr('MEMORY.md', -13, 10)` = `'MEMORY.md'`,而 `'M' > '2'`。**
+没有日期的 curated 文件**通过了每一次 `since`/`until` 过滤**。原先注释里写的
+「非日期会自然被排除」是错的,探针跑出来才发现。加了
+`GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'`,与 TS 侧的 `dayOf` 同一谓词。
+
+### 一处刻意的偏离:`vectorCount`
+
+上游 `hasSemanticChunks` 是 `WHERE model != 'fts-only'`(`manager-sync-base.ts:330`),
+**这里用的是 `length(embedding) > 0`**。理由:上游 reindex 时顺手嵌入
+(`manager-index-preparation.ts:79`),两个条件恒等;mem-plus 的嵌入是单独的预算批次
+(`embedMissing`,一次一个 tool call),所以 reindex 之后、embed 之前存在一个真实状态 ——
+chunk 带着 provider 的 `model` 而 embedding 还是空的。按 `model` 数会把这些算成可向量检索,
+而 `describeMissingVectors` 的职责正是告诉模型「语义检索还没生效」,那时它会闭嘴,
+`vector` 与 `hybrid` 却返回空。
+
 ## 要改什么(对照结论,不是推测)
 
 按"能整体搬 / 要搬但需接缝 / 是 L3"三档,对照上面的表:

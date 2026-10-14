@@ -577,19 +577,19 @@ export async function savePromptFile(params: {
 export function handleMemoryStats(db: DatabaseSync | null): Response {
   if (!db) return fail("index unavailable: no node:sqlite in this OpenCode build", 503);
   const stats = indexStats(db);
-  const countFor = (root: string): number =>
-    (
-      db
-        .prepare(
-          "SELECT count(*) AS n FROM units u JOIN documents d ON d.id = u.document_id WHERE d.root = ?"
-        )
-        .get(root) as { n: number }
-    ).n;
+  // Upstream's `source` column, not a mem-plus `documents.root`. The corpus split is a
+  // column on the chunk row, so this is a `GROUP BY source` rather than a join to a
+  // documents table that no longer exists.
+  const bySource = db
+    .prepare("SELECT source, COUNT(*) AS n FROM memory_index_chunks GROUP BY source")
+    .all() as { source: string; n: number }[];
+  const countFor = (source: string): number =>
+    bySource.find((row) => row.source === source)?.n ?? 0;
   return ok({
-    total: countFor("home"),
+    total: countFor("memory"),
     wiki: countFor("wiki"),
-    documents: stats.documents,
-    units: stats.units,
+    sources: stats.sources,
+    chunks: stats.chunks,
     vectors: stats.vectors,
     bytes: stats.bytes,
   });

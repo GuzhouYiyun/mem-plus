@@ -29,9 +29,10 @@ import {
   
   indexStats,
   search,
+  chunksMissingVectors,
   storeVector,
   toMatchExpression,
-  unitsMissingVectors,
+  vectorCount,
   type CorpusFilter,
   type SearchFilters,
   type SearchHit,
@@ -74,6 +75,17 @@ export type RetrievalDeps = {
   readonly workspaceDir: string;
   /** The inference service, for `/embed`. `null` disables vector modes. */
   readonly service: MemPlusService | null;
+  /**
+   * The embedding model name, recorded as `model` on every chunk row.
+   *
+   * It has to be the same string at three points -- the index write, the embed pass and the
+   * vector lane -- because `model` is part of a chunk's row identity upstream
+   * (`manager-source-index-kernel.ts:72`). A mismatch is not a type error anywhere; it is a
+   * vector that is written and then never found, because `storeVector` updates
+   * `WHERE id = ? AND model = ?` and matches nothing. Hence a required field rather than
+   * something read off the service.
+   */
+  readonly model?: string;
   readonly log: (message: string, detail?: unknown) => void;
   /** How many units to embed per reindex pass. Keeps one tool call bounded. */
   readonly embedBatch?: number;
@@ -128,16 +140,17 @@ const VECTOR_ONLY_NOTICE =
   'than wrong. Run memory_reindex with {"embed": true} once, or use mode "text".';
 
 /**
- * Whether the index has searchable units but no vectors for them.
+ * Whether the index has searchable chunks but no vectors for them.
  *
  * Both halves matter: an empty index has nothing to degrade, and a fully embedded one
  * has nothing to report.
  */
 function describeMissingVectors(db: DatabaseSync): boolean {
-  const units = db.prepare("SELECT count(*) AS n FROM units").get() as { n: number };
-  if (units.n === 0) return false;
-  const vectors = db.prepare("SELECT count(*) AS n FROM vectors").get() as { n: number };
-  return vectors.n === 0;
+  const chunks = db
+    .prepare("SELECT count(*) AS n FROM memory_index_chunks")
+    .get() as { n: number };
+  if (chunks.n === 0) return false;
+  return vectorCount(db) === 0;
 }
 
 type RawInput = Record<string, unknown>;
@@ -199,7 +212,38 @@ function excerpt(text: string, limit = EXCERPT_CHARS): string {
 }
 
 function dayOf(hit: SearchHit): string {
-  return hit.day ?? (hit.ts ? new Date(hit.ts).toISOString().slice(0, 10) : "undated");
+  return hit.day ?? "undated";
+}
+
+/**
+ * Render one hit the way upstream does.
+ *
+ * Upstream's shape, from `tools.citations.ts:34`:
+ *
+ *   presented.snippet = `${presented.snippet.trimEnd()}\n\nSource: ${presented.citation}`
+ *
+ * and `memory-tool-contract.ts:166` tells the model to include `Source: <path#line>`.
+ *
+ * What changed, and why it is a contraction rather than a regression:
+ *   - `### N. <heading>` is gone. Upstream's chunk has no heading field; the parser that
+ *     produced mem-plus's headings is `memory-parse.ts`, which is being retired. Writing a
+ *     new parser to recover headings from chunk text would be adding back something upstream
+ *     does not have, which is a divergence, not a seam.
+ *   - `Tags: a, b, c` is gone, for the same reason: tags were a `units` column.
+ *   - `Source: <path> (unit N, <marker>)` becomes `Source: <citation>`, and the citation is
+ *     now a real line range into the file rather than a synthetic unit id. Upstream's
+ *     `memory_get` takes `path`, so `path#L4-L9` is both the human-readable pointer and the
+ *     argument the follow-up call needs.
+ */
+function renderHit(hit: SearchHit, index: number): string[] {
+  const label = [hit.source, dayOf(hit), hit.project].filter(Boolean).join(" · ");
+  const lines = [`### ${index + 1}. ${hit.path}`];
+  // Only the label is conditional. The blank lines around the snippet are structural --
+  // upstream's `${snippet}\n\nSource: ${citation}` (`tools.citations.ts:34`) is the same
+  // shape, and filtering every empty string would collapse them.
+  if (label.length > 0) lines.push(`\`${label}\``);
+  lines.push("", excerpt(hit.snippet), "", `Source: ${hit.citation ?? hit.path}`, "");
+  return lines;
 }
 
 function renderHits(hits: readonly SearchHit[], mode: SearchMode, projects: number): string {
@@ -221,19 +265,10 @@ function renderHits(hits: readonly SearchHit[], mode: SearchMode, projects: numb
   ];
 
   hits.forEach((hit, index) => {
-    const label = [hit.entryType, dayOf(hit), hit.project].filter(Boolean).join(" · ");
-    lines.push(`### ${index + 1}. ${hit.heading || "(untitled)"}`);
-    lines.push(`\`${label}\``);
-    lines.push("");
-    lines.push(excerpt(hit.text));
-    if (hit.tags.length > 0) lines.push("", `Tags: ${hit.tags.join(", ")}`);
-    // The unit id is the handle `memory_get` takes; without it a hit cannot be
-    // expanded, which would make the tools useless in combination.
-    lines.push("", `Source: ${hit.path} (unit ${hit.unitId}${hit.marker ? `, ${hit.marker}` : ""})`);
-    lines.push("");
+    lines.push(...renderHit(hit, index + 1));
   });
 
-  lines.push(`Use memory_get with a unit id to read one in full.`);
+  lines.push("Use memory_get with a `path` to read one in full.");
   return lines.join("\n");
 }
 
@@ -282,44 +317,51 @@ export async function embedMissing(
 ): Promise<number> {
   const db = deps.db;
   if (!db || !deps.service || budget <= 0) return 0;
+  // `model` is part of a chunk's row identity, so a chunk written without one cannot be
+  // given a vector later: writing `embedding` under a `model` the row does not carry would
+  // make the `WHERE id = ? AND model = ?` update in `storeVector` match nothing, silently.
+  const model = deps.model;
+  if (!model) return 0;
   let written = 0;
-  const rejected: { id: number; chars: number }[] = [];
-  for (const unit of unitsMissingVectors(db, budget)) {
-    // Checked before each unit, not just once: this loop is the longest-running
+  const rejected: { id: string; chars: number }[] = [];
+  for (const chunk of chunksMissingVectors(db, model, budget)) {
+    // Checked before each chunk, not just once: this loop is the longest-running
     // thing a tool call can do here, so a stop request that arrives halfway
     // through must not be ignored until the whole budget is spent.
     if (signal?.aborted) break;
     try {
-      const vector = await deps.service.embed(unit.text, signal);
-      storeVector({ db, unitId: unit.id, vector });
+      const vector = await deps.service.embed(chunk.text, signal);
+      storeVector({ db, chunkId: chunk.id, model, vector });
       written += 1;
     } catch (error) {
       if (signal?.aborted) break;
       // Whether to keep going depends on why it failed, and the two cases need
       // opposite handling.
       //
-      // A service that is gone fails every unit identically, so continuing would
+      // A service that is gone fails every chunk identically, so continuing would
       // spend the whole budget rediscovering that. Stop.
       //
       // One input the model cannot accept -- it overflows the context, or it is
       // rejected outright -- fails alone and would fail identically on every later
-      // pass, because the queue is `ORDER BY id` and the offending unit keeps
+      // pass, because the queue is `ORDER BY id` and the offending chunk keeps
       // coming back first. Breaking here therefore strands it permanently: it blocks
-      // every unit behind it and no future call can get past it. Skipping and
+      // every chunk behind it and no future call can get past it. Skipping and
       // reporting is the only way the rest of the index ever gets embedded.
       if (!isUnitInputRejected(error)) {
-        deps.log(`embedding unit ${unit.id} failed`, error);
+        deps.log(`embedding chunk ${chunk.id} failed`, error);
         break;
       }
-      const chars = unit.text.length;
-      rejected.push({ id: unit.id, chars });
-      deps.log(`embedding unit ${unit.id} skipped: ${chars} characters exceeds the model's input limit`);
+      const chars = chunk.text.length;
+      rejected.push({ id: chunk.id, chars });
+      deps.log(
+        `embedding chunk ${chunk.id} skipped: ${chars} characters exceeds the model's input limit`,
+      );
     }
   }
   if (rejected.length > 0) {
     deps.log(
       `${written} embedded, ${rejected.length} skipped for exceeding the model input limit ` +
-        `(unit ids ${rejected.map((r) => r.id).join(", ")}). These are not searchable by ` +
+        `(chunk ids ${rejected.map((r) => r.id).join(", ")}). These are not searchable by ` +
         "meaning; they remain findable by keyword.",
     );
   }
@@ -417,9 +459,6 @@ async function runSearch(
   }
 
   const filters: SearchFilters = {
-    kind: str(input, "kind") as SearchFilters["kind"],
-    entryType: str(input, "type"),
-    tag: str(input, "tag"),
     since: str(input, "since"),
     until: str(input, "until"),
     project: projectFilter,
@@ -436,6 +475,7 @@ async function runSearch(
     limit,
     currentProject: projectSlug(deps.workspaceDir),
     queryVector,
+    model: deps.model ?? "fts-only",
     onError: (message: string) => errors.push(message),
   });
 
@@ -504,14 +544,19 @@ async function runSearch(
       limit,
       hits: hits.length,
       projects,
-      units: hits.map((hit) => ({
-        unitId: hit.unitId,
-        project: hit.project,
+      // Upstream's fields, so the metadata block is a projection of `MemorySearchResult`
+      // rather than a parallel vocabulary. `citation` is included because it is what the
+      // model should pass back to `memory_get`, and `chunkId` is not: it is a row hash and
+      // has no model-facing use.
+      chunks: hits.map((hit) => ({
         path: hit.path,
+        citation: hit.citation,
+        startLine: hit.startLine,
+        endLine: hit.endLine,
+        source: hit.source,
         day: hit.day,
-        type: hit.entryType,
-        tags: hit.tags,
-        marker: hit.marker,
+        project: hit.project,
+        score: hit.score,
       })),
       ...(errors.length > 0 ? { errors } : {}),
     },
@@ -605,7 +650,15 @@ async function runReindex(
   // rejects a null provenance class -- so lane 1c (trigger injection) filtered
   // out 100% of its candidates and could never fire. Measured 2026-10-11:
   // 15 documents, 1244 units, all NULL.
-  const report = await reindexFiles({ db, files, root: "home", memoryHome: memoryHomeDir() });
+  const report = await reindexFiles({
+    db,
+    files,
+    root: "home",
+    memoryHome: memoryHomeDir(),
+    // Same string `embedMissing` below uses. A reindex that wrote a different `model` would
+    // re-id every chunk and orphan every vector already stored.
+    ...(deps.model ? { model: deps.model } : {}),
+  });
   const wiki = readWikiConfig(deps.options);
   const wikiFiles = wiki.enabled ? await discoverWikiFiles(wiki.dir) : [];
   // The wiki is deliberately NOT given a memoryHome: `classify` maps any non-`memory`
@@ -630,9 +683,9 @@ async function runReindex(
       wikiReport
         ? `Wiki corpus: ${wikiReport.indexed} of ${wikiReport.scanned} page(s) (${wikiReport.skipped} unchanged).`
         : "",
-      embedded > 0 ? `Embedded ${embedded} unit(s).` : "",
+      embedded > 0 ? `Embedded ${embedded} chunk(s).` : "",
       "",
-      `Index: ${stats.documents} documents, ${stats.units} searchable units, ${stats.vectors} vectors.`,
+      `Index: ${stats.sources} source(s), ${stats.chunks} searchable chunk(s), ${stats.vectors} vector(s).`,
       wantVectors && embedded === 0 && stats.vectors === 0
         ? "Nothing embedded -- vector search stays unavailable until some are."
         : "",

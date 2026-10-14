@@ -25,9 +25,10 @@
 //
 // THE FIELD THAT DECIDES EVERYTHING ELSE
 //   `model` is part of the row identity, so changing the embedding model re-ids every
-//   chunk instead of reusing vectors computed by a different model. Passing an empty
-//   string for the no-provider case keeps that property: a keyword-only install re-ids
-//   when a model appears rather than inheriting incompatible vectors.
+//   chunk instead of reusing vectors computed by a different model. Passing upstream's
+//   literal "fts-only" for the no-provider case keeps that property: a keyword-only
+//   install re-ids when a model appears rather than inheriting incompatible vectors.
+//   The literal is also what `hasSemanticChunks` tests against -- see NO_MODEL below.
 //
 // PER-CHUNK PROVENANCE IS THE POINT OF THE EXERCISE
 //   mem-plus's own index carried `origin_class` on the DOCUMENT, one value per file, so a
@@ -43,8 +44,20 @@ import { chunkEmbeddingColumn } from "./memory-index-schema.js";
 import { chunkMemorySource, DEFAULT_MEMORY_CHUNKING } from "./memory-chunking.js";
 import type { MemPlusSource } from "./memory-corpus.js";
 
-/** The model name recorded on every chunk; part of the row identity. */
-const NO_MODEL = "";
+/**
+ * The `model` recorded on every chunk when there is no embedding provider.
+ *
+ * Upstream's own value, read from `manager-reindex-state.ts:164`:
+ *
+ *     const model = params.provider?.model?.trim() || "fts-only";
+ *
+ * and confirmed by `manager-sync-base.ts:330`, which decides whether the index holds any
+ * semantic chunks with `SELECT 1 FROM memory_index_chunks WHERE model != 'fts-only'`. So the
+ * literal is load-bearing in two places, and an empty string would have made every chunk
+ * look semantic while `hasSemanticChunks` reported none. It also has to differ from every
+ * real model name, which is why it is a word and not a null.
+ */
+const NO_MODEL = "fts-only";
 
 type ChunkProvenance = {
   readonly originClass: "owner" | "agent" | "untrusted" | "system";
@@ -54,12 +67,6 @@ type ChunkProvenance = {
 };
 
 /** Per-chunk annotations upstream stores in `memory_index_chunk_recall_metadata`. */
-type ChunkRecallMetadata = {
-  readonly importance?: number | null;
-  readonly triggers?: string | null;
-  readonly projectKey?: string | null;
-};
-
 type WriteSourceResult = {
   readonly path: string;
   readonly source: MemPlusSource;
@@ -83,7 +90,6 @@ export function writeSourceChunks(params: {
   readonly bytes: number;
   readonly mtime: number;
   readonly provenance: ChunkProvenance;
-  readonly recall?: ChunkRecallMetadata;
   /** Embeddings by chunk id; absent when there is no embedding provider. */
   readonly embeddings?: ReadonlyMap<string, readonly number[]>;
   readonly model?: string;
@@ -117,6 +123,10 @@ export function writeSourceChunks(params: {
        (chunk_id, importance, triggers, project_key)
      VALUES (?, ?, ?, ?)`,
   );
+  // Chunks with no annotations still get a row, with three NULLs. Upstream writes the
+  // metadata unconditionally for the same reason its candidate query can then say
+  // `metadata.triggers is not null` instead of having to distinguish "no row" from "no
+  // triggers" -- which would be indistinguishable anyway.
   // `memory_index_chunks_vec` is a virtual table from the optional sqlite-vec extension,
   // so it does not exist until the extension is loaded -- upstream's `vectorReady` flag is
   // exactly this, and `buildMemoryIndexStrictSchema` deliberately does not create it. The
@@ -166,14 +176,7 @@ export function writeSourceChunks(params: {
         provenance.observedAt,
         provenance.supersedesKey ?? null,
       );
-      if (params.recall) {
-        insertRecall.run(
-          id,
-          params.recall.importance ?? null,
-          params.recall.triggers ?? null,
-          params.recall.projectKey ?? null,
-        );
-      }
+      insertRecall.run(id, chunk.importance, chunk.triggers, chunk.projectKey);
       if (embedding && embedding.length > 0) {
         if (!vectorReady && !vectorUnavailable) {
           try {

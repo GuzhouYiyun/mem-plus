@@ -31,28 +31,21 @@ import {
   selectHybridSearchResults,
 } from "../../extensions/memory-core/src/memory/hybrid.js";
 import { memoryHomeDir, stateRoot } from "./paths.js";
-import { parseMemoryDocument, type IndexRoot, type MemoryUnit, type ParsedDocument } from "./memory-parse.js";
-import { writeSourceChunks } from "./memory-index-write.js";
+import { clearSource, writeSourceChunks } from "./memory-index-write.js";
 import { ensureMemoryIndexSchema } from "./memory-index-schema.js";
-import { WIKI_SOURCE } from "./memory-corpus.js";
-import type { MemoryEntryProvenance } from "../../packages/memory-host-sdk/src/host/types.js";
-
-/**
- * Whether this database has upstream's tables yet.
- *
- * `openIndexAt` still creates only the mem-plus schema, so a database opened by the live
- * plugin does not have `memory_index_chunks` until `ensureMemoryIndexSchema` has run. The
- * dual write checks rather than assuming, because a missing table here would abort every
- * capture; a skipped upstream write degrades to "the migration has not started", which is
- * visible in `indexStats` instead of fatal.
- */
-function hasUpstreamSchema(db: DatabaseSync): boolean {
-  return (
-    db
-      .prepare("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'memory_index_chunks'")
-      .get() !== undefined
-  );
-}
+import { sourceOf, WIKI_SOURCE, type IndexRoot } from "./memory-corpus.js";
+import type { MemoryEntryProvenance, MemorySearchResult } from "../../packages/memory-host-sdk/src/host/types.js";
+import {
+  readCuratedMemoryTriggerCandidates,
+  readCuratedProjectMemoryCandidates,
+  readMemoryRecallMetadata,
+} from "../../packages/memory-host-sdk/src/host/memory-recall-metadata.js";
+import { truncateUtf16Safe } from "../../packages/normalization-core/src/utf16-slice.js";
+import {
+  cosineSimilarity,
+  decodeMemoryEmbedding,
+  encodeMemoryEmbedding,
+} from "../../packages/memory-host-sdk/src/host/embedding-vector.js";
 
 /**
  * The path upstream stores, relative to the memory home.
@@ -79,8 +72,12 @@ function hasUpstreamSchema(db: DatabaseSync): boolean {
  * curated whitelist `path IN ('MEMORY.md','USER.md')` would never have matched the single
  * most important file in the system. Deriving the base by looking for a `memory` segment
  * was the wrong approach twice: relativise against the memory home, which is known.
+ *
+ * Exported because `memory-scan.ts` needs the same relativisation to look a discovered
+ * absolute path up in `memory_index_sources`. Two copies of this function would be two
+ * chances to reintroduce the bug above.
  */
-function upstreamRelativePath(file: string, _root: IndexRoot): string {
+export function memoryRelativePath(file: string, _root?: IndexRoot): string {
   const home = memoryHomeDir().replaceAll("\\", "/").replace(/\/+$/, "");
   const normalized = file.replaceAll("\\", "/");
   if (normalized.startsWith(`${home}/`)) return normalized.slice(home.length + 1);
@@ -108,41 +105,12 @@ function upstreamProvenance(provenance: DocumentProvenance | undefined): {
   };
 }
 
-/**
- * The curated annotations upstream keeps in `memory_index_chunk_recall_metadata`.
- *
- * `memory-parse.ts` lifts these off a curated section, and upstream reads them from the
- * same kind of annotation, so the values carry over unchanged. They are only present on
- * curated sections, which is what makes those sections trigger-injection candidates and
- * nothing else.
- */
-function upstreamRecall(units: readonly MemoryUnit[]): {
-  importance?: number | null;
-  triggers?: string | null;
-  projectKey?: string | null;
-} | undefined {
-  const annotated = units.find(
-    (unit) => unit.importance != null || unit.triggers != null || unit.projectKey != null,
-  );
-  if (!annotated) return undefined;
-  return {
-    importance: annotated.importance ?? null,
-    triggers: annotated.triggers ?? null,
-    projectKey: annotated.projectKey ?? null,
-  };
-}
-
 /** `~/.config/opencode/mem-plus/index.db`. */
 export function indexPath(): string {
   return path.join(stateRoot(), "index.db");
 }
 
-/**
- * The searchable corpora. Defined by the reader (memory-parse.ts) and re-exported
- * here, because the index is what stores the distinction and everything that
- * indexes or prunes already imports `IndexRoot` from this module.
- */
-export type { IndexRoot } from "./memory-parse.js";
+export type { IndexRoot } from "./memory-corpus.js";
 
 export type SearchMode = "text" | "vector" | "hybrid";
 
@@ -152,119 +120,68 @@ export type CorpusFilter = "memory" | "wiki" | "all";
 export type SearchFilters = {
   readonly corpus?: CorpusFilter;
   readonly project?: string;
-  readonly kind?: MemoryUnit["kind"];
-  readonly entryType?: string;
-  readonly tag?: string;
   readonly since?: string;
   readonly until?: string;
   /** Restrict to the project the tool call came from. Omit to search everything. */
   readonly currentProjectOnly?: boolean;
 };
 
-export type SearchHit = {
-  readonly unitId: number;
-  readonly score: number;
+/**
+ * Upstream's `MemorySearchResult`, plus three things and no more.
+ *
+ * THE FIFTEEN FIELDS ARE UPSTREAM'S
+ *   `MemorySearchResult` (`packages/memory-host-sdk/src/host/types.ts:21`) is the whole
+ *   public search shape: `path` / `startLine` / `endLine` / `score` / `vectorScore?` /
+ *   `textScore?` / `snippet` / `source` / `importance?` / `triggers?` / `projectKey?` /
+ *   `originClass?` (deprecated upstream) / `citation?` / `provenance?`.
+ *
+ *   This type used to be a strict superset of it, adding eight fields that upstream has
+ *   never had -- `heading`, `tags`, `marker`, `entryType`, `ts`, `documentKind`, `text`,
+ *   `root`, `project`, `day`, `curatedRoot`. Seven are gone; three survive because they
+ *   are *not* search results but facts about a hit this host needs in order to filter.
+ *
+ *   `heading` and `tags` are gone rather than derived: upstream's chunk text has no
+ *   heading structure, and writing a parser to re-extract one would be adding back
+ *   something upstream does not have. See `docs/port-plan.md`, "读侧收缩".
+ *
+ * `startLine` / `endLine` ARE REAL DATA NOW
+ *   They used to be hard-coded to 0 by `rowToHit`, because mem-plus's own `units` table
+ *   has no line columns and `HIT_COLUMNS` never selected any. Upstream's chunk table has
+ *   both, `chunkMarkdown` fills them, and `memory-recall-metadata.ts:219-220` selects both.
+ *   So `memory_get` can be cited precisely for the first time, which is what
+ *   `trigger-recall.ts:277` (`citations: [{ label: ${entry.path}#L${entry.startLine} }]`)
+ *   and `project-memory.ts:119` already assumed.
+ *
+ * THE THREE ADDITIONS, AND WHY EACH IS NOT A SEARCH RESULT
+ *   `chunkId` -- the index row identity, a six-field hash over
+ *     `(source, path, startLine, endLine, chunk.hash, model)`. Not model-facing: upstream's
+ *     `memory_get` takes `path`, which is why `unitId` was deleted from the tool contract.
+ *     Internal joins and de-duplication need it.
+ *   `project` -- the on-disk directory slug under `memory/`. This host's layout, not a
+ *     search result: it partitions files, it says nothing about openclaw's project identity
+ *     (which is the normalised `origin` remote and arrives separately as `projectKey`).
+ *     Only used to filter and to count projects in the tool header.
+ *   `day` -- the `YYYY-MM-DD` in the basename, derived. Upstream has no date on a search
+ *     result; recency is temporal decay (`halfLifeDays`), which reads file mtimes. This
+ *     exists solely so `since`/`until` can be applied, and for the tool header.
+ */
+export type SearchHit = MemorySearchResult & {
+  /** The chunk row id. Never shown to the model; see the note above. */
+  readonly chunkId: string;
+  /** Directory slug under `memory/`. Not openclaw's project identity. */
   readonly project: string;
-  readonly path: string;
-  readonly root: IndexRoot;
-  readonly documentKind: string;
+  /** `YYYY-MM-DD` from the basename, or null. Filter/display only. */
   readonly day: string | null;
-  readonly entryType: string | null;
-  readonly tags: readonly string[];
-  readonly marker: string | null;
-  /**
-   * Curated recall annotations, carried on the hit so trigger injection can score
-   * without re-reading the file. Null unless the unit came from a curated
-   * `MEMORY.md` section that carries the annotation.
-   */
-  readonly triggers: string | null;
-  readonly importance: number | null;
-  /** `<!-- project: ... -->` keys, `;`-joined. null unless the unit is annotated. */
-  readonly projectKey: string | null;
-  /** openclaw's stored provenance. undefined when the document was never classified. */
-  readonly provenance: MemoryEntryProvenance | undefined;
-  /** True for `<memory home>/MEMORY.md` and `USER.md` — the curated tier. */
-  readonly curatedRoot: boolean;
-  readonly heading: string;
-  readonly text: string;
-  readonly ts: number | null;
-  readonly startLine: number;
-  readonly endLine: number;
-  readonly source: string;
-  readonly snippet: string;
 };
 
 export type IndexStats = {
-  readonly documents: number;
-  readonly units: number;
+  /** Rows in `memory_index_sources` -- one per indexed file, per corpus. */
+  readonly sources: number;
+  /** Rows in `memory_index_chunks`. This is what search returns. */
+  readonly chunks: number;
   readonly vectors: number;
   readonly bytes: number;
 };
-
-// Split deliberately: the additive column migrations in openIndexAt have to run
-// *between* the two halves. `CREATE TABLE IF NOT EXISTS` is a no-op against an
-// index.db written by an older build, but `CREATE INDEX ... ON units(triggers)`
-// is not -- SQLite builds it against the column and throws `no such column`, so a
-// database from before that column existed could never be opened again, and the
-// migration that would have added it was unreachable because it ran after this.
-const SCHEMA_TABLES = `
-CREATE TABLE IF NOT EXISTS documents (
-  id          INTEGER PRIMARY KEY,
-  path        TEXT    NOT NULL UNIQUE,
-  root        TEXT    NOT NULL,
-  project     TEXT    NOT NULL,
-  kind        TEXT    NOT NULL,
-  title       TEXT    NOT NULL DEFAULT '',
-  day         TEXT,
-  content     TEXT,
-  bytes       INTEGER NOT NULL DEFAULT 0,
-  mtime       INTEGER NOT NULL DEFAULT 0,
-  indexed_at  INTEGER NOT NULL DEFAULT 0,
-  origin_class TEXT,
-  session_kind TEXT,
-  observed_at  INTEGER,
-  supersedes_key TEXT,
-  curated_root INTEGER NOT NULL DEFAULT 0
-);
-
-CREATE TABLE IF NOT EXISTS units (
-  id           INTEGER PRIMARY KEY,
-  document_id  INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
-  ord          INTEGER NOT NULL,
-  kind         TEXT    NOT NULL,
-  ts           INTEGER,
-  day          TEXT,
-  entry_type   TEXT,
-  tags         TEXT    NOT NULL DEFAULT '',
-  marker       TEXT,
-  triggers     TEXT,
-  importance   INTEGER,
-  project_key  TEXT,
-  heading      TEXT    NOT NULL DEFAULT '',
-  text         TEXT    NOT NULL
-);
-
-CREATE VIRTUAL TABLE IF NOT EXISTS units_fts USING fts5(
-  text, heading, tags,
-  tokenize = 'unicode61 remove_diacritics 2'
-);
-
-CREATE TABLE IF NOT EXISTS vectors (
-  unit_id  INTEGER PRIMARY KEY REFERENCES units(id) ON DELETE CASCADE,
-  dim      INTEGER NOT NULL,
-  vec      BLOB    NOT NULL
-);
-`;
-
-const SCHEMA_INDEXES = `
-CREATE INDEX IF NOT EXISTS documents_root    ON documents(root);
-CREATE INDEX IF NOT EXISTS documents_project ON documents(project);
-CREATE INDEX IF NOT EXISTS units_document ON units(document_id);
-CREATE INDEX IF NOT EXISTS units_day      ON units(day);
-CREATE INDEX IF NOT EXISTS units_kind     ON units(kind);
-CREATE INDEX IF NOT EXISTS units_triggers ON units(triggers) WHERE triggers IS NOT NULL;
-CREATE UNIQUE INDEX IF NOT EXISTS units_marker ON units(marker) WHERE marker IS NOT NULL;
-`;
 
 /**
  * Open (creating if needed) the shared index.
@@ -274,8 +191,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS units_marker ON units(marker) WHERE marker IS 
  * retrieval is a feature, not a prerequisite for the plugin loading at all.
  *
  * The cause reaches `log`. It is not always a missing `node:sqlite`: a locked
- * file, a migration that does not apply, or a schema this build cannot open all
- * fail here, and a bare catch reported every one of them as a missing runtime.
+ * file or a schema this build cannot open both fail here, and a bare catch
+ * reported every one of them as a missing runtime.
  */
 export function openIndex(options?: { log?: (message: string) => void }): DatabaseSync | null {
   return openIndexAt(indexPath(), options?.log);
@@ -283,12 +200,24 @@ export function openIndex(options?: { log?: (message: string) => void }): Databa
 
 /**
  * Open (creating if needed) an index at an explicit path, applying the same schema
- * and migrations as the shared one.
+ * as the shared one.
  *
  * Exists so an evaluation or a repair can run against a scratch database without
  * touching the user's real index. Duplicating the schema here instead would let the
  * two drift, and a test that indexes through a different schema than production is
  * testing the wrong thing.
+ *
+ * THERE IS NO SCHEMA IN THIS FILE ANY MORE. It used to declare `documents`, `units`,
+ * `units_fts` and `vectors` inline, plus a column-migration table and seven indexes.
+ * Every one of those is gone and `ensureMemoryIndexSchema` is the only thing that
+ * decides what a database contains -- it calls upstream's `buildMemoryIndexStrictSchema`,
+ * which is upstream's own DDL. Keeping a second copy of the schema here is exactly the
+ * kind of drift this port exists to remove: two sources of truth, and the search layer
+ * reading whichever one was written last.
+ *
+ * A database carrying the old tables opens fine and simply ignores them. They are left
+ * on disk rather than dropped: `DROP TABLE` is not something an index open should do to a
+ * file it did not create, and the tables are read by nothing.
  */
 export function openIndexAt(
   file: string,
@@ -299,24 +228,10 @@ export function openIndexAt(
     const db = new DatabaseSync(file);
     // WAL keeps a long search from blocking the writes that follow a capture.
     db.exec("PRAGMA journal_mode = WAL");
-    // ON DELETE CASCADE below is what keeps orphans out; SQLite ignores it
-    // unless asked.
+    // The declared cascades are what keeps orphaned chunk rows out; SQLite ignores them
+    // unless asked. `memory_index_chunks_vec` and the FTS tables are virtual and cannot
+    // cascade at all, which is why `clearSource` deletes those rows explicitly.
     db.exec("PRAGMA foreign_keys = ON");
-    // Order is load-bearing in both directions. Tables first: ALTER TABLE against a
-    // table that does not exist yet throws, which would make openIndex() return
-    // null on a first run. Migrations next: CREATE TABLE IF NOT EXISTS is a no-op
-    // against an index that already exists, so an existing database would
-    // otherwise be left without columns the current code reads. Indexes last: an
-    // index naming a migrated column cannot be built until that column exists.
-    db.exec(SCHEMA_TABLES);
-    for (const [table, column, ddl] of MIGRATIONS) {
-      if (hasColumn(db, table, column)) continue;
-      db.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
-    }
-    db.exec(SCHEMA_INDEXES);
-    // Upstream's tables, created alongside rather than instead. The readers in this file
-    // still read `documents` / `units`; these exist so the migration has data to move to,
-    // and so `openIndexAt` is the one place that decides what a database contains.
     ensureMemoryIndexSchema(db);
     return db;
   } catch (error) {
@@ -324,39 +239,6 @@ export function openIndexAt(
       `index open failed: ${file}: ${error instanceof Error ? error.message : String(error)}`,
     );
     return null;
-  }
-}
-
-/**
- * `documents.content` is the sha256 of the file text. It was added as a mirror
- * key when snapshots lived in two places; the layout has since collapsed to one
- * tree, but the hash is still written because the column is part of the
- * persisted schema and `unchangedDocuments` treats a NULL one as "needs a look".
- */
-const MIGRATIONS: readonly (readonly [string, string, string])[] = [
-  ["documents", "content", "content TEXT"],
-  // openclaw's curated recall annotations. Added for the same reason as every
-  // other additive column: an index.db written by an older build has to answer
-  // the trigger-candidate query, not just the search.
-  ["units", "triggers", "triggers TEXT"],
-  ["units", "importance", "importance INTEGER"],
-  ["units", "project_key", "project_key TEXT"],
-  // openclaw's provenance, stored rather than parsed. It hangs off the *document*
-  // because that is upstream's granularity too: one classification per memory file,
-  // produced once by `resolveMemoryPathClassification` and joined onto every hit.
-  ["documents", "origin_class", "origin_class TEXT"],
-  ["documents", "session_kind", "session_kind TEXT"],
-  ["documents", "observed_at", "observed_at INTEGER"],
-  ["documents", "supersedes_key", "supersedes_key TEXT"],
-  ["documents", "curated_root", "curated_root INTEGER NOT NULL DEFAULT 0"],
-];
-
-function hasColumn(db: DatabaseSync, table: string, column: string): boolean {
-  try {
-    const rows = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
-    return rows.some((row) => row.name === column);
-  } catch {
-    return false;
   }
 }
 
@@ -378,13 +260,7 @@ function contentHash(text: string): string {
 }
 
 /**
- * Which root owns a given content when two files hold identical bytes.
- *
- * `home` outranks `wiki`: a byte-identical document in the wiki corpus never
- * shadows the memory home's copy, because a memory that also exists as an
- * imported page should keep the memory's identity and units.
- */
-const ROOT_PRECEDENCE: Record<IndexRoot, number> = { home: 0, wiki: 1 };
+ * openclaw's per-file classification, as `resolveMemoryPathClassification` returns it.
 
 /**
  * openclaw's per-file classification, as `resolveMemoryPathClassification` returns it.
@@ -400,11 +276,32 @@ export type DocumentProvenance = {
 };
 
 /** Insert or replace one document and its units. */
+/**
+ * Index one file. This is upstream's write path, whole.
+ *
+ * WHAT WAS REMOVED, AND WHY IT WAS EVER THERE
+ *   This used to write `documents` / `units` / `units_fts` / `vectors` as well, as a dual
+ *   write, while the readers still read those tables. Both halves are gone now: the readers
+ *   read `memory_index_chunks`, and mem-plus's own tables have no reader left.
+ *
+ *   Two of the deleted behaviours were mem-plus inventions that the removal restores to
+ *   upstream's shape rather than losing:
+ *   - `holder` / `mirrored` suppression is gone. mem-plus picked one document to hold a set of
+ *     bytes and gave the duplicate none. Upstream stores both and separates the corpora with
+ *     the `source` column, which `filtersSql` filters on.
+ *   - `marker` is gone. It existed to stop one capture being written twice, enforced by a
+ *     unique index. Upstream's `clear(entry.path, source)` before the insert is the same
+ *     guarantee, structurally.
+ *
+ * `contentHash` stays: upstream stores it too, in `memory_index_sources.hash`, and it is what
+ * `pruneMissing` compares against to decide a file is unchanged.
+ */
 export function indexDocument(params: {
   db: DatabaseSync;
   file: string;
   root: IndexRoot;
-  project: string;
+  /** Unused on the upstream path; kept so callers do not have to change. */
+  project?: string;
   text: string;
   bytes: number;
   mtime: number;
@@ -414,287 +311,101 @@ export function indexDocument(params: {
    * be injected automatically.
    */
   provenance?: DocumentProvenance;
+  /**
+   * The embedding model whose vectors these chunks may carry. Part of the row identity
+   * upstream (`manager-source-index-kernel.ts:72`), so it must be the same string the embed
+   * and search passes use. Omitted means `""`, which is what a keyword-only install uses.
+   */
+  model?: string;
 }): DocumentIndex {
-  const { db, file, root, project, text, bytes, mtime } = params;
-  const parsed: ParsedDocument = parseMemoryDocument(file, text, root);
+  const { db, file, root, text, bytes, mtime } = params;
   const hash = contentHash(text);
-
-  // Which document, if any, already holds these exact bytes. Excluding this
-  // path is what lets an unchanged file re-index itself instead of shadowing.
-  const holder = db
-    .prepare(
-      "SELECT id, root FROM documents WHERE content = ? AND path <> ? ORDER BY id LIMIT 1",
-    )
-    .get(hash, file) as { id: number; root: IndexRoot } | undefined;
-
-  // This file is a mirror when something else with equal or better standing
-  // already holds the content. Recorded, but with no units: the units live
-  // under the holder, and a second copy is exactly the duplicate this removes.
-  const mirrored =
-    holder !== undefined && ROOT_PRECEDENCE[holder.root] <= ROOT_PRECEDENCE[root];
-
-  const drop = db.prepare("SELECT id FROM documents WHERE path = ?");
-  const existing = drop.get(file) as { id: number } | undefined;
-  // Vectors are dropped by the delete below (units cascade, vectors cascade after
-  // them), and computing them again costs a model load. Carry them across a
-  // re-index by `ord`, which is stable for a given file layout.
-  const carriedVectors =
-    existing === undefined
-      ? []
-      : (db
-          .prepare(
-            `SELECT u.ord AS ord, v.dim AS dim, v.vec AS vec
-             FROM units u JOIN vectors v ON v.unit_id = u.id
-             WHERE u.document_id = ?`,
-          )
-          .all(existing.id) as { ord: number; dim: number; vec: Uint8Array }[]);
-  if (existing) {
-    // FTS rows are not covered by the foreign key (FTS5 virtual tables cannot
-    // participate in cascades), so they are removed explicitly.
-    const ftsRows = db.prepare("SELECT id FROM units WHERE document_id = ?").all(existing.id);
-    const delFts = db.prepare("DELETE FROM units_fts WHERE rowid = ?");
-    for (const row of ftsRows) delFts.run((row as { id: number }).id);
-    db.prepare("DELETE FROM documents WHERE id = ?").run(existing.id);
-  }
-
-  // The holder lost its claim: this file is the better copy, so the mirror's
-  // stale units have to go before they start competing with it.
-  if (holder !== undefined && holder.id !== existing?.id && !mirrored) {
-    const holderUnits = db
-      .prepare("SELECT id FROM units WHERE document_id = ?")
-      .all(holder.id) as { id: number }[];
-    const delHolderFts = db.prepare("DELETE FROM units_fts WHERE rowid = ?");
-    for (const row of holderUnits) delHolderFts.run(row.id);
-    db.prepare("DELETE FROM documents WHERE id = ?").run(holder.id);
-  }
-
-  const insertDoc = db.prepare(
-    `INSERT INTO documents (path, root, project, kind, title, day, content, bytes, mtime, indexed_at,
-                            origin_class, session_kind, observed_at, curated_root)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-  );
-  const docResult = insertDoc.run(
-    file,
-    root,
-    project,
-    parsed.kind,
-    parsed.title,
-    unitsDay(parsed.units),
+  const result = writeSourceChunks({
+    db,
+    relativePath: memoryRelativePath(file, root),
+    source: sourceOf(root),
+    content: text,
     hash,
     bytes,
     mtime,
-    Date.now(),
-    params.provenance?.originClass ?? null,
-    params.provenance?.sessionKind ?? null,
-    params.provenance?.observedAt ?? null,
-    params.provenance?.curatedRoot ? 1 : 0,
-  );
-  const documentId = Number(docResult.lastInsertRowid);
-
-  if (mirrored) {
-    return { written: 0, mirrored: true };
-  }
-
-  const insertUnit = db.prepare(
-    `INSERT INTO units (document_id, ord, kind, ts, day, entry_type, tags, marker, triggers, importance, project_key, heading, text)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-  );
-  const insertFts = db.prepare(
-    "INSERT INTO units_fts (rowid, text, heading, tags) VALUES (?, ?, ?, ?)",
-  );
-  const insertVector = db.prepare("INSERT INTO vectors (unit_id, dim, vec) VALUES (?, ?, ?)");
-  const vectorsByOrd = new Map(carriedVectors.map((v) => [v.ord, v]));
-
-  let written = 0;
-  parsed.units.forEach((unit, ord) => {
-    const result = insertUnit.run(
-      documentId,
-      ord,
-      unit.kind,
-      unit.ts,
-      unit.day,
-      unit.entryType,
-      unit.tags.join(" "),
-      unit.marker,
-      unit.triggers ?? null,
-      unit.importance ?? null,
-      unit.projectKey ?? null,
-      unit.heading,
-      unit.text,
-    );
-    const unitId = Number(result.lastInsertRowid);
-    // A duplicate provenance marker means the same capture reached two files.
-    // The unique index on `marker` rejects it, so the first copy wins.
-    try {
-      insertFts.run(unitId, unit.text, unit.heading, unit.tags.join(" "));
-    } catch {
-      /* duplicate marker: the unit row stands, its FTS row does not */
-    }
-    const vector = vectorsByOrd.get(ord);
-    if (vector) insertVector.run(unitId, vector.dim, vector.vec);
-    written += 1;
+    provenance: upstreamProvenance(params.provenance),
+    ...(params.model ? { model: params.model } : {}),
   });
-
-  // ALSO WRITE UPSTREAM'S TABLES, from the same bytes.
-  //
-  // This is the migration step, and it is deliberately a dual write. The readers below
-  // still read `documents` / `units`; if they were switched before this ran, every search
-  // would return zero against an empty `memory_index_chunks` -- a failure that looks like
-  // "the memory is gone" rather than like a half-finished migration. So the upstream
-  // tables get populated first, verified against real content, and only then does the
-  // read side move.
-  //
-  // Both sides are written from `text` rather than from `parsed.units`: upstream chunks
-  // come from its own chunker (`memory-chunking.ts`), and translating mem-plus's units
-  // into that row shape would invent a mapping upstream does not have. The old side keeps
-  // using `parsed.units` for its own reasons -- `kind`, `day`, `entry_type` and `marker`
-  // are mem-plus columns that upstream has nowhere to put.
-  //
-  // `mirror` suppression is upstream's model too and is NOT reproduced here: upstream
-  // stores the same bytes under each corpus and lets queries filter by source, rather than
-  // picking a `holder` and recording the other copy with no rows. A mirrored mem-plus
-  // file therefore gets real chunks in both corpora once this is wired, which is the
-  // documented consequence of following upstream.
-  if (!mirrored && hasUpstreamSchema(db)) {
-    writeSourceChunks({
-      db,
-      relativePath: upstreamRelativePath(file, params.root),
-      source: params.root === "wiki" ? WIKI_SOURCE : "memory",
-      content: text,
-      hash,
-      bytes,
-      mtime,
-      provenance: upstreamProvenance(params.provenance),
-      recall: upstreamRecall(parsed.units),
-    });
-  }
-
-  return { written, mirrored: false };
+  return { written: result.written, mirrored: false };
 }
 
-/** The date a document's units share, when they agree on one. */
-function unitsDay(units: readonly MemoryUnit[]): string | null {
-  const days = new Set(units.map((unit) => unit.day).filter(Boolean));
-  return days.size === 1 ? [...days][0]! : null;
-}
-
-/** Drop documents under `root` that are no longer present on disk. */
+/**
+ * Drop indexed sources under `root` that are no longer present on disk.
+ *
+ * Over upstream's tables. The `present` set holds ABSOLUTE paths, because that is what the
+ * scanner walks with, while the index stores memory-home-relative paths -- so each candidate
+ * is relativised before it is compared. Getting this wrong is silent in one direction and
+ * loud in the other: comparing an absolute path against a relative column matches nothing,
+ * so every source would be pruned on the first scan.
+ *
+ * Removal goes through `clearSource`, which is upstream's own `(path, source)` clear and
+ * which also deletes the vectors behind the chunks. A plain `DELETE FROM
+ * memory_index_sources` would leave `memory_index_chunks` rows behind: the foreign keys are
+ * declared, but `memory_index_chunks_vec` is a virtual table and cannot participate in a
+ * cascade -- the same reason upstream's own comment notes FTS rows are removed explicitly.
+ */
 export function pruneMissing(params: {
   db: DatabaseSync;
   root: IndexRoot;
   present: ReadonlySet<string>;
 }): string[] {
-  const rows = params.db.prepare("SELECT id, path FROM documents WHERE root = ?").all(params.root);
-  const remove = params.db.prepare("DELETE FROM documents WHERE id = ?");
-  const removeFts = params.db.prepare(
-    "SELECT id FROM units WHERE document_id = ?",
-  );
-  const deleteFts = params.db.prepare("DELETE FROM units_fts WHERE rowid = ?");
+  const source = sourceOf(params.root);
+  const indexed = params.db
+    .prepare("SELECT path FROM memory_index_sources WHERE source = ?")
+    .all(source) as { path: string }[];
+  const presentRelative = new Set<string>();
+  for (const absolute of params.present) {
+    presentRelative.add(memoryRelativePath(absolute, params.root));
+  }
   const removed: string[] = [];
-  for (const row of rows) {
-    const { id, path: file } = row as { id: number; path: string };
-    if (params.present.has(file)) continue;
-    for (const unit of removeFts.all(id)) deleteFts.run((unit as { id: number }).id);
-    remove.run(id);
-    removed.push(file);
+  for (const row of indexed) {
+    if (presentRelative.has(row.path)) continue;
+    clearSource(params.db, row.path, source);
+    removed.push(row.path);
   }
   return removed;
 }
 
 /**
- * Drop a document's units without touching its row.
+ * Index a file the plugin just appended to.
  *
- * Used right after an append: the daily entry file grows on every capture, so
- * only the new tail needs indexing. Re-reading and re-inserting a day that
- * already holds fifty entries to pick up the fifty-first is wasted work, and the
- * unique index on `marker` would fight it.
+ * THIS IS NOW THE SAME CALL AS A FULL RE-INDEX, and that is upstream's behaviour rather than
+ * a simplification. There is no tail path in upstream's index: `replaceRows` clears
+ * `(path, source)` and re-chunks the whole file, because a chunk's identity is a hash over
+ * its text and line span, so there is no stable way to add only the new fragments without
+ * re-deriving the ones before them.
+ *
+ * mem-plus's own `indexAppendedTail` existed to skip re-reading a day file that had grown
+ * from fifty entries to fifty-one, using `units.marker` to recognise what was already there.
+ * `marker` retired with the rest of the mem-plus index (see `memory-index-write.ts`), so the
+ * optimisation had nothing left to key on and was reimplementing the wrong half of the write.
+ *
+ * The cost is real and worth stating: one appended capture re-chunks its whole day file.
+ * Upstream pays it too, and the file that grows is a day file, not `MEMORY.md`.
  */
 export function indexAppendedTail(params: {
   db: DatabaseSync;
   file: string;
   root: IndexRoot;
   project: string;
-  /** Only units whose marker is not already indexed. */
   text: string;
   bytes: number;
   mtime: number;
 }): number {
-  const { db, file, root, project, text, bytes, mtime } = params;
-  const parsed = parseMemoryDocument(file, text, root);
-  const hash = contentHash(text);
-  const doc = db.prepare("SELECT id FROM documents WHERE path = ?").get(file) as
-    | { id: number }
-    | undefined;
-
-  const documentId =
-    doc?.id ??
-    Number(
-      db
-        .prepare(
-          `INSERT INTO documents (path, root, project, kind, title, day, content, bytes, mtime, indexed_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        )
-        .run(
-          file,
-          root,
-          project,
-          parsed.kind,
-          parsed.title,
-          unitsDay(parsed.units),
-          // The tail path only ever sees a daily entry, which is written once and
-          // appended to. The hash covers the text as read now, so a mirror of it
-          // is still recognised while it is being appended.
-          hash,
-          bytes,
-          mtime,
-          Date.now(),
-        ).lastInsertRowid,
-    );
-
-  if (doc) {
-    db.prepare(
-      "UPDATE documents SET bytes = ?, mtime = ?, indexed_at = ?, title = ?, content = ? WHERE id = ?",
-    ).run(bytes, mtime, Date.now(), parsed.title, hash, documentId);
-  }
-
-  const known = new Set(
-    (
-      db.prepare("SELECT marker FROM units WHERE document_id = ? AND marker IS NOT NULL").all(
-        documentId,
-      ) as { marker: string }[]
-    ).map((row) => row.marker),
-  );
-
-  const insertUnit = db.prepare(
-    `INSERT INTO units (document_id, ord, kind, ts, day, entry_type, tags, marker, triggers, importance, project_key, heading, text)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-  );
-  const insertFts = db.prepare(
-    "INSERT INTO units_fts (rowid, text, heading, tags) VALUES (?, ?, ?, ?)",
-  );
-
-  let written = 0;
-  parsed.units.forEach((unit, ord) => {
-    if (unit.marker && known.has(unit.marker)) return;
-    const result = insertUnit.run(
-      documentId,
-      ord,
-      unit.kind,
-      unit.ts,
-      unit.day,
-      unit.entryType,
-      unit.tags.join(" "),
-      unit.marker,
-      unit.triggers ?? null,
-      unit.importance ?? null,
-      unit.projectKey ?? null,
-      unit.heading,
-      unit.text,
-    );
-    insertFts.run(Number(result.lastInsertRowid), unit.text, unit.heading, unit.tags.join(" "));
-    written += 1;
-  });
-  return written;
+  return indexDocument({
+    db: params.db,
+    file: params.file,
+    root: params.root,
+    project: params.project,
+    text: params.text,
+    bytes: params.bytes,
+    mtime: params.mtime,
+  }).written;
 }
 
 // --- FTS query construction ------------------------------------------------
@@ -732,80 +443,181 @@ export function toMatchExpression(query: string): string | null {
 
 type FilterSql = { readonly clause: string; readonly params: readonly SQLInputValue[] };
 
-function filtersSql(filters: SearchFilters, currentProject?: string): FilterSql {
+/**
+ * The three filters that survive, all derived from the columns upstream actually has.
+ *
+ * `kind`, `entryType` and `tag` are gone. They were predicates on mem-plus's own `units`
+ * columns; upstream's chunk table has no equivalent, and inventing one would be a
+ * self-invented filter over self-invented data. The three that remain are the three
+ * upstream's shape *can* express:
+ *
+ *   corpus   -> the `source` column, which is exactly what upstream's own `sourceFilter`
+ *               filters on (`manager-search.ts:230`, `where("chunk.source", "=", "memory")`).
+ *   project  -> the directory slug under `memory/`. This host's on-disk layout, not an
+ *               upstream concept, so it is a path predicate. The slug is escaped as a LIKE
+ *               pattern because a project directory name can contain `_`, which is a LIKE
+ *               wildcard -- without the escape, project `a_b` would also match `aXb`.
+ *   day      -> the date in the basename. `YYYY-MM-DD.md` is 13 characters, so the date is
+ *               `substr(path, -13, 10)` and ISO dates order lexicographically.
+ *
+ * THE GLOB IS LOAD-BEARING, AND A PROBE FOUND IT
+ *   Without it, `substr('MEMORY.md', -13, 10)` is the whole string `MEMORY.md` -- only 9
+ *   characters exist -- and `'MEMORY.md' >= '2026-11-01'` is TRUE, because `'M'` (0x4D)
+ *   sorts above `'2'` (0x32). So every curated file, the ones with no date at all, passed
+ *   every `since` and `until` filter ever asked for. A date filter that silently admits
+ *   undated content is worse than no filter: the result looks filtered and is not.
+ *
+ *   The GLOB is the SQL twin of `dayOf` below, which is the same predicate in TypeScript:
+ *   ten digits around two dashes, and nothing else. Both must agree, or a chunk read back
+ *   through one path carries a `day` the other path would have filtered away.
+ *
+ * `currentProjectOnly` keeps the old semantics: this project's files plus the global ones
+ * at the memory-home root, which are not under `memory/` and so carry no slug.
+ */
+function filtersSql(
+  filters: SearchFilters,
+  prefix: string,
+  currentProject?: string,
+): FilterSql {
   const parts: string[] = [];
   const params: SQLInputValue[] = [];
 
   // Corpus first and unconditionally: it is the one filter that decides which
   // half of the corpus a query may see at all, so it must not be skipped by the
   // project branch below.
-  if (filters.corpus === "memory") parts.push("d.root = 'home'");
-  else if (filters.corpus === "wiki") parts.push("d.root = 'wiki'");
+  if (filters.corpus === "memory") parts.push(`${prefix}.source = 'memory'`);
+  else if (filters.corpus === "wiki") parts.push(`${prefix}.source = '${WIKI_SOURCE}'`);
 
   if (filters.currentProjectOnly) {
     if (currentProject) {
-      // Home-root documents (the global MEMORY.md) carry the empty project,
-      // and global long-term memory stays reachable from a project-scoped
-      // search.
-      parts.push("(d.project = ? OR d.project = '')");
-      params.push(currentProject);
+      // The global long-term memory lives at the memory-home root (`MEMORY.md`, `USER.md`,
+      // wiki pages) and has no `memory/` segment, so it stays reachable from a
+      // project-scoped search -- which is what the old `d.project = ''` half meant.
+      parts.push(`(${prefix}.path NOT LIKE 'memory/%' OR ${prefix}.path LIKE ? ESCAPE '\\')`);
+      params.push(`${escapeLike(`memory/${currentProject}/`)}%`);
     }
   } else if (filters.project) {
-    parts.push("d.project = ?");
-    params.push(filters.project);
-  }
-  if (filters.kind) {
-    parts.push("u.kind = ?");
-    params.push(filters.kind);
-  }
-  if (filters.entryType) {
-    parts.push("u.entry_type = ?");
-    params.push(filters.entryType);
-  }
-  if (filters.tag) {
-    // Tags are a space-joined string, so an exact token match is what is meant
-    // rather than a substring (which would make "api" match "apiary").
-    parts.push("(',' || replace(u.tags, ' ', ',') || ',') LIKE ?");
-    params.push(`%,${filters.tag},%`);
+    parts.push(`${prefix}.path LIKE ? ESCAPE '\\'`);
+    params.push(`${escapeLike(`memory/${filters.project}/`)}%`);
   }
   if (filters.since) {
-    parts.push("u.day >= ?");
+    parts.push(`(${dateBasenameGlob(prefix)} AND substr(${prefix}.path, -13, 10) >= ?)`);
     params.push(filters.since);
   }
   if (filters.until) {
-    parts.push("u.day <= ?");
+    parts.push(`(${dateBasenameGlob(prefix)} AND substr(${prefix}.path, -13, 10) <= ?)`);
     params.push(filters.until);
   }
   return { clause: parts.length > 0 ? ` AND ${parts.join(" AND ")}` : "", params };
 }
 
-// Columns only, no FROM. Each query supplies its own FROM/JOIN: an earlier
-// version inlined a constant that ended in `JOIN documents`, then appended a
-// second `FROM units_fts`, producing two FROM clauses. SQLite rejected the
-// statement, and the `catch` around it turned a broken query into "0 results"
-// -- indistinguishable from a genuine miss.
-const HIT_COLUMNS = `
-  u.id AS unitId,
-  d.project AS project,
-  d.path    AS path,
-  d.root    AS root,
-  d.kind    AS documentKind,
-  u.day     AS day,
-  u.ts      AS ts,
-  u.entry_type AS entryType,
-  u.tags    AS tags,
-  u.marker  AS marker,
-  u.triggers AS triggers,
-  u.importance AS importance,
-  u.project_key AS projectKey,
-  d.origin_class AS originClass,
-  d.session_kind AS sessionKind,
-  d.observed_at  AS observedAt,
-  d.supersedes_key AS supersedesKey,
-  d.curated_root AS curatedRoot,
-  u.heading AS heading,
-  u.text    AS text
+/**
+ * A basename of exactly `YYYY-MM-DD.md`, as a SQL predicate over `path`.
+ *
+ * The SQL twin of {@link dayOf}, and it has to agree with it exactly: a chunk read back
+ * through one path carries a `day` the other path would have filtered away.
+ */
+function dateBasenameGlob(prefix: string): string {
+  return `substr(${prefix}.path, -13, 10) GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'`;
+}
+
+/** `_` and `%` are LIKE wildcards; a project slug may legitimately contain either. */
+function escapeLike(value: string): string {
+  return value.replaceAll("\\", "\\\\").replaceAll("%", "\\%").replaceAll("_", "\\_");
+}
+
+/** The directory slug under `memory/`, or "" for anything at the memory-home root. */
+function projectOf(relativePath: string): string {
+  const match = /^memory\/([^/]+)\//u.exec(relativePath);
+  return match?.[1] ?? "";
+}
+
+/** The `YYYY-MM-DD` in a day file's basename, or null when the name has no date. */
+function dayOf(relativePath: string): string | null {
+  const base = relativePath.slice(relativePath.lastIndexOf("/") + 1);
+  const match = /^(\d{4}-\d{2}-\d{2})\.md$/u.exec(base);
+  return match?.[1] ?? null;
+}
+
+/**
+ * Columns only, no FROM. Each query supplies its own FROM/JOIN: an earlier
+ * version inlined a constant that ended in `JOIN documents`, then appended a
+ * second `FROM units_fts`, producing two FROM clauses. SQLite rejected the
+ * statement, and the `catch` around it turned a broken query into "0 results"
+ * -- indistinguishable from a genuine miss.
+ *
+ * These six are upstream's own chunk columns and no more. Upstream's primary keyword
+ * loader selects exactly this set -- `manager-search.ts:348`:
+ *
+ *   SELECT id, path, source, start_line, end_line, text, <rank> AS rank
+ *     FROM memory_index_chunks_fts
+ *
+ * `start_line` and `end_line` are the pair mem-plus never had: `rowToHit` used to
+ * hard-code both to 0. They are selected here for the first time.
+ *
+ * `rank` is supplied by the caller, because FTS supplies it and a non-FTS reader does not.
+ *
+ * THE PREFIX IS THE TABLE NAME, NOT AN ALIAS, AND IT CANNOT BE AN ALIAS. Measured: with
+ * `FROM memory_index_chunks_fts f`, every one of these fails with `no such column: f` --
+ *
+ *   f.source = 'memory'
+ *   EXISTS (SELECT 1 FROM memory_index_chunks c WHERE c.id = f.id)
+ *
+ * including the trivial column reference in the same SELECT that names `f`. An FTS5 virtual
+ * table does not register its alias, so the table name is the only way to qualify its
+ * columns. That is why upstream writes `${params.ftsTable}` everywhere in
+ * `manager-search.ts` and never binds an alias. This function took an alias on the first
+ * attempt and every search returned zero hits while reporting only `text search failed`.
+ *
+ * The prefix is a parameter because the two lanes read different tables: the keyword lane
+ * reads the FTS table, which carries all six columns UNINDEXED, while the vector lane reads
+ * the chunk table directly -- a chunk with an embedding has no reason to lack an FTS row,
+ * and a `LEFT JOIN` would only make its columns nullable.
+ */
+const hitColumns = (prefix: string): string => `
+  ${prefix}.id AS id,
+  ${prefix}.path AS path,
+  ${prefix}.source AS source,
+  ${prefix}.start_line AS start_line,
+  ${prefix}.end_line AS end_line,
+  ${prefix}.text AS text
 `;
+
+/** Upstream's FTS table name. Never alias it; see {@link hitColumns}. */
+const CHUNK_FTS = "memory_index_chunks_fts";
+/** Upstream's chunk table name. */
+const CHUNKS = "memory_index_chunks";
+
+/**
+ * Upstream's `projectMemorySearchRow` plus `formatCitation`, transcribed.
+ *
+ * `manager-search-shared.ts` and `tools.citations.ts` are NOT vendored into this tree --
+ * `extensions/memory-core/src/memory/` holds only `hybrid`, `importance`,
+ * `keyword-query`, `manager-cpu-entrypoints`, `mmr`, `project-ranking`, `temporal-decay`
+ * and `tokenize`. So these two are written out rather than called, which is the one
+ * transcription in this read path and it is kept to the upstream text:
+ *
+ *   projectMemorySearchRow: { id, path, startLine, endLine, score,
+ *                            snippet: truncateUtf16Safe(text, max), source }
+ *   formatCitation:        startLine === endLine ? `path#L${start}`
+ *                                          : `path#L${start}-L${end}`
+ *
+ * The recall metadata is NOT projected here. Upstream reads it in a second query --
+ * `readMemoryRecallMetadata(db, ids)` -- because the FTS loader selects only six columns,
+ * so this calls that rather than inventing a wider SELECT with two LEFT JOINs.
+ */
+const SNIPPET_MAX_CHARS = 600;
+
+/** Upstream `tools.citations.ts:41`, verbatim. */
+function formatCitation(hit: {
+  readonly path: string;
+  readonly startLine: number;
+  readonly endLine: number;
+}): string {
+  const lineRange =
+    hit.startLine === hit.endLine ? `#L${hit.startLine}` : `#L${hit.startLine}-L${hit.endLine}`;
+  return `${hit.path}${lineRange}`;
+}
 
 /** Ranked text search. */
 export function searchText(params: {
@@ -819,16 +631,18 @@ export function searchText(params: {
 }): SearchHit[] {
   const match = toMatchExpression(params.query);
   if (!match) return [];
-  const filter = filtersSql(params.filters, params.currentProject);
+  const filter = filtersSql(params.filters, CHUNK_FTS, params.currentProject);
+  // Upstream's `liveChunkClause` (`manager-search.ts:332`) is kept: FTS rows are
+  // maintained by triggers, and a row whose chunk has been cleared must not be
+  // returned as a live hit.
   const sql = `
-    SELECT ${HIT_COLUMNS},
-           units_fts.rank AS rank
-    FROM units_fts
-    JOIN units u      ON u.id = units_fts.rowid
-    JOIN documents d  ON d.id = u.document_id
-    WHERE units_fts MATCH ?
-      AND units_fts.rank MATCH 'bm25()'${filter.clause}
-    ORDER BY units_fts.rank
+    SELECT ${hitColumns(CHUNK_FTS)},
+           ${CHUNK_FTS}.rank AS rank
+    FROM ${CHUNK_FTS}
+    WHERE ${CHUNK_FTS} MATCH ?
+      AND ${CHUNK_FTS}.rank MATCH 'bm25()'
+      AND EXISTS (SELECT 1 FROM ${CHUNKS} c WHERE c.id = ${CHUNK_FTS}.id)${filter.clause}
+    ORDER BY ${CHUNK_FTS}.rank
     LIMIT ?
   `;
   try {
@@ -836,20 +650,21 @@ export function searchText(params: {
       string,
       unknown
     >[];
-    return rows
-      .map(rowToHit)
-      // bm25() returns a negative number where more negative is better, and
-      // openclaw's bm25RankToScore saturates it into [0, 1): r / (1 + r) where
-      // r = -rank. That absolute, monotone map is what lets the 0.7 / 0.3 lane
-      // weights mean anything -- an earlier version of this file fused by rank
-      // (RRF) instead, which threw the magnitudes away and is not what openclaw
-      // does.
-      //
-      // No column weights, deliberately: `bm25(units_fts, 0.0, 4.0, 3.0)` gave the
-      // body a weight of zero, so only headings and tags scored and a body-only
-      // match came back as rank 0 -- which bm25RankToScore maps to 1.0, the best
-      // possible score. Equal weighting is also what openclaw does.
-      .map((hit) => ({ ...hit, score: bm25RankToScore(hit.score) }));
+    // bm25() returns a negative number where more negative is better, and
+    // openclaw's bm25RankToScore saturates it into [0, 1): r / (1 + r) where
+    // r = -rank. That absolute, monotone map is what lets the 0.7 / 0.3 lane
+    // weights mean anything -- an earlier version of this file fused by rank
+    // (RRF) instead, which threw the magnitudes away and is not what openclaw
+    // does.
+    //
+    // No column weights, deliberately: the old `units_fts` had a `heading` and a `tags`
+    // column, and `bm25(units_fts, 0.0, 4.0, 3.0)` gave the body a weight of zero, so
+    // only headings and tags scored. Upstream's chunk FTS indexes `text` alone and
+    // weights it equally, which is what this statement does.
+    return rowsToHits(params.db, rows).map((hit) => ({
+      ...hit,
+      score: bm25RankToScore(hit.score),
+    }));
   } catch (error) {
     // Never swallowed. A broken query that reports "no matches" is the worst
     // possible failure mode for a search tool: the model concludes the memory
@@ -864,68 +679,58 @@ function describe(error: unknown): string {
 }
 
 /**
- * openclaw's `MemoryEntryProvenance`, or undefined when the document carries no
- * classification. The failure mode matters: a hit with no provenance is not eligible
- * for automatic injection, which is the safe direction.
+ * Project one chunk row into a `SearchHit`, with the recall metadata merged in.
+ *
+ * TWO UPSTREAM CALLS, NOT A WIDER SELECT
+ *   Upstream loads the six chunk columns in the keyword query (`manager-search.ts:348`)
+ *   and then reads provenance and annotations in a second query keyed by id
+ *   (`readMemoryRecallMetadata(db, ids)`, `memory-recall-metadata.ts:71`). That second call
+ *   is made here rather than hand-rolled as two `LEFT JOIN`s, because it is already in the
+ *   tree and it does three things a join would not: it validates `origin_class` and
+ *   `session_kind` against the closed sets and yields `undefined` for anything else
+ *   (`decodeChunkProvenance`, line 44), it omits `supersedesKey` when blank, and it
+ *   `LEFT JOIN`s, so a chunk with no metadata row still comes back.
+ *
+ *   That last point is the security-relevant one: `provenance` stays `undefined` for an
+ *   unclassified chunk, and `isAutomaticMemoryEntryEligible` fails closed on `undefined`.
+ *   An absent row therefore cannot be promoted; a defaulted row could.
+ *
+ * `project` and `day` are derived from `path`, per the note on {@link SearchHit}.
+ *
+ * ONE CALL FOR THE WHOLE RESULT SET
+ *   `readMemoryRecallMetadata` takes the full id list and returns a `Map`, which is how its
+ *   one caller uses it. Calling it per row would be a query per hit -- up to 200 for the
+ *   hybrid keyword lane, where `topKPerLane` is 200. So the ids are collected first and the
+ *   map is built once.
  */
-function buildProvenance(row: Record<string, unknown>): MemoryEntryProvenance | undefined {
-  const originClass = row["originClass"];
-  const sessionKind = row["sessionKind"];
-  const observedAt = Number(row["observedAt"]);
-  if (
-    typeof originClass !== "string" ||
-    typeof sessionKind !== "string" ||
-    !Number.isFinite(observedAt) ||
-    observedAt <= 0
-  ) {
-    return undefined;
-  }
-  return {
-    originClass: originClass as MemoryEntryProvenance["originClass"],
-    sessionKind: sessionKind as MemoryEntryProvenance["sessionKind"],
-    observedAt,
-    // openclaw's lineage key, attached the way `manager-keyword-retrieval.ts:172` does:
-    // only when it is a string, so "absent" and "empty" stay distinguishable. No writer in
-    // this openclaw revision sets a non-null value, so hits normally carry no
-    // `supersedesKey` -- the column exists so the contract matches, not to hold data.
-    ...(typeof row["supersedesKey"] === "string" && row["supersedesKey"].trim()
-      ? { supersedesKey: row["supersedesKey"] }
-      : {}),
-  };
-}
-
-function rowToHit(row: Record<string, unknown>): SearchHit {
-  const tags = typeof row["tags"] === "string" ? (row["tags"] as string) : "";
-  const text = String(row["text"] ?? "");
-  return {
-    unitId: Number(row["unitId"]),
-    score: Number(row["rank"] ?? 0),
-    project: String(row["project"] ?? ""),
-    path: String(row["path"] ?? ""),
-    root: String(row["root"] ?? "home") as IndexRoot,
-    documentKind: String(row["documentKind"] ?? ""),
-    day: (row["day"] as string | null) ?? null,
-    ts: (row["ts"] as number | null) ?? null,
-    entryType: (row["entryType"] as string | null) ?? null,
-    tags: tags.length > 0 ? tags.split(" ").filter(Boolean) : [],
-    marker: (row["marker"] as string | null) ?? null,
-    // Curated recall annotations. Null for everything but MEMORY.md sections,
-    // which is what makes them trigger-injection candidates and nothing else.
-    triggers: (row["triggers"] as string | null) ?? null,
-    importance: (row["importance"] as number | null) ?? null,
-    projectKey: (row["projectKey"] as string | null) ?? null,
-    // openclaw's `MemoryEntryProvenance`, projected onto the hit so
-    // `isAutomaticMemoryEntryEligible` and the injection gate can read it directly.
-    // Null when the document was indexed without a classification.
-    provenance: buildProvenance(row),
-    curatedRoot: Number(row["curatedRoot"] ?? 0) === 1,
-    heading: String(row["heading"] ?? ""),
-    text,
-    startLine: 0,
-    endLine: 0,
-    source: "memory",
-    snippet: text,
-  };
+function rowsToHits(db: DatabaseSync, rows: readonly Record<string, unknown>[]): SearchHit[] {
+  const base = rows.map((row) => {
+    const path = String(row["path"] ?? "");
+    return {
+      chunkId: String(row["id"] ?? ""),
+      path,
+      startLine: Number(row["start_line"] ?? 0),
+      endLine: Number(row["end_line"] ?? 0),
+      score: Number(row["rank"] ?? 0),
+      snippet: truncateUtf16Safe(String(row["text"] ?? ""), SNIPPET_MAX_CHARS),
+      source: String(row["source"] ?? "memory") as MemorySearchResult["source"],
+      project: projectOf(path),
+      day: dayOf(path),
+    };
+  });
+  const metadata = readMemoryRecallMetadata(db, base.map((hit) => hit.chunkId));
+  return base.map((hit) => {
+    const row = metadata.get(hit.chunkId);
+    return {
+      ...hit,
+      citation: formatCitation(hit),
+      ...(row?.importance != null ? { importance: row.importance } : {}),
+      ...(row?.triggers != null ? { triggers: row.triggers } : {}),
+      ...(row?.project_key != null ? { projectKey: row.project_key } : {}),
+      // Absent for an unclassified chunk, which is the fail-closed direction.
+      ...(row?.provenance ? { provenance: row.provenance } : {}),
+    };
+  });
 }
 
 // --- trigger candidates ----------------------------------------------------
@@ -965,21 +770,25 @@ export function listTriggerCandidates(params: {
   onError?: (message: string) => void;
 }): SearchHit[] {
   const limit = Math.max(1, Math.min(512, Math.floor(params.limit ?? 512)));
-  const sql = `
-    SELECT ${HIT_COLUMNS},
-           0 AS rank
-    FROM units u
-    JOIN documents d  ON d.id = u.document_id
-    WHERE u.triggers IS NOT NULL
-      AND d.root = 'home'
-    ORDER BY d.path, u.ord
-    LIMIT ?
-  `;
   try {
-    const rows = params.db.prepare(sql).all(limit) as Record<string, unknown>[];
-    return rows.map(rowToHit);
+    // Upstream `readCuratedMemoryTriggerCandidates` (`memory-recall-metadata.ts:113`).
+    // The predicate mem-plus wrote by hand here is upstream's, verbatim:
+    //
+    //   where("chunk.source", "=", "memory")
+    //   where("chunk.path",   "in", ["MEMORY.md", "USER.md"])
+    //   where("provenance.origin_class", "in", ["owner", "agent"])
+    //   where("metadata.triggers", "is not", null)
+    //
+    // That third clause is the one mem-plus could not express: it INNER JOINs provenance, so
+    // a curated chunk with no classification is not a candidate at all. mem-plus's query
+    // selected on `d.root = 'home'`, which admitted unclassified content and relied on the
+    // caller to gate it. Upstream puts the gate in the query.
+    return curatedRowsToHits(
+      params.db,
+      readCuratedMemoryTriggerCandidates(params.db, limit),
+    );
   } catch (error) {
-    params.onError?.(error instanceof Error ? error.message : String(error));
+    params.onError?.(describe(error));
     return [];
   }
 }
@@ -1000,118 +809,222 @@ export function listTriggerCandidates(params: {
 export function listCuratedProjectCandidates(params: {
   db: DatabaseSync;
   limit?: number;
+  /**
+   * Upstream's second argument, and it is required: upstream returns `[]` when the list is
+   * empty (`memory-recall-metadata.ts:134`), because an entry annotated with project keys can
+   * only be recalled inside a project that is active. mem-plus's version had no such
+   * argument and returned every annotated curated chunk, so the database was asked for rows
+   * that were then discarded in JS.
+   */
+  activeProjectKeys: readonly string[];
   onError?: (message: string) => void;
 }): SearchHit[] {
   const limit = Math.max(1, Math.min(512, Math.floor(params.limit ?? 48)));
-  const sql = `
-    SELECT ${HIT_COLUMNS},
-           0 AS rank
-    FROM units u
-    JOIN documents d  ON d.id = u.document_id
-    WHERE u.project_key IS NOT NULL
-      AND d.root = 'home'
-    ORDER BY d.path, u.ord
-    LIMIT ?
-  `;
   try {
-    const rows = params.db.prepare(sql).all(limit) as Record<string, unknown>[];
-    return rows.map(rowToHit);
+    // Upstream `readCuratedProjectMemoryCandidates` (`memory-recall-metadata.ts:127`). It
+    // returns `[]` when `activeProjectKeys` is empty, which is the fail-closed direction:
+    // an entry annotated with project keys can only be recalled inside those projects.
+    //
+    // The signature change is real: upstream takes `activeProjectKeys` and does the
+    // eligibility filtering itself, including keyset batching so foreign rows cannot starve
+    // the window. mem-plus's version had no such argument and returned every annotated
+    // curated chunk, leaving `buildProjectMemoryBootstrap` to filter in JS -- which it does,
+    // but only after the database had already been asked for the wrong rows.
+    return curatedRowsToHits(
+      params.db,
+      readCuratedProjectMemoryCandidates(params.db, limit, params.activeProjectKeys),
+    );
   } catch (error) {
-    params.onError?.(error instanceof Error ? error.message : String(error));
+    params.onError?.(describe(error));
     return [];
   }
 }
 
+/**
+ * Upstream's curated-candidate rows are snake_case and already carry provenance, so they do
+ * not go through {@link rowsToHits} -- that path exists for the six-column FTS shape and
+ * would re-read the metadata this query just joined.
+ */
+function curatedRowsToHits(
+  db: DatabaseSync,
+  rows: readonly {
+    id: string;
+    path: string;
+    source: string;
+    start_line: number;
+    end_line: number;
+    text: string;
+    importance: number | null;
+    triggers: string | null;
+    project_key: string | null;
+    origin_class: unknown;
+    session_kind: unknown;
+    observed_at: unknown;
+    supersedes_key: unknown;
+  }[],
+): SearchHit[] {
+  void db;
+  return rows.map((row) => {
+    const hit = {
+      chunkId: row.id,
+      path: row.path,
+      startLine: row.start_line,
+      endLine: row.end_line,
+      score: 0,
+      snippet: truncateUtf16Safe(row.text, SNIPPET_MAX_CHARS),
+      source: row.source as MemorySearchResult["source"],
+      project: projectOf(row.path),
+      day: dayOf(row.path),
+    };
+    return {
+      ...hit,
+      citation: formatCitation(hit),
+      ...(row.importance != null ? { importance: row.importance } : {}),
+      ...(row.triggers != null ? { triggers: row.triggers } : {}),
+      ...(row.project_key != null ? { projectKey: row.project_key } : {}),
+      ...(row.origin_class != null && row.session_kind != null && row.observed_at != null
+        ? {
+            provenance: {
+              originClass: row.origin_class as MemoryEntryProvenance["originClass"],
+              sessionKind: row.session_kind as MemoryEntryProvenance["sessionKind"],
+              observedAt: row.observed_at as number,
+              ...(typeof row.supersedes_key === "string" && row.supersedes_key.trim()
+                ? { supersedesKey: row.supersedes_key }
+                : {}),
+            } satisfies MemoryEntryProvenance,
+          }
+        : {}),
+    };
+  });
+}
+
 // --- vectors ---------------------------------------------------------------
 
+/**
+ * Write an embedding onto the chunk row.
+ *
+ * Upstream stores it in `memory_index_chunks.embedding` (`manager-chunk-writer.ts:48`) and
+ * mirrors it into the `memory_index_chunks_vec` virtual table when sqlite-vec is loaded.
+ * mem-plus had a `vectors(unit_id, dim, vec)` table of its own; this is that table, gone.
+ *
+ * A row's identity includes `model` (see `memory-index-write.ts`), so writing here without a
+ * model argument would store a vector that the next reindex with a model present re-ids and
+ * discards. `model` is therefore required rather than defaulted to "".
+ */
 export function storeVector(params: {
   db: DatabaseSync;
-  unitId: number;
+  chunkId: string;
+  model: string;
   vector: readonly number[];
 }): void {
-  // Float32 is half the bytes of the Float64 the service returns and loses
-  // nothing that a cosine score would notice.
-  const floats = Float32Array.from(params.vector);
   params.db
-    .prepare("INSERT OR REPLACE INTO vectors (unit_id, dim, vec) VALUES (?, ?, ?)")
-    .run(params.unitId, floats.length, new Uint8Array(floats.buffer));
+    .prepare("UPDATE memory_index_chunks SET embedding = ? WHERE id = ? AND model = ?")
+    .run(encodeMemoryEmbedding(params.vector), params.chunkId, params.model);
 }
 
-/** Units with no vector yet, oldest document first so a rebuild is stable. */
-export function unitsMissingVectors(db: DatabaseSync, limit: number): { id: number; text: string }[] {
+/**
+ * Chunks with no embedding yet.
+ *
+ * "No embedding" IS NOT NULL -- upstream declares the column `embedding BLOB NOT NULL` in a
+ * `STRICT` table (`memory-schema-base.ts`), so an absent vector is a ZERO-LENGTH BLOB, which
+ * is what `encodeMemoryEmbedding([])` returns and what `chunkEmbeddingColumn` writes when the
+ * caller has no provider. A `WHERE embedding IS NULL` predicate here would match nothing and
+ * silently report the whole index as embedded; that is what the first version of this
+ * function did, and it is why the DDL was read rather than assumed.
+ *
+ * The `model` test is upstream's own, and it is the reliable signal:
+ * `manager-sync-base.ts:330` decides whether the index holds semantic chunks with
+ * `SELECT 1 FROM memory_index_chunks WHERE model != 'fts-only'`. A row is semantic because it
+ * was written by a provider, not because its blob happens to be non-empty.
+ */
+export function chunksMissingVectors(
+  db: DatabaseSync,
+  model: string,
+  limit: number,
+): { id: string; text: string }[] {
+  return db
+    .prepare(
+      `SELECT id, text
+         FROM memory_index_chunks
+        WHERE length(embedding) = 0 AND model = ?
+        ORDER BY id
+        LIMIT ?`,
+    )
+    .all(model, limit) as { id: string; text: string }[];
+}
+
+/**
+ * How many chunks the vector lane could actually score.
+ *
+ * DIVERGES FROM UPSTREAM'S `hasSemanticChunks`, and the reason is a state upstream cannot be
+ * in. Upstream tests `WHERE model != 'fts-only'` (`manager-sync-base.ts:330`): a chunk
+ * written by a provider always has its embedding in the same pass, because upstream computes
+ * embeddings inside the reindex (`enforceEmbeddingMaxInputTokens(provider, baseChunks, ...)`
+ * and `prepareChunks`, `manager-index-preparation.ts:79`), so the two conditions coincide.
+ *
+ * mem-plus's embedding is a separate budgeted pass (`embedMissing`, one tool call at a time).
+ * So a chunk can legitimately carry the provider's `model` while its `embedding` blob is
+ * still empty, between a reindex and the embed call. Counting on `model` would report those
+ * as vector-searchable, and `describeMissingVectors` -- whose whole job is to tell the model
+ * "semantic search is not active yet" -- would stay silent while every `vector` and `hybrid`
+ * query returned nothing. Counting the blob is what the question actually is.
+ */
+export function vectorCount(db: DatabaseSync): number {
   return (
     db
-      .prepare(
-        `SELECT u.id AS id, u.text AS text
-         FROM units u
-         LEFT JOIN vectors v ON v.unit_id = u.id
-         WHERE v.unit_id IS NULL
-         ORDER BY u.id
-         LIMIT ?`,
-      )
-      .all(limit) as { id: number; text: string }[]
-  );
+      .prepare("SELECT COUNT(*) AS n FROM memory_index_chunks WHERE length(embedding) > 0")
+      .get() as { n: number }
+  ).n;
 }
 
-export function vectorCount(db: DatabaseSync): number {
-  return (db.prepare("SELECT COUNT(*) AS n FROM vectors").get() as { n: number }).n;
-}
-
-/** Cosine similarity over stored vectors, honouring the same filters. */
+/**
+ * Cosine similarity over `memory_index_chunks.embedding`, honouring the same filters.
+ *
+ * Scored with upstream's `cosineSimilarity` (`embedding-vector.ts:42`) rather than the
+ * hand-written dot-product loop this used to have, so the ranking is upstream's.
+ */
 export function searchVector(params: {
   db: DatabaseSync;
   query: readonly number[];
   filters: SearchFilters;
   limit: number;
   currentProject?: string;
+  model: string;
   /** Candidates to consider before ranking; the whole corpus is scanned. */
   candidateLimit?: number;
 }): SearchHit[] {
-  const filter = filtersSql(params.filters, params.currentProject);
+  if (params.query.length === 0) return [];
+  const filter = filtersSql(params.filters, CHUNKS, params.currentProject);
+  // Upstream's `searchChunksByEmbedding` fallback scan, over the same column it reads.
   const sql = `
-    SELECT u.id AS unitId, d.project AS project, d.path AS path, d.kind AS documentKind,
-           u.day AS day, u.ts AS ts, u.entry_type AS entryType, u.tags AS tags,
-           u.marker AS marker, u.heading AS heading, u.text AS text, v.vec AS vec,
-           u.triggers AS triggers, u.importance AS importance,
-           u.project_key AS projectKey, d.origin_class AS originClass,
-           d.session_kind AS sessionKind, d.observed_at AS observedAt,
-           d.supersedes_key AS supersedesKey, d.curated_root AS curatedRoot,
-           d.root AS root
-    FROM vectors v
-    JOIN units u     ON u.id = v.unit_id
-    JOIN documents d ON d.id = u.document_id
-    WHERE v.dim = ?${filter.clause}
+    SELECT ${hitColumns(CHUNKS)},
+           ${CHUNKS}.embedding AS embedding,
+           0 AS rank
+    FROM ${CHUNKS}
+    WHERE length(${CHUNKS}.embedding) > 0
+      AND ${CHUNKS}.model = ?${filter.clause}
     LIMIT ?
   `;
   const rows = params.db
     .prepare(sql)
-    .all(
-      params.query.length,
-      ...filter.params,
-      params.candidateLimit ?? 20_000,
-    ) as Record<string, unknown>[];
+    .all(params.model, ...filter.params, params.candidateLimit ?? 20_000) as Record<
+      string,
+      unknown
+    >[];
 
-  const target = Float32Array.from(params.query);
-  let norm = 0;
-  for (const value of target) norm += value * value;
-  norm = Math.sqrt(norm);
-  if (norm === 0) return [];
-
-  return rows
-    .map((row) => {
-      const bytes = row["vec"] as Uint8Array;
-      const stored = new Float32Array(
-        bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength),
-      );
-      let dot = 0;
-      let storedNorm = 0;
-      for (const [index, value] of stored.entries()) {
-        dot += value * (target[index] ?? 0);
-        storedNorm += value * value;
-      }
-      const score = dot / (Math.sqrt(storedNorm) * norm);
-      return { ...rowToHit(row), score };
-    })
+  // Scored row-by-row against the projection of the same row, so index alignment holds by
+  // construction: `rowsToHits` maps in order and does not drop or reorder anything.
+  // `decodeMemoryEmbedding` returns `[]` for a blob whose length is not a multiple of 8, and
+  // `cosineSimilarity` on an empty vector is 0 -- so a corrupt row drops out on the score
+  // filter below rather than reaching the model as a hit.
+  const scored = rowsToHits(params.db, rows).map((hit, index) => ({
+    ...hit,
+    score: cosineSimilarity(
+      params.query as number[],
+      decodeMemoryEmbedding(rows[index]!["embedding"] as Uint8Array),
+    ),
+  }));
+  return scored
     .filter((hit) => Number.isFinite(hit.score))
     // Negative cosine is possible for unrelated text; there is nothing to rank
     // against it, so it is dropped rather than shown as a weak match.
@@ -1168,11 +1081,21 @@ type VectorLane = NonNullable<MergeParams["vector"]>[number];
  * decay, importance, project ranking, MMR re-ranking, then the strict-recall
  * floor with a keyword-only fallback for spare capacity.
  *
- * Identity: openclaw keys a hit by `source:path:startLine:endLine`, and
- * `mergeHybridResults` emits only its own field set, so the incoming `id` does
- * not survive. This index has no line granularity, so the unit id rides in
- * `startLine`/`endLine`. It is a carrier, not a line number -- and it also gives
- * the tie-break a stable order.
+ * Identity, read from the code rather than assumed:
+ *
+ *   - `mergeHybridResults` keys its lanes on `id` (`hybrid.ts:90`, `:114`) -- the chunk id,
+ *     which is exactly what upstream passes. It does NOT key on a range, and an earlier
+ *     comment here said it did; that was wrong.
+ *   - `mergeHybridResults` drops `id` from its output (`hybrid.ts:190-208` projects
+ *     `path`/`startLine`/`endLine`/scores/`snippet`/`source`/annotations and nothing else).
+ *   - `selectHybridSearchResults` de-duplicates on `source:path:startLine:endLine`
+ *     (`hybrid.ts:297`, `hybridResultRangeKey`).
+ *
+ * So the mapping back is by that same range key. Which is only correct now that
+ * `startLine`/`endLine` are real: this used to overload them with the unit id as a carrier,
+ * and look results up by `byId.get(entry.startLine)` -- a number that was a row id wearing a
+ * line-number's name. Both lanes now carry upstream's own values, and `hit.chunkId` is the
+ * `id` upstream wants.
  *
  * An earlier version of this file fused by reciprocal rank instead. That was
  * wrong twice over: RRF is not what openclaw does, and by weighting ranks rather
@@ -1187,51 +1110,54 @@ export async function fuseRankings(params: {
   /** Test hook for the time-dependent decay. */
   nowMs?: number;
 }): Promise<SearchHit[]> {
-  const byId = new Map<number, SearchHit>();
+  // Upstream's own result identity (`hybrid.ts:297`).
+  const rangeKey = (hit: {
+    readonly source: string;
+    readonly path: string;
+    readonly startLine: number;
+    readonly endLine: number;
+  }): string => `${hit.source}:${hit.path}:${hit.startLine}:${hit.endLine}`;
+
+  const byRange = new Map<string, SearchHit>();
   const keyword: KeywordLane[] = [];
   const vector: VectorLane[] = [];
 
   for (const hit of params.text) {
-    byId.set(hit.unitId, hit);
+    byRange.set(rangeKey(hit), hit);
     keyword.push({
-      id: String(hit.unitId),
+      id: hit.chunkId,
       path: hit.path,
-      // `unitId`, deliberately -- see the note at the top of this function: it is the
-      // merge key `mergeHybridResults` keys on, not a line number. `SearchHit.startLine`
-      // and `endLine` are hard-coded to 0 in `rowToHit` because mem-plus's own `units`
-      // table has no line columns and `HIT_COLUMNS` never selects any, so there is
-      // nothing to read. Upstream's chunks carry `start_line` / `end_line` and
-      // `memory-recall-metadata.ts` selects both, which is what makes its citations real.
-      startLine: hit.unitId,
-      endLine: hit.unitId,
+      startLine: hit.startLine,
+      endLine: hit.endLine,
       source: hit.source,
-      snippet: hit.text,
-      // The unit's `<!-- project: ... -->` keys, not `hit.project`. `project` is the
-      // document's *directory slug* -- it partitions `memory/<slug>/` on disk and has
-      // nothing to do with openclaw's project identity, which is the repository's
-      // normalised `origin` remote. Passing the slug here stamped curated entries with
-      // `mem-plus--83e5df` while the injection gate compares against
-      // `github.com/...`, so every such entry was annotated-and-never-active: dropped
-      // fail-closed, which hides a memory permanently rather than merely scoping it.
-      projectKey: hit.projectKey ?? undefined,
+      snippet: hit.snippet,
+      // The chunk's `<!-- project: ... -->` keys, not `hit.project`. `project` is the
+      // directory slug -- it partitions `memory/<slug>/` on disk and has nothing to do
+      // with openclaw's project identity, which is the repository's normalised `origin`
+      // remote. Passing the slug here stamped curated entries with `mem-plus--83e5df`
+      // while the injection gate compares against `github.com/...`, so every such entry
+      // was annotated-and-never-active: dropped fail-closed, which hides a memory
+      // permanently rather than merely scoping it.
+      projectKey: hit.projectKey,
       textScore: hit.score,
+      ...(hit.provenance ? { provenance: hit.provenance } : {}),
     });
   }
   for (const hit of params.vector) {
-    byId.set(hit.unitId, hit);
+    byRange.set(rangeKey(hit), hit);
     vector.push({
-      id: String(hit.unitId),
+      id: hit.chunkId,
       path: hit.path,
-      // Same merge key as the keyword lane above -- not a line number.
-      startLine: hit.unitId,
-      endLine: hit.unitId,
+      startLine: hit.startLine,
+      endLine: hit.endLine,
       source: hit.source,
-      snippet: hit.text,
-      projectKey: hit.projectKey ?? undefined,
+      snippet: hit.snippet,
+      projectKey: hit.projectKey,
       vectorScore: hit.score,
+      ...(hit.provenance ? { provenance: hit.provenance } : {}),
     });
   }
-  if (byId.size === 0) return [];
+  if (byRange.size === 0) return [];
 
   const merged = await mergeHybridResults({
     vector,
@@ -1253,7 +1179,7 @@ export async function fuseRankings(params: {
   });
 
   return selected.flatMap((entry) => {
-    const hit = byId.get(entry.startLine);
+    const hit = byRange.get(rangeKey(entry));
     if (!hit) return [];
     return [{ ...hit, score: entry.score }];
   });
@@ -1268,6 +1194,17 @@ export function search(params: {
   currentProject?: string;
   /** Required for `vector` and `hybrid`; omitted for `text`. */
   queryVector?: readonly number[];
+  /**
+   * The embedding model whose vectors the vector lane may read.
+   *
+   * Required rather than optional because `model` is part of a chunk's row identity: a
+   * vector computed by `bge-m3` is meaningless under a different model, so the vector lane
+   * has to be told which model's rows it is allowed to score against. Upstream does the same
+   * thing with `buildMemoryModelFilter(column, models)`
+   * (`manager-search-shared.ts:31`) and resolves aliases before querying
+   * (`manager-search-vector.ts:19`).
+   */
+  model: string;
   onError?: (message: string) => void;
   /** Test hook for the time-dependent decay. */
   nowMs?: number;
@@ -1303,8 +1240,7 @@ export function search(params: {
 }
 
 export function indexStats(db: DatabaseSync): IndexStats {
-  const count = (sql: string): number =>
-    (db.prepare(sql).get() as { n: number }).n;
+  const count = (sql: string): number => (db.prepare(sql).get() as { n: number }).n;
   let bytes = 0;
   try {
     bytes = statSync(indexPath()).size;
@@ -1314,9 +1250,10 @@ export function indexStats(db: DatabaseSync): IndexStats {
     bytes = 0;
   }
   return {
-    documents: count("SELECT COUNT(*) AS n FROM documents"),
-    units: count("SELECT COUNT(*) AS n FROM units"),
-    vectors: count("SELECT COUNT(*) AS n FROM vectors"),
+    // Upstream's own tables. `documents`/`units`/`vectors` were mem-plus's; they are gone.
+    sources: count("SELECT COUNT(*) AS n FROM memory_index_sources"),
+    chunks: count("SELECT COUNT(*) AS n FROM memory_index_chunks"),
+    vectors: vectorCount(db),
     bytes,
   };
 }

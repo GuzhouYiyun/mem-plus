@@ -61,13 +61,27 @@ function projectKeysOf(entry: SearchHit): string[] {
 
 /**
  * Upstream's `toLegacyProjectMemoryHit` eligibility: the provenance gate *and* the curated
- * root. Both stay. Upstream spells the second half as a basename compare against
- * `MEMORY.MD`; `curatedRoot` is the same fact read from the document the hit came from, so
- * it survives a day file the parser mis-dispatched.
+ * root.
+ *
+ * The second half is now upstream's own literal test, the one in
+ * `readCuratedCandidateBatch` (`memory-recall-metadata.ts:231`):
+ *
+ *     .where("chunk.path", "in", ["MEMORY.md", "USER.md"])
+ *
+ * Upstream spells it as a basename compare against `MEMORY.MD` in
+ * `toLegacyProjectMemoryHit`, and the reader compares the whole stored path. The reader's
+ * version is the stricter and correct one for a workspace-relative path, and it is the one
+ * used here because these entries came from that reader.
+ *
+ * `SearchHit.curatedRoot` is gone. It was a per-FILE fact read off the document row, so it
+ * could not distinguish a curated file the parser mis-dispatched, and it was a second source
+ * of truth for something the path already says.
  */
 function isEligibleCuratedHit(entry: SearchHit): boolean {
-  return isAutomaticMemoryEntryEligible(entry) && entry.curatedRoot;
+  return isAutomaticMemoryEntryEligible(entry) && CURATED_PATHS.has(entry.path);
 }
+
+const CURATED_PATHS: ReadonlySet<string> = new Set(["MEMORY.md", "USER.md"]);
 
 /**
  * Upstream's `buildProjectMemoryBootstrap`, over mem-plus hits instead of `MemorySearchHit`.
@@ -142,6 +156,11 @@ export function prepareProjectMemoryBootstrap(params: {
     const entries = listCuratedProjectCandidates({
       db: params.db,
       limit: PROJECT_CANDIDATE_LIMIT,
+      // Passed down so the filtering happens in SQL, upstream's way: with an empty list
+      // upstream returns `[]` outright rather than handing back annotated entries for the
+      // caller to discard. The guard above makes that unreachable, but the argument is
+      // required precisely so it cannot be.
+      activeProjectKeys: params.activeProjectKeys,
       onError: (message) => params.log("project memory candidate query failed", message),
     });
     const lines = buildProjectMemoryBootstrap({

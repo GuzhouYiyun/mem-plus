@@ -250,6 +250,10 @@ export default Plugin.define({
         // Null service = vector modes off (see the note above); extraction above
         // keeps its own reference either way.
         service: vectorsUsable ? localService : null,
+        // The same string the index write and the embed pass use. `model` is part of a
+        // chunk's row identity, so these three must agree exactly -- see the note on
+        // `RetrievalDeps.model`.
+        model: modelConfig.embedModelPath,
         options,
         log,
       });
