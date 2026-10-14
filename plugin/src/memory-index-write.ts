@@ -134,7 +134,12 @@ export function writeSourceChunks(params: {
 
   const now = params.mtime || Date.now();
   let written = 0;
-  db.exec("BEGIN");
+  // Upstream's own guard, from `memory-schema-provenance.ts:41-46`: the writer may be
+  // called from inside a caller's transaction, and a bare `BEGIN` there is "cannot start a
+  // transaction within a transaction" -- which would abort the caller's whole unit of work
+  // over a detail of ours. Joining an open transaction is what "atomic" means here anyway.
+  const own = !db.isTransaction;
+  if (own) db.exec("BEGIN");
   try {
     for (const chunk of chunks) {
       // Upstream's row identity, verbatim.
@@ -189,9 +194,9 @@ export function writeSourceChunks(params: {
       written += 1;
     }
     upsertSource.run(relativePath, source, params.hash, params.mtime, params.bytes);
-    db.exec("COMMIT");
+    if (own) db.exec("COMMIT");
   } catch (error) {
-    db.exec("ROLLBACK");
+    if (own) db.exec("ROLLBACK");
     throw error;
   }
   return { path: relativePath, source, cleared, written };
@@ -204,7 +209,10 @@ export function clearSource(db: DatabaseSync, relativePath: string, source: MemP
       id: string;
     }[]
   ).map((row) => row.id);
-  db.exec("BEGIN");
+  // Same guard as in `writeSourceChunks`: join an open transaction rather than starting a
+  // nested one. See upstream `memory-schema-provenance.ts:41-46`.
+  const own = !db.isTransaction;
+  if (own) db.exec("BEGIN");
   try {
     for (const id of ids) {
       // Same extension gating as the insert: the table may not exist in this build.
@@ -216,9 +224,9 @@ export function clearSource(db: DatabaseSync, relativePath: string, source: MemP
     }
     db.prepare("DELETE FROM memory_index_chunks WHERE path = ? AND source = ?").run(relativePath, source);
     db.prepare("DELETE FROM memory_index_sources WHERE path = ? AND source = ?").run(relativePath, source);
-    db.exec("COMMIT");
+    if (own) db.exec("COMMIT");
   } catch (error) {
-    db.exec("ROLLBACK");
+    if (own) db.exec("ROLLBACK");
     throw error;
   }
   return ids.length;
