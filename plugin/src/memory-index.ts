@@ -30,7 +30,7 @@ import {
   mergeHybridResults,
   selectHybridSearchResults,
 } from "../../extensions/memory-core/src/memory/hybrid.js";
-import { stateRoot } from "./paths.js";
+import { memoryHomeDir, stateRoot } from "./paths.js";
 import { parseMemoryDocument, type IndexRoot, type MemoryUnit, type ParsedDocument } from "./memory-parse.js";
 import { writeSourceChunks } from "./memory-index-write.js";
 import { ensureMemoryIndexSchema } from "./memory-index-schema.js";
@@ -55,21 +55,38 @@ function hasUpstreamSchema(db: DatabaseSync): boolean {
 }
 
 /**
- * The workspace-relative path upstream stores.
+ * The path upstream stores, relative to the memory home.
  *
  * Upstream indexes workspace-relative paths -- its curated whitelist is literally
  * `path IN ('MEMORY.md','USER.md')` -- while mem-plus's `documents.path` is absolute and
- * unique because absolute paths are. Two files with the same relative path in different
- * project homes must therefore stay distinguishable, so the project slug is preserved as
- * the leading segment, the same accommodation `memory-path-provenance.ts` already makes.
+ * unique because absolute paths are. The relative form has to carry everything the filters
+ * need, and every one of them is derivable from it:
+ *
+ *   curated tier   -> the path IS `MEMORY.md` or `USER.md`
+ *   project scope  -> the slug is the segment under `memory/`
+ *   day range      -> the date in the basename
+ *   corpus         -> the `source` column, not the path
+ *
+ * TWO REVISIONS OF THIS FUNCTION WERE WRONG, and both only a probe over the real path
+ * shapes could have caught.
+ *
+ * The first sliced everything after the last `memory` segment, which silently dropped the
+ * project slug and left `filters.project` with nothing to match.
+ *
+ * The second kept that slice but had no fallback for files that live at the memory-home
+ * ROOT -- which is exactly where `MEMORY.md`, `USER.md` and the wiki pages live, because
+ * they have no `memory` segment. Those came out as absolute paths, so upstream's literal
+ * curated whitelist `path IN ('MEMORY.md','USER.md')` would never have matched the single
+ * most important file in the system. Deriving the base by looking for a `memory` segment
+ * was the wrong approach twice: relativise against the memory home, which is known.
  */
-function upstreamRelativePath(file: string, root: IndexRoot): string {
-  const withoutExtension = file.replace(/\.(md|markdown)$/i, "");
-  const segments = withoutExtension.split(/[\\/]/).filter(Boolean);
-  const memoryIndex = segments.lastIndexOf("memory");
-  const relative = memoryIndex >= 0 ? segments.slice(memoryIndex + 1) : segments;
-  const joined = relative.join("/");
-  return file.match(/\.(md|markdown)$/i) ? `${joined}${file.match(/\.(md|markdown)$/i)![0]}` : joined;
+function upstreamRelativePath(file: string, _root: IndexRoot): string {
+  const home = memoryHomeDir().replaceAll("\\", "/").replace(/\/+$/, "");
+  const normalized = file.replaceAll("\\", "/");
+  if (normalized.startsWith(`${home}/`)) return normalized.slice(home.length + 1);
+  // Outside the memory home -- an explicitly configured extra path. Upstream's curated
+  // test is a literal path comparison, so a path outside the home is simply not curated.
+  return normalized.replace(/^\/+/, "");
 }
 
 /**
