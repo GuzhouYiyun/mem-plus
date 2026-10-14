@@ -787,7 +787,71 @@ import,或补出 8794 个模块。**解除阻塞的判据是清楚的**:要么�
 > 4240 = 基线。留一个来源不明的桩在树里,比留着 17 条明确的 `TS2307` 更糟 —— 后者至少
 > 说清了缺什么。
 
-`session-policy.ts` 与 `recall-state.ts` 都不搬(2026-10-14 实测,按需求侧先量的)
+## 待用户拍板:sqlite-vec(2026-10-14 实测,这是个取舍不是缺陷)
+
+`memory-index-write.ts` 里 130-197 行那段手写的 `vectorReady` / `vectorUnavailable` 门,
+**永远走不通**,已实测:
+
+- `sqlite-vec` **未安装**,也**不在 `dependencies` 里**;
+- 上游的加载器 `packages/memory-host-sdk/src/host/sqlite-vec.ts` 在树里且逐字节相同,导出
+  `loadSqliteVecExtensionFromPath` 与 `loadSqliteVecExtension`,但它要那个 npm 包;
+- 上游的配置键(`memory.search.store.vector.extensionPath`)在 mem-plus 里**零出现**;
+- 于是 `memory_index_chunks_vec` 这个虚拟表**不存在**,对它的 `db.prepare` **确实抛错**,
+  而写入路径把那个错吞掉 —— 源码里那段分支看着是活的,运行期一次都没成功过。
+
+**但功能没缺。** 上游的 schema 把 embedding 放在 chunk 行上(`embedding BLOB NOT NULL`,
+`memory-schema-base.ts`),所以:
+
+- 写入在 vec 表缺席时照常成功(探针:written=2);
+- `storeVector` 写的是 chunk 行的 `embedding` 列;
+- `searchVector` 读那个列,**在没有 sqlite-vec 的情况下照常返回命中**。
+
+所以缺的不是功能,是**索引形态**:上游在 `vectorReady` 时走 `runVectorKnn` 的近邻索引,
+mem-plus 永远走 `searchChunksByEmbedding` 的全表扫描(带 `candidateLimit` 20000 的上限)。
+
+**两个选项,都需要用户定,我不单方面决定**:
+
+1. **加依赖 + 配置面** —— 把 `sqlite-vec` 加进 `dependencies`,照上游的形状开一个
+   `memory.search.vector.extensionPath`,然后调上游那份加载器。代价是安装体积与一个可选原生
+   扩展(AGENTS.md:「The user is the user」—— 不该替用户往安装里塞可选原生扩展)。
+2. **删掉那段分支** —— 它现在恒失败,留着只是让人以为 KNN 路径在。代价是将来要加回来。
+
+倾向 2,因为 1 要动用户的安装,而收益只是一个索引形态;但这是取舍不是对错。
+
+## 三个血管文件的归属(2026-10-14 逐个查过)
+
+`recall-inject.ts` / `recall-intent.ts` / `recall-taint.ts` 都**不是**可搬的自创器官:
+
+| 文件 | 归属 | 依据 |
+|---|---|---|
+| `recall-inject.ts` 177 行 | **血管**。自述「the host half of both」 | OpenCode 的 `prompt` / `context` 两个 hook 是宿主形状,上游没有;而它复用的 `resolveTriggerRecall` 与 `prepareProjectMemoryBootstrap` 都已走上游 |
+| `recall-intent.ts` 98 行 | **血管**。宿主能力(翻译) | 上游的 `hasRecallIntent` 保持逐字不变并被直接调用,前面只加一步翻译。这是上游没有的能力,不是它的重写 |
+| `recall-taint.ts` 116 行 | **誊写,而且搬不了** | 见下 |
+
+**`recall-taint.ts` 有第二个独立理由不能搬**(第一个是 P0 记的「上游那个标记没有生产者」):
+`isRecalledMemoryMessage` 在 `session-files.ts:544` 是 `function`,**没有 `export`** —— 它是该文件
+私有的。那份文件确实在树里(924 行)、7 个兄弟模块也都在树里,但它的 8 个导出里没有一个是 taint
+守卫:
+
+```
+readSessionEntryResetRecallCutoff / matchesSessionEntryPrefixHash / sessionPathForFile /
+sessionPathForSessionIdentity / parseCanonicalSessionSyncTargetFromPath /
+statSessionEntrySync / buildSessionEntry / buildSessionEntryInProcess
+```
+
+**所以就算把 `session-files.ts` 整个搬进来,也拿不到那段排除逻辑。** 需要的是上游把那个函数导出,
+那是改上游源码。
+
+## 树里已 vendor 但无人引用的上游文件:21 个 / 25.9 KB
+
+扫出来按大小排,前几个:`sqlite-vec.ts` 4546、`memory-schema-recall.ts` 3197、
+`memory-schema-provenance.ts` 2612、`embedding-vectors.ts` 1985、`remote-http.ts` 1750、
+`status-format.ts` 1529、`sqlite-vec-platform-variant.ts` 1263、`openclaw-runtime-io.ts` 1210。
+
+**注意这个「无人引用」是「无人直接引用」**:`memory-schema-recall.ts` 与
+`memory-schema-provenance.ts` 是被 `buildMemoryIndexStrictSchema` 间接调到的(那个函数就在
+`memory-index-schema.ts` 里),所以它们不是孤儿。扫的时候必须区分直接与间接,否则会把已接上的
+器官当成没接。
 
 **先量需求侧,再量供给侧。** 两个文件的闭包都不大(9 与 15 个文件),但先要问「mem-plus 有没有
 这个概念」:
