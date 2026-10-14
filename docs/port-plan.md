@@ -1028,7 +1028,7 @@ repos/openclaw/openclaw/git/trees/<sha>?recursive=1`,一次调用)的 SHA 和本
 | 31 | 6 | `extensions/memory-core/src/concept-vocabulary.ts` |
 | 26 | 11 | `extensions/memory-core/src/short-term-promotion-utils.ts` |
 
-### 逐个看下来,漂移分三类 —— 第三类需要人拍板
+### 逐个看下来,漂移分三类(2026-10-14;第三类的定性后来被推翻,见下)
 
 **一、注释与风格噪音。** 回退。`memory-budget.ts` 把上游的一行注释扩成了三段文件头;
 `dreaming-phases.ts` 的 `flatMap` 换循环(上一节已撤)。
@@ -1043,24 +1043,35 @@ repos/openclaw/openclaw/git/trees/<sha>?recursive=1`,一次调用)的 SHA 和本
 `memory_index_state.revision` 栅栏、上游那句「A shadow index can have no published chunks yet」
 的注释,全都在。搬,不是丢。
 
-**三、本地真修了上游的 bug,而且没登记。** **这是需要拍板的一类。** 例子:
+**三、多余的防御性改写 —— 读代码时我把它误判成了「本地修了上游的 bug」。**
 
-`memory-budget.ts` 的 `parseMemoryBlocks`:上游判断「这一段是不是自动提升出来的」只看
-`currentDate && isGeneratedPromotionBlock(...)`,setext 下划线那支也只看 `currentDate`。本树加了
-一个独立的 `currentKind` 标记,两处都改成 `currentKind === "promotion" && ...`。差别是实质的:
-上游只要见过一个日期标题,紧跟其后的**任何** setext 标题或子节都可能被当成 promotion 段,
-而 compaction 会丢「最旧的自动提升段」—— 于是一段**不是**自动提升的内容可能被当成提升段丢掉。
-本树的版本不会。
+`memory-budget.ts` 的 `parseMemoryBlocks`:本树多了一个 `currentKind` 标记,和上游的
+`currentDate` 一起出现在每个条件里(`currentKind === "promotion" && currentDate && ...`)。
+我当时判断:上游只看 `currentDate`,所以「见过日期标题之后紧跟的任何 setext 标题都可能被当成
+promotion 段,而 compaction 会丢最旧的自动提升段」—— 于是一段不是自动提升的内容可能被丢掉,
+本树的版本不会。**那个判断是错的。**
 
-`extensions/active-memory/escalation.ts` +12/-0、只增不改,像是加了新逻辑。
+错在哪:两个变量只在**同两个地方**被赋值 —— `flush()` 里一起重置,遇到
+`## Promoted From Short-Term Memory (...)` 时一起设置。于是恒有
+`currentKind === "promotion"` ⟺ `currentDate !== undefined`,本树多写的那一半判断从头到尾没有
+独立作用。差分实测也证实:把两份文件同时加载,10 组输入 × 10 档预算 = 101 例,
+`compacted` 与 `droppedDates` **逐例一致**;并且先确认丢弃分支真的触发过(预算 40 时丢
+`["2026-10-01"]`,三段的全丢),否则这个差分测法是空的 —— 全都不丢东西时输出一致是必然的。
 
-这类既不是「能抄就抄」也不是「血管」,按 AGENTS.md「不静默修上游的已知缺陷」的口径,应该照搬
-上游并登记;但 `memory-budget.ts` 那条我倾向保留(它防的是数据丢失),所以**摆出来等决定,没有
-替用户定**。要给上游提 issue 也得有依据 —— `memory-budget.ts` 的注释里引了
-`See issue #73691`,那正是上游给同一个常量 `DEFAULT_MEMORY_FILE_MAX_CHARS` 留的编号。
+所以它属于**第一类**(没有理由的多余改写),已在上下一批回退。教训是:我又一次凭读到的代码下了
+结论,没有实测。AGENTS.md 那条硬规矩(「凭假设改而不是凭读到的代码」)和「绿色的检查如果没有
+走到出错路径,比没有检查更糟」,这里两条都撞上了。
+
+`extensions/active-memory/escalation.ts` +12/-0、只增不改,看着像加了新逻辑 —— 这条**还没查**,
+不许照着「只增不改」就判定性质。
+
+**第四类是否存在,目前没有证据。** 我原先说有第三类(本地修上游的 bug),现在这个例子被推翻了;
+剩下的文件里是否还有真修了上游 bug 的,只能一个一个读 + 差分实测才知道,不能先立一个类目再
+往里塞。
 
 `src/plugin-sdk/session-transcript-runtime.ts` 单独记一笔:本树 1945 字节,上游 24 267 字节
-(-651 行)。这是有意砍掉的一整块(会话转录的运行时),不是逐行改写,判定为「宿主不需要所以没搬」。
+(-651 行)。这是有意砍掉的一整块(会话转录的运行时),不是逐行改写,判定为「宿主不需要所以没搬」——
+同样**还没验证**。
 
 ### 第二批:回退 6 个文件,差异 +1989/-2151 → +1673/-1912
 
