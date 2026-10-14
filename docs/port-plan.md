@@ -1123,6 +1123,25 @@ snippet 为空」单独拆一支;上游 `!targetSnippet` 分支返回的本来�
 加一条语言,不是改上游的行为。保留并登记 —— 它是**功能新增**而不是形态偏离,若要收敛只能是把
 葡语拿掉或推给上游,那是产品决定不是搬运决定。
 
+### 收尾时探针逮到的三处:不是回退,是既有状态(2026-10-14)
+
+收尾探针逐个真导入本轮动过的模块,`retry-runtime.ts` / `time-runtime.ts` /
+`concurrency-runtime.ts` 三个报 `ERR_MODULE_NOT_FOUND`。查下来**不是这一批回退造成的**:
+
+| 文件 | 缺失的目标 | 本树版本 | 上游 09-30 版本 | 调用方 |
+|---|---|---|---|---|
+| `src/plugin-sdk/retry-runtime.ts` | `src/infra/retry-policy.ts` | 同样引用(L50) | 同样引用 | 1 处 |
+| `src/plugin-sdk/time-runtime.ts` | `src/infra/format-time/format-datetime.ts` | 同样引用 | 同样引用 | 0 |
+| `src/plugin-sdk/concurrency-runtime.ts` | `src/shared/permit-pool.ts` | 同样引用 | 同样引用 | 0 |
+
+**两个版本在本树都 import 不了**,因为它们指向的模块都被 trim 删了。所以这三个文件与上游的
+1-4 行差异在运行期没有意义(文件根本加载不起来),保留本树版本(未知的 delta 更少)并登记。
+那 1 处 `retry-runtime` 的引用来自 `src/`,是 openclaw 自己的路径,不在本插件的加载链上。
+
+**这一条是探针的价值所在**:类型门对这三个文件一直是绿的(缺失模块的报错在别的路径下被算进
+`src/` 的 4240 基线里),只有真 `import` 才会炸。AGENTS.md 那条「门只覆盖类型,不覆盖加载」
+在这一批又兑现了一次 —— 如果这一批没跑导入测试,这三个门面就会带着断链进下一轮。
+
 ## 第二类「血管」的集中登记:上游的 async-worker 在本树是 sync 直连(2026-10-14)
 
 这一类不用回退 —— 形态差异是宿主决定的,不是抄错了。但按规矩必须登记在此,而不是只写在
