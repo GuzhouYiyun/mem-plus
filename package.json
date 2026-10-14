@@ -93,6 +93,7 @@
     "extensions/memory-core/src/memory-budget.ts",
     "extensions/memory-core/src/memory-entry-origins.ts",
     "extensions/memory-core/src/memory-forget-content.ts",
+    "extensions/memory-core/src/memory-forget-index-task.ts",
     "extensions/memory-core/src/memory-forget.ts",
     "extensions/memory-core/src/memory-session-tombstones.ts",
     "extensions/memory-core/src/memory-workspace-files.ts",

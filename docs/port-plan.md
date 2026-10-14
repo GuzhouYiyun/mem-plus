@@ -814,6 +814,71 @@ import,或补出 8794 个模块。**解除阻塞的判据是清楚的**:要么�
 
 `clearSource` 里那段逐行删 vec 表的循环一起去掉了:那张表里从来没有东西可清。
 
+## forget 的索引清理层:一次自创器官,查出来是三处死代码(2026-10-14)
+
+`extensions/memory-core/src/memory-forget.ts`(20 147 字节)自称「ported」,注释里画了一张
+上游表 → mem-plus 表的映射表。读代码才发现:**它查的 `documents`(5 处)、`units`(17 处)、
+`units_fts`(5 处)、`vectors`(7 处)正是读侧切换(`e69541e9`)停写的那套表**,而且它用
+`units.marker` 做血缘键 —— `marker` 两笔提交前刚退役。
+
+结论:**读侧切过去之后,`memory_forget` 一条都删不掉,而报告照样是「成功」。** 活区还是旧版
+表,所以这个缺陷在重新索引之前不可见。这不是取舍,是我上一刀漏了它。
+
+照上游原件重写,搬进来一个文件、加了三处修正:
+
+**搬入(逐字节)**
+
+`extensions/memory-core/src/memory-forget-index-task.ts`,1325 字节,SHA256 与 openclaw 的
+同名文件相同。它是**纯类型、零 import**,所以「照抄」没有成本可言;而 `ForgetIndexPlan`
+的形状(`chunks: Array<{id, path, source}>`、`sources`、`ftsRows`、`vectorRows`)是报告要读的
+契约,让它承重而不是当摆设。
+
+**修的三处**(前两处是缺陷,第三处是顺带查出的旧错)
+
+1. **`changedPaths` 用了 `absolutePath`。** 上游 `memory-forget.ts:356` 用的是
+   `rewrite.relativePath`,因为索引里 `path` 是**相对记忆家目录**的正斜杠路径
+   (`memoryRelativePath`,`plugin/src/memory-index.ts:80`),planner 直接 `has()` 比对。
+   绝对路径永远匹配不上 —— 这是「删不掉」的第二重原因,和旧表那重独立。
+2. **按 `(path, source)` 整源删除 → 按上游的 chunk id 删。** 照抄
+   `memory-forget-index-read.ts:66-83` 的选法:文本 scrub 变了的 `memory` 语料 chunk 把自己的
+   path 并进 `changedPaths`;筛选用 `changedPaths.has(path) || referencesSession(path, ...)`;
+   删 `id IN (...)`。**`memory_index_sources` 只按 `removedPaths` 删,不按 changedPaths** ——
+   被 scrub 过的文件还存在,它的表头也该留着。
+3. **`embeddingCacheRows` 原注释写「no such table in mem-plus」,是错的。**
+   `memory-index-schema.ts:75` 传 `includeEmbeddingCache: true`,表是建出来的。上游
+   `memory-forget-kernel.ts:76-78` 每次 forget 都清空它。这棵树里没有运行期写者(只有
+   `memory-schema.ts:549` 从旧 openclaw 库迁移),所以计数是 0 —— 但那是**如实报 0**,不是
+   「表不存在」。
+
+**顺带修的第四处:dry run 的索引计数恒为 0。** 旧代码把 plan 和 purge 合成一个函数,放在
+dry run 的提前返回**之后**,所以 `dryRun` 永远报 `indexChunks: 0` —— 恰恰是 dry run 唯一该回答
+的问题。上游是 plan 在 `:356`、report 在 `:371`、提前返回在 `:407`。现在拆成
+`planMemoryForgetIndex` 与 `purgeForgottenMemoryIndex` 两个函数,和上游一样两个文件两个函数。
+
+**记下来的三处真偏离**(都是「mem-plus 没有这个东西」,不是选择)
+
+| 上游 | mem-plus | 为什么 |
+|---|---|---|
+| `sessions` 语料的 provenance 分支(`originClass === "system"`、`!isMemorySessionIndexable`) | 删掉,不誊写 | mem-plus 没有 session 语料,`IndexRoot` 只有 `home \| wiki`;誊过来就是读一张行不可能存在的表,还要引入本树没 vendor 的 `isMemorySessionIndexable` |
+| `memory_index_chunks_vec` + `extensionPath` 准备 | `hasVectorTable: false`,向量数按 chunk 行 `length(embedding) > 0` 计 | 与已登记的 `vectorCount` 同一处替换;`embedding` 是 `BLOB NOT NULL`,「没有向量」是零长 BLOB |
+| plan 在只读 worker、purge 在主连接 | 一个 `DatabaseSync` 上同步做完 | 上游那个 worker 是为了跨进程拿 openclaw 的 agent 库;mem-plus 自己开连接,少一层机器、同两步动作 |
+
+`deleteMemoryIndexSources` 的分组(按 source 分组、每组一条 `path IN (...)`)也没抄:mem-plus
+不留 session 语料,一份 plan 里每个被删文件一行,分组会塌成一条语句,逐行写等价。
+
+**验证**:26 条断言全过,走真实入口 `forget()`(`plugin/src/forget.ts`)。包括 —— 旧表/`marker`
+的引用在代码里归零(剥注释后正则)、vendored 文件 SHA256 与上游相同、dry run 报出计划值 1 且
+真跑报同一个值、真跑删掉 1 行且报告数字对得上、含空格路径的源被删而**同名的 `wiki` 语料文件
+没被删**(`source` 列分开,不是按路径)、FTS 行随触发器消失、provenance 行级联、文件内容里
+promotion 条目被 scrub 掉、`searchText` 搜不到已删内容。
+
+**踩到的一件事,记下来**:血缘数据库**不受 `XDG_CONFIG_HOME` 管**。`openMemoryOriginDatabase`
+→ `resolveStateDir`(`src/config/state-dir.ts:28`)读 `OPENCLAW_STATE_DIR`,读不到就落到
+`$HOME/.openclaw`。探针只设 `XDG_CONFIG_HOME` 时,它指向的是**用户真实的
+`.openclaw\agents\main\agent\openclaw-agent.sqlite`**。这次它在写入前就因 schema 版本 0 抛错,
+没造成改动,但下一次不一定。两个根都要指走:`XDG_CONFIG_HOME` 给配置,`OPENCLAW_STATE_DIR` 给
+状态。
+
 ## 三个血管文件的归属(2026-10-14 逐个查过)
 
 `recall-inject.ts` / `recall-intent.ts` / `recall-taint.ts` 都**不是**可搬的自创器官:

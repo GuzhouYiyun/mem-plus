@@ -5,7 +5,7 @@
 //   file scrub -> optimistic write -> plugin-state prune -> index purge. Every
 //   threshold, every ordering, and every refusal is upstream's. The index layer is
 //   mapped onto mem-plus's own schema rather than skipped -- see
-//   `planAndPurgeIndex` for the table-by-table mapping and the two structural
+//   `planMemoryForgetIndex` for what differs and the two structural
 //   differences that mapping forces.
 //
 // ONE UPSTREAM PIECE STILL ABSENT
@@ -29,6 +29,9 @@ import {
   scrubMemoryContent,
 } from "./memory-forget-content.js";
 import { withMemoryWorkspaceLock } from "./memory-workspace-lock.js";
+// Upstream verbatim: this task file has no imports, so it is byte-identical, and the row
+// identities it names are the ones the index now actually stores.
+import type { ForgetIndexPlan } from "./memory-forget-index-task.js";
 import {
   hashMemoryContent,
   commitMemoryContent,
@@ -49,13 +52,13 @@ export type MemoryForgetArtifacts = {
   memoryLines: number;
   sessionCorpusFiles: number;
   sessionCorpusLines: number;
-  /** Indexed units dropped by `forget.purge`. Filled from `planAndPurgeIndex`. */
+  /** Indexed chunk rows dropped by `forget.purge`. Filled from `planMemoryForgetIndex`. */
   indexChunks: number;
-  /** Indexed source rows dropped. Filled from `planAndPurgeIndex`. */
+  /** Indexed source rows dropped. Filled from `planMemoryForgetIndex`. */
   indexSources: number;
-  /** FTS rows dropped. Filled from `planAndPurgeIndex`. */
+  /** FTS rows dropped. Filled from `planMemoryForgetIndex`. */
   ftsRows: number;
-  /** Vector rows dropped, by cascade. Filled from `planAndPurgeIndex`. */
+  /** Chunk rows that carried a vector. Filled from `planMemoryForgetIndex`. */
   vectorRows: number;
   /**
    * Always 0, and that is a recorded divergence rather than an omission: upstream
@@ -168,123 +171,213 @@ function resolveTargets(params: MemoryForgetParams): SessionTarget[] {
 }
 
 /**
- * UPSTREAM: the index-cleanup layer, `forget.purge`
- * (`memory-forget-kernel.ts:54-80`) plus its planner
- * (`memory-forget-index-read.ts:36-104`). Both are ported; the table names differ.
+ * UPSTREAM: the index-cleanup layer, read side and write side as two files.
  *
- * WHAT CHANGED, AND WHY IT IS NOT A NEW RULE
- *   Upstream deletes from `memory_index_chunks`, `memory_index_chunks_fts`,
- *   `memory_index_sources`, `memory_index_chunks_vec` and `memory_embedding_cache`.
- *   mem-plus indexes with its own schema (`documents` / `units` / `units_fts` /
- *   `vectors`, `plugin/src/memory-index.ts`), so the row identities differ but the
- *   rule does not:
+ *   read  -- `memory-forget-index-read.ts:36-122` (`readMemoryForgetIndexInWorker`)
+ *   write -- `memory-forget-kernel.ts:54-105` (`purgeForgottenMemory`,
+ *            `deleteMemoryIndexSources`)
+ *   types -- `memory-forget-index-task.ts`, vendored byte-identical, because it has
+ *            no imports and the row shapes are the contract this function reports in.
  *
- *     upstream memory_index_chunks        -> mem-plus units
- *     upstream memory_index_chunks_fts    -> mem-plus units_fts (rowid = units.id)
- *     upstream memory_index_sources       -> mem-plus documents
- *     upstream memory_index_chunks_vec    -> mem-plus vectors (unit_id = units.id)
- *     upstream memory_embedding_cache     -> none; mem-plus has no such table
+ * These are the only two pieces of the forget subsystem that touch the index, and both
+ * now speak upstream's tables directly. That is the whole point: an earlier revision
+ * mapped them onto a mem-plus-owned schema (`documents` / `units` / `units_fts` /
+ * `vectors`), and when the read side moved to upstream's tables the mapping became
+ * silently dead -- the planner selected nothing and purged nothing, with no error.
  *
- *   Two structural differences in the mapping, both consequences of the schema and
- *   neither a new behaviour:
+ * WHAT IS ACTUALLY DIFFERENT, and each is a consequence of something mem-plus does not
+ * have rather than a decision:
  *
  *   1. Upstream reads the plan in a read-only worker and deletes on the main
- *      connection, because openclaw owns the index and mem-plus owns a different
- *      database. mem-plus opens one `DatabaseSync` for both, so the read and the
- *      delete are one synchronous transaction -- strictly less machinery for the
- *      same two steps.
+ *      connection. mem-plus opens one `DatabaseSync` for both, so the read and the
+ *      delete are one synchronous transaction -- strictly less machinery for the same
+ *      two steps.
  *
- *   2. `vectors` and `units` both cascade from the row that owns them, and
- *      `foreign_keys = ON` (`memory-index.ts:206`), so deleting a `units` row takes
- *      its vector with it. Upstream deletes vectors explicitly because its vector
- *      table is a loadable extension with no such constraint. `units_fts` is
- *      deleted explicitly on both sides: FTS5 virtual tables cannot participate in
- *      a cascade, which is why `memory-index.ts:352-354` already does exactly that
- *      on the ordinary reindex path.
+ *   2. Upstream's `sessions` corpus (`memory/.dreams/session-corpus`) is indexed with
+ *      `source = 'sessions'`, and its filter arm keys on provenance
+ *      (`originClass === "system"`, `!isMemorySessionIndexable(...)`) and on
+ *      `removedSessionPaths`. mem-plus has no session corpus, so `IndexRoot` is
+ *      `"home" | "wiki"` and only `memory` and `wiki` are ever written. That arm is
+ *      omitted rather than transcribed: kept as dead code, it would read a table whose
+ *      rows cannot exist and call an upstream function this tree does not vendor.
  *
- * The planner's substance is upstream's `memory-forget-index-read.ts:66-73`, and it
- * is the step that makes the purge complete: for every indexed unit, re-run
- * `scrubMemoryContent` over its stored text. A unit whose scrubbed text differs
- * still carries forgotten content in the index, so its document is selected even
- * when the caller did not name the path. Checking only the rewritten files would
- * leave exactly the stale rows this layer exists to remove.
+ *   3. Upstream's vectors live in `memory_index_chunks_vec`, a loadable sqlite-vec
+ *      extension, which is why it has to probe for the table and prepare an extension
+ *      path before the purge. mem-plus dropped sqlite-vec entirely; vectors are the
+ *      `embedding` column on the chunk row itself, so `vectorRows` counts chunk rows
+ *      with a non-empty embedding among the selected ids and needs no extension. This
+ *      is the same substitution already registered for `vectorCount` in
+ *      `memory-index.ts`, applied to the purge.
+ *
+ * `embeddingCacheRows` is NOT "no such table": `memory-index-schema.ts:75` passes
+ * `includeEmbeddingCache: true`, so `memory_embedding_cache` is created with the index
+ * and upstream empties it on every forget (`memory-forget-kernel.ts:76-78`).
  */
-function planAndPurgeIndex(params: {
+function planMemoryForgetIndex(params: {
   db: import("node:sqlite").DatabaseSync;
   agentId: string;
   entryKeys: ReadonlySet<string>;
   sessionIds: ReadonlySet<string>;
+  /** Relative to the memory home, in the same form `memory_index_chunks.path` stores. */
   changedPaths: ReadonlySet<string>;
-}): { chunks: number; sources: number; ftsRows: number; vectorRows: number } {
+  /** Relative to the memory home: files this forget deletes outright. */
+  removedPaths: ReadonlySet<string>;
+}): ForgetIndexPlan {
   const { db } = params;
-  const units = db
+  const tableExists = (name: string): boolean =>
+    (
+      db
+        .prepare("SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = ?")
+        .get(name) as { ok: number } | undefined
+    )?.ok === 1;
+  // `chunk_rowid` is the chunk table's primary key; `id` is its TEXT identity, and it is
+  // the `id` that upstream reports and deletes on.
+  const rows = db
     .prepare(
-      `SELECT u.id AS id, u.text AS text, u.marker AS marker, d.path AS path
-       FROM units u JOIN documents d ON d.id = u.document_id`,
+      `SELECT chunk_rowid AS chunkRowid, id, path, source, text
+         FROM memory_index_chunks`,
     )
-    .all() as { id: number; text: string; marker: string | null; path: string }[];
+    .all() as { chunkRowid: number; id: string; path: string; source: string; text: string }[];
 
-  // Upstream lines 66-73: an indexed snapshot whose own text still scrubs differently
-  // owns evidence for this purge, whatever the caller asked for.
-  const selected = new Set<string>();
-  let vectorRows = 0;
-  const vecExists = db
-    .prepare("SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = 'vectors'")
-    .get() as { ok: number } | undefined;
-
-  for (const unit of units) {
-    const pathSelected =
-      params.changedPaths.has(unit.path) ||
-      // `units.marker` is the id the lineage table keys on
-      // (`openclaw-memory-promotion:<key>`), so this is upstream's
-      // `entryKeys.has(chunkKey)` test against the stored row.
-      (unit.marker !== null && params.entryKeys.has(unit.marker.replace(/^<!--\s*openclaw-memory-promotion:/u, "").replace(/\s*-->$/u, "")));
-    const textSelected =
+  // Upstream lines 63-73: another agent may already have scrubbed the shared file, and its
+  // remaining indexed snapshot still owns evidence for this purge. So the text test is run
+  // over the index, not over the caller's list of rewritten files, and it is restricted to
+  // the curated corpus because that is the corpus whose text carries entry keys.
+  const changedPaths = new Set(params.changedPaths);
+  for (const row of rows) {
+    if (
+      row.source === "memory" &&
       scrubMemoryContent({
-        content: unit.text,
+        content: row.text,
         entryKeys: params.entryKeys,
         sessionIds: params.sessionIds,
         corpusSnippets: new Set<string>(),
         agentId: params.agentId,
-      }).content !== unit.text;
-    if (!pathSelected && !textSelected) continue;
-    selected.add(unit.path);
-    if (vecExists) {
-      const v = db.prepare("SELECT COUNT(*) AS c FROM vectors WHERE unit_id = ?").get(unit.id) as { c: number };
-      vectorRows += v?.c ?? 0;
+      }).content !== row.text
+    ) {
+      changedPaths.add(row.path);
     }
   }
-  if (selected.size === 0) {
-    return { chunks: 0, sources: 0, ftsRows: 0, vectorRows: 0 };
-  }
 
-  let chunks = 0;
+  // Upstream lines 74-83, minus the `sessions` arm (see the note above).
+  const chunks = rows.filter(
+    (row) => changedPaths.has(row.path) || referencesSession(row.path, params.agentId, params.sessionIds),
+  );
+
+  // Upstream lines 87-94. Sources are selected by REMOVED paths only, not by changed
+  // paths: a file that was scrubbed still exists and still has a header. Deleting the
+  // header of a surviving file would make the scanner's `unchangedSources` skip it on
+  // the next reindex and leave the stale chunk counts in place.
+  const sources = (
+    db.prepare("SELECT path, source FROM memory_index_sources").all() as {
+      path: string;
+      source: string;
+    }[]
+  ).filter((row) => params.removedPaths.has(row.path));
+
+  const chunkIds = chunks.map((row) => row.id);
+  // Upstream builds the predicate with kysely's `where("id", "in", [...])`, which emits one
+  // bound parameter per value. This is the same statement with the same parameter count;
+  // SQLite's variable limit is why the id list is chunked rather than concatenated into
+  // one literal `IN`.
+  const inList = (): string => `id IN (${chunkIds.map(() => "?").join(", ")})`;
+
   let ftsRows = 0;
-  let sources = 0;
-  const rowsFor = db.prepare("SELECT id FROM units WHERE document_id = ?");
-  const delFts = db.prepare("DELETE FROM units_fts WHERE rowid = ?");
-  const delUnit = db.prepare("DELETE FROM units WHERE id = ?");
-  const delDoc = db.prepare("DELETE FROM documents WHERE id = ?");
-  const findDoc = db.prepare("SELECT id FROM documents WHERE path = ?");
-
-  for (const filePath of selected) {
-    const doc = findDoc.get(filePath) as { id: number } | undefined;
-    if (!doc) continue;
-    sources += 1;
-    const unitIds = (rowsFor.all(doc.id) as { id: number }[]).map((r) => r.id);
-    // FTS first: the virtual table has no foreign key to cascade through.
-    for (const id of unitIds) {
-      const had = db.prepare("SELECT 1 AS ok FROM units_fts WHERE rowid = ?").get(id) as { ok: number } | undefined;
-      if (had) ftsRows += 1;
-      delFts.run(id);
+  let vectorRows = 0;
+  if (chunkIds.length > 0) {
+    // Upstream counts the FTS rows through `memory_index_chunks_fts.rowid`, which the
+    // upstream schema maps to `chunk_rowid`, not to the TEXT `id`.
+    if (tableExists("memory_index_chunks_fts")) {
+      ftsRows = (
+        db
+          .prepare(
+            `SELECT COUNT(*) AS c FROM memory_index_chunks_fts
+              WHERE rowid IN (SELECT chunk_rowid FROM memory_index_chunks WHERE ${inList()})`,
+          )
+          .get(...chunkIds) as { c: number }
+      ).c;
     }
-    // `units` and `vectors` cascade from here via `foreign_keys = ON`.
-    for (const id of unitIds) delUnit.run(id);
-    delDoc.run(doc.id);
-    chunks += unitIds.length;
+    // The `embedding` column is `BLOB NOT NULL`, so "no vector" is a zero-length BLOB and
+    // `embedding IS NULL` never fires. See the note on `vectorCount` in `memory-index.ts`.
+    vectorRows = (
+      db
+        .prepare(
+          `SELECT COUNT(*) AS c FROM memory_index_chunks
+            WHERE ${inList()} AND length(embedding) > 0`,
+        )
+        .get(...chunkIds) as { c: number }
+    ).c;
   }
-  return { chunks, sources, ftsRows, vectorRows };
+
+  // Upstream lines 115-122. Present in mem-plus: the schema is built with
+  // `includeEmbeddingCache: true`.
+  const embeddingCacheRows =
+    params.sessionIds.size > 0 && tableExists("memory_embedding_cache")
+      ? (db.prepare("SELECT COUNT(*) AS c FROM memory_embedding_cache").get() as { c: number }).c
+      : 0;
+
+  // Upstream's `ForgetIndexPlan`, which is why the vendored task file is load-bearing here
+  // rather than decorative: the caller reads `.chunks.length` and `.sources.length` off it,
+  // exactly as `memory-forget.ts:397-398` does.
+  //
+  // `hasVectorTable` and `extensionPath` are upstream's sqlite-vec preparation, which mem-plus
+  // does without: `memory_index_chunks_vec` is never created and vectors live on the chunk row
+  // (see the note above), so the flag is reported as absent rather than probed for.
+  return {
+    chunks: chunks.map((row) => ({ id: row.id, path: row.path, source: row.source })),
+    sources,
+    ftsRows,
+    vectorRows,
+    embeddingCacheRows,
+    hasVectorTable: false,
+  };
 }
+
+/**
+ * UPSTREAM: `purgeForgottenMemory` (`memory-forget-kernel.ts:54-80`) plus
+ * `deleteMemoryIndexSources` (`memory-forget-kernel.ts:85-105`), same order.
+ *
+ * Separate from the planner, as upstream has it separate, and that separation is what makes a
+ * dry run worth anything: upstream plans the index before it builds the report, so
+ * `dryRun` reports the rows it *would* delete (`memory-forget.ts:356` before `:406`). An
+ * earlier revision planned and purged in one function placed after the early return, so every
+ * dry run reported `indexChunks: 0` -- the one question a dry run exists to answer.
+ */
+function purgeForgottenMemoryIndex(
+  db: import("node:sqlite").DatabaseSync,
+  plan: ForgetIndexPlan,
+): void {
+  const chunkIds = plan.chunks.map((chunk) => chunk.id);
+  if (chunkIds.length > 0) {
+    // Chunk rows first. Their provenance and recall-metadata rows cascade
+    // (`foreign_keys = ON`) and their FTS rows go with the trigger upstream installs
+    // (`memory-schema-fts.ts:152-159`), so neither is deleted by name -- which is why this
+    // differs from upstream, where `memory_index_chunks_vec` is a loadable extension with no
+    // cascade and has to be deleted explicitly.
+    db.prepare(
+      `DELETE FROM memory_index_chunks WHERE id IN (${chunkIds.map(() => "?").join(", ")})`,
+    ).run(...chunkIds);
+  }
+  // Upstream groups consecutive rows by source and deletes each group with one
+  // `path IN (...) AND source = ?`. One statement per row here, because mem-plus keeps no
+  // session corpus, so a plan holds one row per removed file and the grouping would collapse
+  // to a single statement either way.
+  for (const source of plan.sources) {
+    db.prepare("DELETE FROM memory_index_sources WHERE path = ? AND source = ?").run(
+      source.path,
+      source.source,
+    );
+  }
+  // Upstream empties the whole embedding cache on a forget, not a subset of it: the cache is
+  // keyed by content hash across every model, so there is no cheap way to know which entries
+  // pointed at a deleted chunk. `plan.embeddingCacheRows` is what the report charges for it,
+  // and it is 0 in practice -- nothing in this tree writes the table outside a legacy
+  // openclaw migration (`memory-schema.ts:549`).
+  if (plan.embeddingCacheRows > 0) {
+    db.prepare("DELETE FROM memory_embedding_cache").run();
+  }
+}
+
 
 export async function forgetMemoryEntries(
   params: MemoryForgetParams,
@@ -374,6 +467,33 @@ export async function forgetMemoryEntries(
       }
     }
 
+    // The index plan, taken before the report so the report can carry it. Upstream's order is
+    // the same: `planMemoryIndex` at line 356, the report at 371-406, and the dry-run return
+    // at 407.
+    //
+    // Upstream line 356 passes `rewrite.relativePath`, not `absolutePath`. The index stores
+    // `path` relative to the memory home with forward slashes (`memoryRelativePath`,
+    // `plugin/src/memory-index.ts:80`) and the planner compares the two directly. Absolute
+    // paths never match, which is how this purge selected nothing while still reporting
+    // success.
+    //
+    // `removedPaths` covers the session corpus upstream, which mem-plus does not index. Its
+    // own rewrite branch sets `remove: false` unconditionally, so this is empty here and the
+    // planner's source-header deletion has nothing to select. Kept as the parameter it is
+    // upstream rather than dropped, so adding a corpus does not mean re-deriving the call.
+    const indexPlan = params.indexDb
+      ? planMemoryForgetIndex({
+          db: params.indexDb,
+          agentId: params.agentId,
+          entryKeys,
+          sessionIds,
+          changedPaths: new Set(memoryRewrites.map((rewrite) => rewrite.relativePath)),
+          removedPaths: new Set(
+            memoryRewrites.filter((rewrite) => rewrite.remove).map((rewrite) => rewrite.relativePath),
+          ),
+        })
+      : undefined;
+
     // --- report (upstream lines 371-406, minus the corpus branch) ---
     // The index counts are filled in after the purge runs; upstream builds the report
     // from a planner that ran before the file rewrites, and reports the plan rather
@@ -396,11 +516,13 @@ export async function forgetMemoryEntries(
         memoryLines: removedMemoryLines,
         sessionCorpusFiles: 0,
         sessionCorpusLines: 0,
-        indexChunks: 0,
-        indexSources: 0,
-        ftsRows: 0,
-        vectorRows: 0,
-        embeddingCacheRows: 0,
+        // Upstream builds the report from the plan it took at line 356, which is why a
+        // dry run still reports the index rows it would remove.
+        indexChunks: indexPlan?.chunks.length ?? 0,
+        indexSources: indexPlan?.sources.length ?? 0,
+        ftsRows: indexPlan?.ftsRows ?? 0,
+        vectorRows: indexPlan?.vectorRows ?? 0,
+        embeddingCacheRows: indexPlan?.embeddingCacheRows ?? 0,
         shortTermEntries: 0,
         seenHashScopes: 0,
         backups: 0,
@@ -437,24 +559,15 @@ export async function forgetMemoryEntries(
       });
     }
 
-    // The index purge, after the file rewrites. Upstream's order is the same: mark,
-    // rewrite files, then purge (`memory-forget.ts:496` onwards), and the planner
-    // re-reads the index afterwards so it sees the scrubbed text, not the pre-scrub
-    // snapshot it planned against.
-    if (params.indexDb) {
-      const changedPaths = new Set(memoryRewrites.map((rewrite) => rewrite.absolutePath));
-      const purged = planAndPurgeIndex({
-        db: params.indexDb,
-        agentId: params.agentId,
-        entryKeys,
-        sessionIds,
-        changedPaths,
-      });
-      report.artifacts.indexChunks = purged.chunks;
-      report.artifacts.indexSources = purged.sources;
-      report.artifacts.ftsRows = purged.ftsRows;
-      report.artifacts.vectorRows = purged.vectorRows;
-      report.artifacts.embeddingCacheRows = 0; // no such table in mem-plus
+    // The index purge, after the file rewrites. Upstream's order is the same: plan, report,
+    // mark, rewrite files, then purge (`memory-forget.ts:356`, `:407`, `:496` onwards).
+    //
+    // The plan was taken before the rewrites, so it is planned against the pre-scrub snapshot.
+    // That is upstream's own order and it is safe for the same reason upstream gives: the plan
+    // selects by PATH, and a rewritten file's path is in it whether or not its text has changed
+    // yet.
+    if (indexPlan) {
+      purgeForgottenMemoryIndex(params.indexDb!, indexPlan);
     }
     report.artifacts.tombstones = tombstoned;
     return report;
