@@ -700,6 +700,38 @@ import,或补出 8794 个模块。**解除阻塞的判据是清楚的**:要么�
 
 **能搬的已经搬了**:`types.ts` 的依赖闭包是 **0 个新文件**,十三个常量已从上游那份读。
 
+### 按运行期闭包排序(2026-10-14 实测,17 个文件逐个走)
+
+量法:只走**值 import**。`import type` 运行期被擦掉,不可能让模块加载失败,而这正是分界线 ——
+`types.ts` 的两个 import 都是 type-only(所以加载正常),`query.ts` 的 agent-runtime 是值 import
+(所以加载抛错)。走 type-only 边会把 `plugin-entry` 那个 barrel 整个拖进来,数字虚高。
+
+| 上游文件 | 需新搬 | 装得下吗 |
+|---|---|---|
+| `doctor-contract-api.ts` | **0** | 能(但 mem-plus 无对应物) |
+| `session.ts` | **0** | 能 |
+| `config.ts` | 5 | 能 |
+| `session-policy.ts` | 9 | 能 |
+| `recall-state.ts` | 21 | 能 |
+| `query.ts` | 7904 | 不能 |
+| `prompt.ts` | 7905 | 不能 |
+| `trigger-recall.ts` | 7910 | 不能 |
+| `transcript.ts` / `watch` / `result` | 7911–7914 | 不能 |
+| `recall-run.ts` / `recall.ts` / `index.ts` | 7921–7927 | 不能 |
+
+**分界线正好落在「recall 的运行机构」与「recall 的配置/状态/策略」之间**:
+
+- 小的四个(`config` / `session-policy` / `recall-state` / `session`)**不碰 agent-runtime 与
+  会话存储**,所以闭包是个位数到二十几。`config.ts` 是上游那份
+  `resolveActiveRecallPluginConfig`,也就是 `DeepRecallConfig` 该长的样子;`recall-state.ts` 是
+  上游的召回结果缓存与断路器状态。**合计 35 个文件。**
+- 大的那些(`prompt` / `recall` / `recall-run` / `transcript*` / `index`)都要 agent runtime、
+  会话存储或转录镜像,闭包直接到 7900+。
+
+**下一刀据此定为:搬 `config.ts` + `session-policy.ts` + `recall-state.ts`,用上游那份替换
+`deep-recall.ts` 里的 `readDeepRecallConfig`、`DeepRecallConfig` 与自写的断路器 map。**
+这是剩下最大的一块「我们自己改造的器官」,而且它装得下。
+
 ### 双份 `trigger-recall`
 
 | | |
