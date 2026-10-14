@@ -80,7 +80,53 @@ export function ensureMemoryIndexSchema(db: DatabaseSync): void {
   ensureMemoryPathFtsSchema({ db, tokenizeClause: TOKENIZE_CLAUSE });
   ensureMemoryChunkFtsTriggers(db);
   ensureMemoryPathFtsTriggers(db);
+
+  // The revision fence. Upstream `memory-schema.ts:363-378`, verbatim in structure:
+  //
+  //   INSERT OR IGNORE INTO memory_index_state (id, revision) VALUES (1, 0);
+  //   -- six triggers, one per (table, event) over sources and chunks:
+  //      UPDATE memory_index_state SET revision = revision + 1 WHERE id = 1;
+  //
+  // WITHOUT THESE the table is a row nobody maintains. `forget.mark` bumps `revision`
+  // so a rebuild that started before a forget can be recognised as having gone stale
+  // (`manager-db.ts:131-134`, "never reuse an old revision"), and every bump lands on
+  // `WHERE id = 1` -- so without the seed row the update matches nothing and the fence
+  // silently never fires. An index that looks versioned and is not is worse than one
+  // that plainly has no fence, because the caller stops checking.
+  //
+  // The four indexes are upstream's too: the corpus and per-corpus path lookups are what
+  // `searchText` and the trigger-candidate queries will run, and the older
+  // `idx_memory_index_chunks_path` is dropped because `(path, source)` supersedes it.
+  db.exec(`
+    INSERT OR IGNORE INTO memory_index_state (id, revision) VALUES (1, 0);
+  `);
+  db.exec(
+    `${[MEMORY_INDEX_SOURCES_TABLE, MEMORY_INDEX_CHUNKS_TABLE]
+      .flatMap((table) =>
+        ["insert", "update", "delete"].map(
+          (event) => `CREATE TRIGGER IF NOT EXISTS ${table}_revision_after_${event}
+            AFTER ${event.toUpperCase()} ON ${table}
+            BEGIN
+              UPDATE memory_index_state SET revision = revision + 1 WHERE id = 1;
+            END;`,
+        ),
+      )
+      .join("\n")}
+
+    CREATE INDEX IF NOT EXISTS idx_memory_index_sources_source
+      ON ${MEMORY_INDEX_SOURCES_TABLE}(source);
+    CREATE INDEX IF NOT EXISTS idx_memory_index_chunks_path_source
+      ON ${MEMORY_INDEX_CHUNKS_TABLE}(path, source);
+    DROP INDEX IF EXISTS idx_memory_index_chunks_path;
+    CREATE INDEX IF NOT EXISTS idx_memory_index_chunks_source
+      ON ${MEMORY_INDEX_CHUNKS_TABLE}(source);
+  `);
 }
+
+/** Upstream's `MemorySource` table name for the revision triggers. */
+const MEMORY_INDEX_SOURCES_TABLE = "memory_index_sources";
+/** Upstream's chunk table name for the revision triggers. */
+const MEMORY_INDEX_CHUNKS_TABLE = "memory_index_chunks";
 
 /**
  * Upstream's embedding column, including its no-provider case.
