@@ -499,7 +499,6 @@
     "packages/memory-host-sdk/src/host/session-transcript-corpus.ts",
     "packages/memory-host-sdk/src/host/sqlite-vec-platform-variant.ts",
     "packages/memory-host-sdk/src/host/sqlite-vec.ts",
-    "packages/memory-host-sdk/src/host/sqlite-wal.ts",
     "packages/memory-host-sdk/src/host/sqlite.ts",
     "packages/memory-host-sdk/src/host/status-format.ts",
     "packages/memory-host-sdk/src/host/types.ts",

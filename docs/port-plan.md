@@ -1085,6 +1085,44 @@ Validation: 20 个回退文件与 09-30 上游逐字节相同(20/20)。逐个确
 审计复核,不能只看类型门。二是探针结尾 `fs.rmSync(TMP)` 把探针自己删了(它在 TMP 里),下一轮
 直接 `ERR_MODULE_NOT_FOUND`。
 
+### 第六批:剩下 16 个回退,以及最后两处保留
+
+收尾这一批仍是三类。
+
+**回退(16 个)。** 多数是等价重写:`file-lock.ts`(把 `asNullableRecord` 包一层
+`asLockPayload`)、`session-transcript-corpus.ts`(上游的 `resolveSessionOwnership` 闭包在两个
+调用点被原样内联,逻辑一致,顺带那个内联的 `normalizeComparablePath` 也能去掉了 ——
+`fs-utils.ts` 上一批已回退,那个导出回来了)、`short-term-promotion-rehydrate.ts`(把「目标
+snippet 为空」单独拆一支;上游 `!targetSnippet` 分支返回的本来就是 `exactSnippet`,等价)、
+`mmr.ts`(`[...items].toSorted` 里的拷贝是多余的,`toSorted` 本身就返回新数组)、
+`embedding-vector.ts`(空数组的提前返回)、`windows-spawn.ts` 之外的
+`retry-runtime` / `concurrency-runtime` / `time-runtime` / `sqlite-worker-runtime` /
+`session-store-runtime` / `host/sqlite.ts`(挪了一个 import 或加了一行注释)。
+
+两个是**死代码**,回退等于删除:`extensions/active-memory/config.ts` 给
+`resolveDefaultToolsAllow` 加了 `recallToolNames` 参数,而全树**没有任何调用方**传它 ——
+`deep-recall.ts` 的注释还明说「`cfg` 与 `recallToolNames` 被省略,这正是上游自己的调用形状」。
+`src/plugin-sdk/memory-host-search.ts` 加了 9 个导出,其中 `isActiveMemoryProviderNative`、
+`MemoryCallerAuthority`、`MemoryHealth`、`MemoryReference`、`ActiveMemoryProviderResult`
+**零外部引用**,而且它 re-export 与动态 import 的两个目标
+(`src/plugins/memory-provider-types.ts`、`src/plugin-sdk/memory-host-search.runtime.ts`)
+**在本树都不存在**;这个门面本身也没有任何调用方。
+
+**保留(2 个),登记在此。**
+
+`src/plugin-sdk/file-access-runtime.ts`(+0/-20)看着像「删了上游 20 行 re-export」,实际不是:
+上游那 20 行 re-export 的**五个目标在本树全部不存在**(`@openclaw/fs-safe/watch.ts`、
+`src/infra/fs-observation-mode.ts`、`file-watch-notifier.ts`、`fs-observation-root.ts`、
+`fs-observation-snapshot.ts`),而本树同名文件是一个**完全不同的 FS 安全门面**,被
+`src/plugin-sdk/config.ts`、`extensions/memory-core/src/short-term-promotion-memory-write.ts`、
+`src/plugin-sdk/security-runtime.ts` 三处引用。回退会直接弄坏这三个调用方,保留并登记。
+
+`extensions/active-memory/escalation.ts`(+12/-0)是**只增不改**:在语言表里加了一组葡萄牙语
+模式(`intent` / `future` / `retrospective` 三条正则与一段说明 `-amos` 动词现在时/过去时同形、
+所以 `lembra` 需要一个回指疑问词而不是裸问号)。上游那个文件本身没被改动一行,这是往一张表里
+加一条语言,不是改上游的行为。保留并登记 —— 它是**功能新增**而不是形态偏离,若要收敛只能是把
+葡语拿掉或推给上游,那是产品决定不是搬运决定。
+
 ## 第二类「血管」的集中登记:上游的 async-worker 在本树是 sync 直连(2026-10-14)
 
 这一类不用回退 —— 形态差异是宿主决定的,不是抄错了。但按规矩必须登记在此,而不是只写在
