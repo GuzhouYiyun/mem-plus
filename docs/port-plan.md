@@ -1062,6 +1062,58 @@ repos/openclaw/openclaw/git/trees/<sha>?recursive=1`,一次调用)的 SHA 和本
 `src/plugin-sdk/session-transcript-runtime.ts` 单独记一笔:本树 1945 字节,上游 24 267 字节
 (-651 行)。这是有意砍掉的一整块(会话转录的运行时),不是逐行改写,判定为「宿主不需要所以没搬」。
 
+### 第二批:回退 6 个文件,差异 +1989/-2151 → +1673/-1912
+
+按上表顺序往下走,这一批回退 6 个,全部换成 09-30 上游原件(逐字节相同)。逐个读出来的原因:
+
+**`packages/memory-host-sdk/src/host/internal.ts`(+84/-86)—— 删掉了两样能力,不是简化。**
+
+1. `matchesExtraMemoryPathEntry` 的 `options?: { directory?: boolean }` 参数和配套的目录感知
+   匹配器(`segments.slice(0, length)` 那段前缀匹配)被删了,而**上游自己的
+   `internal.ts:247` 就在用 `{ directory: true }` 调它**,本树把自己的调用点改成了不传。
+2. 额外路径**按根目录归组**的 `extraPathsByRoot: Map<string, NormalizedExtraMemoryPath[]>`
+   被换成逐条循环:同一个根扫 N 遍,`collectMemoryFilesFromDir` 的参数从数组变成单个条目。
+
+后果是用户可见的:额外记忆路径按目录配置时不再按上游语义匹配,同根多 pattern 会重复遍历、
+可能重复收录。
+
+**`packages/memory-host-sdk/src/host/fs-utils.ts`(+1/-8)—— 是根。** 上游的
+`normalizeComparablePath`(以及 `path` 的 import)被删了,所以
+`session-files.ts` 才不得不把它内联。**先回退这个,后面那个才回退得掉** —— 顺序反过来会
+留下一个内联副本。
+
+**`packages/memory-host-sdk/src/host/session-files.ts`(+37/-8)—— 内联重写了上游的共享工具。**
+`avoidTrailingHighSurrogateBreak`(上游从 `@openclaw/normalization-core/utf16-slice` 拿)被换成
+自己写的 `isHighSurrogate`/`isLowSurrogate` 配对判断。查过那个子路径:
+`node_modules/@openclaw/normalization-core/utf16-slice.ts` **存在**,桩包的 `exports` 里也有
+`"./utf16-slice"` —— 所以没有借口。另外 `normalizeSessionText` 前面多加的
+`.replace(/\s*\n+\s*/g, " ")` 是多余的,后面那句 `replace(/\s+/g, " ")` 已经把换行折成空格。
+
+**`src/plugin-sdk/memory-host-core.ts`(+50/-80)—— 丢了两样。** 事件导出的两阶段发布协议里,
+`{ kind: "pending-missing" }` 这个归属状态和识别它的 `pendingContentSha256` 判断被删了;以及
+`listMemoryWorkspacePublicArtifacts` 里按 `${workspaceDir}\0${relativePath}\0${kind}` 去重的
+`Map` 被删了,改成直接返回原数组(于是可能返回重复产物)。
+**修正一处我自己的误读**:那版把「owner 标 pending → 写产物 → owner 清 pending」的两个分支合并成
+了一条序列,finalize 那一步**并没有丢**,所以回退的理由是上面两样,不是「少了一步」。
+
+**`packages/memory-host-sdk/src/host/query-expansion.ts`(+91/-37)—— 纯风格。**
+`isValidKeyword` 从上游的一个布尔表达式拆成四个 if(逐条核对,逻辑等价),外加一个文件头注释。
+
+**`extensions/memory-core/src/dreaming-dreams-file.ts`(+53/-20)—— 删掉了去重。**
+`dedupeDiaryBlocks`(按 `normalizeDiaryBlockFingerprint` 去重梦日志段落)整个没了;
+`joinDiaryBlocks` 前面加的 `if (blocks.length === 0) return ""` 也是多余的,
+`[].map(...).join("")` 本来就是 `""`。
+
+**保留的(血管,已有代码内登记)**:`standing-intents.ts`(+69/-43)有一句明确的
+`MEM-PLUS DEVIATION (open + dispatch)`,说明去掉了 admission owner 和 worker 线程、直接调
+`bindSqliteWorkerBackend` 并传一个空 `admit`,并说明 dispatch 本身是上游的。这属于血管,登记即可。
+
+验证:22 条断言全过。含六个文件与 09-30 上游逐字节相同;被删的能力逐个用正则确认回来了
+(directory 选项、目录前缀匹配、`extraPathsByRoot`、`pending-missing`、去重 Map、
+`dedupeDiaryBlocks`、surrogate 边界改回共享 helper);以及**走真实入口 `listMemoryFiles` 的运行期**
+—— 额外记忆目录被收进来、工作区自己的文件也在、**同一根下两个 pattern 合起来正好两个文件且
+不重复**(4 条 / 4 个不同,回退前那个版本每个 pattern 各走一遍)、不匹配的嵌套 pattern 被排除。
+
 ## 三个血管文件的归属(2026-10-14 逐个查过)
 
 `recall-inject.ts` / `recall-intent.ts` / `recall-taint.ts` 都**不是**可搬的自创器官:
