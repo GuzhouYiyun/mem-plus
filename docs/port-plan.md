@@ -1028,6 +1028,27 @@ repos/openclaw/openclaw/git/trees/<sha>?recursive=1`,一次调用)的 SHA 和本
 | 31 | 6 | `extensions/memory-core/src/concept-vocabulary.ts` |
 | 26 | 11 | `extensions/memory-core/src/short-term-promotion-utils.ts` |
 
+### 第二类「血管」的集中登记:上游的 async-worker 在本树是 sync 直连(2026-10-14)
+
+这一类不用回退 —— 形态差异是宿主决定的,不是抄错了。但按规矩必须登记在此,而不是只写在
+代码注释里。三处,逐个都量过:
+
+| 文件 | 差异 | 证据 |
+|---|---|---|
+| `extensions/memory-core/src/memory-entry-origins.ts`(+303/-209) | 上游**全 async 走 worker**(`createLazyRuntimeModule` / `resolveRuntimeWorkerUrl` / `openOpenClawAgentSqliteWorkerStore` / `runOpenClawAgentWriteAdmission` / `withOpenClawAgentDatabaseAsync`),本树**全 sync 直连 `DatabaseSync`**;并多导出 `recordMemorySessionTombstonesInDatabase`、`recordMemorySessionTombstones`、`deleteMemoryEntryOriginsInDatabase` 三个 `...InDatabase` | 上游把 `recordMemorySessionTombstonesInDatabase` 放在 `memory-entry-origins.worker.ts:76` 里调,worker 是它的调用边界;mem-plus 没有 worker,而 `memory-forget.ts`(上游经 `withMemoryForgetWorker` 跑)要直接调。**连带效果**:`memory-session-tombstones.ts` 本树比 09-30 上游小 1940 字节,因为那个函数整段搬到了这里 —— 逐行读过,分批插入(128 个绑定一批)、`runSqliteImmediateTransactionSync`、`memory_index_state.revision` 栅栏、上游那句「A shadow index can have no published chunks yet」的注释全都在。搬,不是丢 |
+| `extensions/memory-core/src/memory-forget.ts`(+537/-477) | 同上(上游经 `withMemoryForgetWorker`);另外上游把索引清理拆成 `memory-forget-index-read.ts` / `memory-forget-kernel.ts` / `memory-forget-index-sources.ts` 三个文件,本树在 `memory-forget.ts` 里内联 | 已照抄上游的**选法与删法**(`memory-forget-index-read.ts:66-83` 的筛、`memory-forget-kernel.ts:54-105` 的删),详见本文件「forget 的索引清理层」一节;内联是因为没有 worker 可拆。`memory-forget-index-task.ts`(纯类型、零 import)已逐字节搬入 |
+| `src/plugin-sdk/session-transcript-runtime.ts`(本树 1945 字节 / 上游 24267) | 上游 re-export 一批会话转录**函数**,本树只留**一个类型** | 对 09-30 快照实测:它的 16 个相对说明符里**8 个在本树解析不到**(`../agents/sessions-yield-context`、`../config/types.openclaw`、`../gateway/session-catalog-identity`、`../gateway/session-transcript-catalog`、`../media/prompt-image-input`、`./agent-core`、`./session-transcript-lock-runtime`、`./session-transcript-memory-hit`),所以整模块不可打包。那个类型是承重的:`extensions/active-memory/types.ts`(与上游逐字节相同)第 2 行导入它、224 行 `export type ActiveMemoryTranscriptSource = SessionTranscriptTargetParams`。**代码注释原来写「seven imports」,数字错了,已改成 eight 并列出清单** |
+
+同类里还有 `standing-intents.ts`(+69/-43),那一处代码里本来就有 `MEM-PLUS DEVIATION (open +
+dispatch)` 说明,登记在此即可:去掉了 admission owner 与 worker 线程,直接调上游的
+`bindSqliteWorkerBackend` 并传一个空 `admit`(`plugin/src/kv.ts:83` 那段注释解释了 OpenCode
+的 `ctx.storage` 是 last-writer-wins,CAS 只能是尽力而为)。
+
+**共同点**:上游的 `async` 不是为了异步 IO,而是为了把写入关进一个**有 admission 与事务边界的
+worker 进程**。本树是单进程同步写入,那道边界在 `plugin/src/kv.ts` 与
+`memory-workspace-lock.ts` 里以另一种形式保留(workspace lock + CAS)。所以形态变了,保证没有
+变少 —— 但这是**论证**,不是**照抄**,写在这里备查。
+
 ### 逐个看下来,漂移分三类(2026-10-14;第三类的定性后来被推翻,见下)
 
 **一、注释与风格噪音。** 回退。`memory-budget.ts` 把上游的一行注释扩成了三段文件头;

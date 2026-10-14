@@ -5,9 +5,13 @@
 //   transcript *functions* -- `readSessionTranscriptEvents`, `readSessionTranscriptRawDelta`
 //   and friends -- which resolve into `src/config/sessions/**`,
 //   `src/gateway/session-transcript-catalog`, `src/agents/sessions-yield-context` and
-//   `src/routing/session-key`. All of those were removed by the trim, so the module cannot
-//   be shipped: it would carry seven imports that resolve to nothing, and
-//   `audit-npm-pack --check` rightly refuses to call that a packageable closure.
+//   `src/routing/session-key`. Half of those were removed by the trim, so the module cannot
+//   be shipped: measured against the 2026-09-30 snapshot, 8 of its 16 relative specifiers
+//   resolve to nothing (`../agents/sessions-yield-context`, `../config/types.openclaw`,
+//   `../gateway/session-catalog-identity`, `../gateway/session-transcript-catalog`,
+//   `../media/prompt-image-input`, `./agent-core`, `./session-transcript-lock-runtime`,
+//   `./session-transcript-memory-hit`), and `audit-npm-pack --check` rightly refuses to call
+//   that a packageable closure. An earlier version of this comment said "seven"; it is eight.
 //
 // WHAT IS ACTUALLY NEEDED
 //   One type. `extensions/active-memory/types.ts:224` aliases
