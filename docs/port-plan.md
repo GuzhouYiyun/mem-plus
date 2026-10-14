@@ -1028,7 +1028,64 @@ repos/openclaw/openclaw/git/trees/<sha>?recursive=1`,一次调用)的 SHA 和本
 | 31 | 6 | `extensions/memory-core/src/concept-vocabulary.ts` |
 | 26 | 11 | `extensions/memory-core/src/short-term-promotion-utils.ts` |
 
-### 第二类「血管」的集中登记:上游的 async-worker 在本树是 sync 直连(2026-10-14)
+### 第五批:回退 20 个文件,以及六个「回退会引入断链」而保留的
+
+这一批把剩下的文件扫完,分三处发现。
+
+**一、两处是真的丢了东西,回退。**
+
+`src/memory/memory-artifact-provenance.ts` 与(上一批的)`dreaming-state.ts` 是同一个错:
+上游用 `store.entriesInKeyRange({ keyStartInclusive: "<wsKey>:", keyEndExclusive: "<wsKey>;" })`
+做范围读,并**按 `createdAt` 稳定排序**(上游注释:「Stable sorting preserves the store's key
+order when creation times tie」);本树两处都换成了 `entries()` 全量读再在 JS 里按前缀过滤,
+排序也没了。
+
+`extensions/memory-core/src/dreaming-ingestion-state.ts` 删掉了
+`try { await Promise.all(writes) } finally { await Promise.allSettled(writes) }`,换成裸
+`await Promise.all([...])`。上游那句注释就是这件事的理由:「Checkpoint writes must settle
+before a failed sweep releases its workspace lock.」—— 裸 `Promise.all` 在第一个失败处就 reject,
+剩下的写入可能还没落定,而 workspace 锁已经被释放了。
+
+**二、六处「把上游的共享 helper 内联重写」,回退。** `resolveIntegerOption`(multimodal)、
+`avoidTrailingHighSurrogateBreak`(embedding-input-limits,这是第二次 —— `session-files.ts` 那次
+已回退)、`escapeRegExp`(memory-host-markdown)、`resolveGlobalMap`(runtime-store-registry)。
+`extensions/memory-core/src/short-term-promotion-types.ts` 把
+`PromotionCandidate = Omit<ShortTermRecallEntry, ...> & {...}` 展开成手写字段清单 —— 派生写法
+会自动跟随上游,清单不会。
+
+**三、六个文件回退会重新引入断链,保留并登记。** 实测:把这六个换回上游版本,plugin 门从 4240
+变成 4241,新增的那一条每次都落在它们引用的、trim 时已被删掉的类型模块上:
+
+| 文件 | 上游引用但本树没有的东西 |
+|---|---|
+| `src/plugin-sdk/access-groups.ts` | `../channels/plugins/types.public.js`、`../config/types.access-groups.js`、`../config/types.openclaw.js` |
+| `src/plugin-sdk/facade-loader.ts` | 同上(`PluginInstanceHandle` 的形状来自其中之一) |
+| `src/plugin-sdk/plugin-state-runtime.ts` | `../config/sessions/session-entry-current.types.js` |
+| `src/plugin-sdk/plugin-entry.ts` | `../plugins/types.js` 的三个成员、`../plugins/capability-catalog-context.types.js` |
+| `src/plugin-sdk/memory-core-host-runtime-core.ts` | `../config/config.js` 的 `OpenClawConfig`、`../config/types.memory.js` |
+| `src/memory-host-sdk/dreaming.ts` | `../config/types.openclaw.js` |
+
+**回退它们只换来删掉几行类型导出与注释,却把断链引回来,收益与风险不成比例**,所以保留本树
+版本。这一条也是 AGENTS.md 那个判据的正面使用:「`src/` 或 `packages/` 下新出现的错误通常意味
+着一条新的断链」—— 逐个二分定位,不是靠猜。
+
+另两处同类、代码内已有说明:`packages/memory-host-sdk/src/host/embedding-chunk-limits.ts` 与
+`embedding-model-limits.ts` 把 `EmbeddingProvider` **内联声明**成
+`{ id: string; maxInputTokens?: number }`,理由是别名模块与其目标
+`src/plugins/embedding-provider-types.ts` 都被 trim 删了(`3b4f6b6d`);两个文件用的正是上游契约里
+那一个字段,且两处都已被 `Pick` 收窄。
+
+Validation: 20 个回退文件与 09-30 上游逐字节相同(20/20)。逐个确认被撤的改写回来:两处范围读与
+`createdAt` 排序、`allSettled` 兜底与它那句注释、四处共享 helper、派生类型写法。运行期:经宿主
+自己的 `createStorageOpenKeyedStore` 写入三条再读回三条;五个改过 import 图的模块逐个真导入
+通过(不是只做正则匹配)。门:plugin 4240(基线 4240,自有路径 0 错)、capture 331、`no drift`。
+
+**过程中撞到并记下两件事。** 一是二分定位时用 `git checkout HEAD -- <files>` 做隔离,那会把
+已回退的文件还原回本树版本,重做批次时漏了两个,靠「审计数没变」才发现 —— 回退后必须用漂移
+审计复核,不能只看类型门。二是探针结尾 `fs.rmSync(TMP)` 把探针自己删了(它在 TMP 里),下一轮
+直接 `ERR_MODULE_NOT_FOUND`。
+
+## 第二类「血管」的集中登记:上游的 async-worker 在本树是 sync 直连(2026-10-14)
 
 这一类不用回退 —— 形态差异是宿主决定的,不是抄错了。但按规矩必须登记在此,而不是只写在
 代码注释里。三处,逐个都量过:
