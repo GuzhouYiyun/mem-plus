@@ -46,7 +46,7 @@ import type { MemPlusSource } from "./memory-corpus.js";
 /** The model name recorded on every chunk; part of the row identity. */
 const NO_MODEL = "";
 
-export type ChunkProvenance = {
+type ChunkProvenance = {
   readonly originClass: "owner" | "agent" | "untrusted" | "system";
   readonly sessionKind: "interactive" | "cron" | "heartbeat" | "subagent" | "unknown";
   readonly observedAt: number;
@@ -54,13 +54,13 @@ export type ChunkProvenance = {
 };
 
 /** Per-chunk annotations upstream stores in `memory_index_chunk_recall_metadata`. */
-export type ChunkRecallMetadata = {
+type ChunkRecallMetadata = {
   readonly importance?: number | null;
   readonly triggers?: string | null;
   readonly projectKey?: string | null;
 };
 
-export type WriteSourceResult = {
+type WriteSourceResult = {
   readonly path: string;
   readonly source: MemPlusSource;
   readonly cleared: number;

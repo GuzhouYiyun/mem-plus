@@ -49,7 +49,7 @@ export const DEFAULT_MEMORY_CHUNKING = { tokens: 400, overlap: 80 } as const;
 const CURATED_PATHS: ReadonlySet<string> = new Set(["MEMORY.md", "USER.md"]);
 
 /** Upstream's `perEntry` test: the curated corpus AND a curated path. */
-export function isCuratedPath(source: MemPlusSource, relativePath: string): boolean {
+function isCuratedPath(source: MemPlusSource, relativePath: string): boolean {
   return source === CURATED_SOURCE && CURATED_PATHS.has(relativePath);
 }
 
@@ -78,4 +78,3 @@ export function chunkMemorySource(params: {
 }
 
 export { MEMORY_CHUNKING_VERSION };
-export type { MemoryChunk };

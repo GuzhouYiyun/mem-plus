@@ -33,7 +33,6 @@
 //   the same conclusion the fusion read reached independently for (d).
 import type { DatabaseSync } from "node:sqlite";
 import {
-  buildMemoryEmbeddingCacheSchema,
   buildMemoryIndexStrictSchema,
   MEMORY_EMBEDDING_CACHE_TABLE,
 } from "../../packages/memory-host-sdk/src/host/memory-schema-base.js";
@@ -138,7 +137,3 @@ const MEMORY_INDEX_CHUNKS_TABLE = "memory_index_chunks";
 export function chunkEmbeddingColumn(embedding: readonly number[] | undefined): Uint8Array {
   return encodeMemoryEmbedding(embedding ?? []);
 }
-
-/** Kept exported for the one caller that manages the cache table's lifecycle. */
-export const memoryEmbeddingCacheSchema = (): string =>
-  buildMemoryEmbeddingCacheSchema(MEMORY_EMBEDDING_CACHE_TABLE);

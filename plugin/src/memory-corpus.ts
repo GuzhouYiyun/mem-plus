@@ -52,24 +52,5 @@ export type MemPlusSource = MemorySource | "wiki";
 /** The value the wiki corpus is stored under. */
 export const WIKI_SOURCE = "wiki" satisfies MemPlusSource;
 
-/** Every value the index may hold, in query-filter order. */
-export const MEM_PLUS_SOURCES: readonly MemPlusSource[] = ["memory", "sessions", WIKI_SOURCE];
-
-/**
- * Upstream's `MemorySource`, widened by exactly one member.
- *
- * This is the whole adapter. Callers that only ever see upstream's two values keep
- * upstream's type; callers holding a `MemPlusSource` narrow it before handing it to
- * upstream code, so nothing inside the vendored tree has to change.
- */
-export function asMemorySource(source: MemPlusSource): MemorySource | undefined {
-  return source === "wiki" ? undefined : source;
-}
-
 /** The curated corpus, which is also the only one eligible for automatic injection. */
 export const CURATED_SOURCE: MemPlusSource = "memory";
-
-/** True for corpora whose chunks may be auto-injected on an ordinary turn. */
-export function isAutoInjectableSource(source: MemPlusSource): boolean {
-  return source === CURATED_SOURCE;
-}
