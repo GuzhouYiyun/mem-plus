@@ -35,6 +35,24 @@
 //   behaviour it wraps -- which tools, how many rounds, what counts as a usable answer --
 //   follows upstream's settings.
 import { resolveRecallEscalationDecision } from "../../extensions/active-memory/escalation.js";
+// Nine constants that used to be transcribed into this file are now read from upstream's own
+// `types.ts`, which is vendored in this tree and byte-identical to upstream (the only
+// difference is line endings: upstream LF, this checkout CRLF). Two constants and the whole
+// prompt builder still have to be transcribed because they live in `prompt.ts`, which is not
+// vendored -- see the header note.
+import {
+  ACTIVE_MEMORY_CLOSE_TAG,
+  ACTIVE_MEMORY_CONTEXT_HEADER,
+  ACTIVE_MEMORY_OPEN_TAG,
+  DEFAULT_ACTIVE_MEMORY_TOOLS_ALLOW,
+  DEFAULT_CIRCUIT_BREAKER_COOLDOWN_MS,
+  DEFAULT_CIRCUIT_BREAKER_MAX_TIMEOUTS,
+  DEFAULT_MAX_SUMMARY_CHARS,
+  DEFAULT_TIMEOUT_MS,
+  NO_RECALL_VALUES,
+  TIMEOUT_BOILERPLATE_PATTERNS,
+  type ActiveMemoryPromptStyle,
+} from "../../extensions/active-memory/types.js";
 import { localiseForRecall } from "./recall-intent.js";
 import { completeThroughHost } from "./llm.js";
 import type { MemoryTool } from "./memory-tools.js";
@@ -42,36 +60,7 @@ import { truncateUtf16Safe } from "../../packages/normalization-core/src/utf16-s
 import type { HostedModelRef } from "./model/config.js";
 import type { PluginContext } from "./opencode.js";
 
-// --- upstream constants, verbatim ------------------------------------------------
-
-const ACTIVE_MEMORY_CONTEXT_HEADER = "Context:";
-const ACTIVE_MEMORY_PLUGIN_TAG = "active_memory_plugin";
-const ACTIVE_MEMORY_OPEN_TAG = `<${ACTIVE_MEMORY_PLUGIN_TAG}>`;
-const ACTIVE_MEMORY_CLOSE_TAG = `</${ACTIVE_MEMORY_PLUGIN_TAG}>`;
-
-const NO_RECALL_VALUES = new Set([
-  "",
-  "none",
-  "no_reply",
-  "no reply",
-  "nothing useful",
-  "no relevant memory",
-  "no relevant memories",
-  "timeout",
-  "timed out",
-  "request timed out",
-  "llm request timed out",
-  "the llm request timed out",
-  "[]",
-  "{}",
-  "null",
-  "n/a",
-]);
-
-const TIMEOUT_BOILERPLATE_PATTERNS = [
-  /^(?:error:\s*)?(?:the\s+)?(?:llm|model|request|operation|agent)\s+(?:request\s+)?timed out\b/i,
-  /^(?:error:\s*)?active-memory timeout after \d+ms\b/i,
-];
+// --- still transcribed, because prompt.ts is not vendored ------------------------
 
 const ASSISTANT_CHITCHAT_PATTERNS = [
   /^(?:hello|hi|hey|greetings)\b(?=.{0,120}(?:\b(?:help|assist|message|question|need)\b|\b(?:how|what)\s+(?:can|may|do)\b|cut off|come through))/i,
@@ -91,13 +80,6 @@ const ACTIVE_MEMORY_RECALL_OUTCOME_TEXT = {
     "Active Memory could not retrieve memory for this turn. Do not assume that no relevant memory exists.",
 } as const;
 
-/** Upstream's `types.ts` defaults (`DEFAULT_TIMEOUT_MS` and friends). */
-const DEFAULT_TIMEOUT_MS = 15_000;
-const DEFAULT_MAX_SUMMARY_CHARS = 220;
-const DEFAULT_CIRCUIT_BREAKER_MAX_TIMEOUTS = 3;
-const DEFAULT_CIRCUIT_BREAKER_COOLDOWN_MS = 60_000;
-const DEFAULT_TOOLS_ALLOW = ["memory_search", "memory_get"] as const;
-
 /**
  * Rounds of tool use before the answer is taken as final. Upstream has no such counter -- the
  * host's agent loop ends when the model stops calling tools -- so this bounds a loop the model
@@ -107,11 +89,16 @@ const DEFAULT_TOOLS_ALLOW = ["memory_search", "memory_get"] as const;
 const MAX_TOOL_ROUNDS = 4;
 
 // --- upstream prompt / summary text, copied verbatim ------------------------------
-
-type PromptStyle = "balanced" | "strict" | "contextual" | "recall-heavy" | "precision-heavy" | "preference-only";
+// `ASSISTANT_CHITCHAT_PATTERNS`, `ACTIVE_MEMORY_RECALL_OUTCOME_TEXT`,
+// `buildPromptStyleLines`, `buildRecallPrompt`, `normalizeActiveSummary`, `truncateSummary`,
+// `buildPromptPrefix` and `buildRecallOutcomePrefix` are all upstream's `prompt.ts`. That file
+// is NOT vendored here, so they are transcribed. `ActiveMemoryPromptStyle` -- the union those
+// switch on -- did live in `types.ts`, so it is imported from there rather than redeclared: a
+// locally declared copy of a union that upstream defines once is exactly the kind of second
+// source of truth that drifts.
 
 /** Upstream's `buildPromptStyleLines`. */
-function buildPromptStyleLines(style: PromptStyle): string[] {
+function buildPromptStyleLines(style: ActiveMemoryPromptStyle): string[] {
   switch (style) {
     case "strict":
       return [
@@ -153,7 +140,7 @@ function buildPromptStyleLines(style: PromptStyle): string[] {
 export function buildRecallPrompt(params: {
   query: string;
   searchQuery: string;
-  promptStyle: PromptStyle;
+  promptStyle: ActiveMemoryPromptStyle;
   toolsAllow: readonly string[];
   promptOverride?: string;
   promptAppend?: string;
@@ -276,7 +263,7 @@ export function buildRecallOutcomePrefix(outcome: keyof typeof ACTIVE_MEMORY_REC
 export type DeepRecallConfig = {
   readonly enabled: boolean;
   readonly mode: "off" | "escalate" | "always";
-  readonly promptStyle: PromptStyle;
+  readonly promptStyle: ActiveMemoryPromptStyle;
   readonly toolsAllow: readonly string[];
   readonly timeoutMs: number;
   readonly maxSummaryChars: number;
@@ -309,7 +296,7 @@ export function readDeepRecallConfig(options: unknown): DeepRecallConfig {
         : "balanced",
     toolsAllow: Array.isArray(section["toolsAllow"])
       ? (section["toolsAllow"] as string[])
-      : [...DEFAULT_TOOLS_ALLOW],
+      : [...DEFAULT_ACTIVE_MEMORY_TOOLS_ALLOW],
     timeoutMs: num(section["timeoutMs"], DEFAULT_TIMEOUT_MS),
     maxSummaryChars: num(section["maxSummaryChars"], DEFAULT_MAX_SUMMARY_CHARS),
     circuitBreakerMaxTimeouts: num(

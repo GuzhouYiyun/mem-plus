@@ -64,6 +64,11 @@
 import type { SearchHit } from "./memory-index.js";
 import { listTriggerCandidates, searchText, type SearchFilters } from "./memory-index.js";
 import { isAutomaticMemoryEntryEligible } from "../../packages/memory-host-sdk/src/host/types.js";
+import {
+  ACTIVE_MEMORY_CLOSE_TAG,
+  ACTIVE_MEMORY_CONTEXT_HEADER,
+  ACTIVE_MEMORY_OPEN_TAG,
+} from "../../extensions/active-memory/types.js";
 import { stripMemoryAnnotationCarriers } from "../../packages/memory-host-sdk/src/host/curated-annotations.js";
 import { truncateUtf16Safe } from "../../packages/normalization-core/src/utf16-slice.js";
 
@@ -78,12 +83,10 @@ const MAX_TRIGGER_CONTEXT_CHARS = 1800;
 const STRONG_TRIGGER_MATCH_SCORE = 0.65;
 const WORD_RE = /[\p{L}\p{N}_]+/gu;
 
-// openclaw's `prompt.ts` tag triple, verbatim.
-const ACTIVE_MEMORY_PLUGIN_TAG = "active_memory_plugin";
-const ACTIVE_MEMORY_CONTEXT_HEADER = "Context:";
-const ACTIVE_MEMORY_OPEN_TAG = `<${ACTIVE_MEMORY_PLUGIN_TAG}>`;
-const ACTIVE_MEMORY_CLOSE_TAG = `</${ACTIVE_MEMORY_PLUGIN_TAG}>`;
-
+// The tag triple and `escapeXml` are openclaw's `prompt.ts`. The four constants now come from
+// upstream's `types.ts`, which is vendored in this tree and byte-identical to upstream, rather
+// than from a second transcript in this file. `escapeXml` and `buildPromptPrefix` still have to
+// be transcribed here because `prompt.ts` itself is not vendored -- see the header note.
 export type TriggerRecallMatch = SearchHit & { matchScore: number };
 
 function escapeXml(str: string): string {
