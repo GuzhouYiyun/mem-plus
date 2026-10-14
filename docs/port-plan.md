@@ -732,6 +732,64 @@ import,或补出 8794 个模块。**解除阻塞的判据是清楚的**:要么�
 `deep-recall.ts` 里的 `readDeepRecallConfig`、`DeepRecallConfig` 与自写的断路器 map。**
 这是剩下最大的一块「我们自己改造的器官」,而且它装得下。
 
+### `config.ts` 已搬(2026-10-14),闭包真的是 0
+
+`extensions/active-memory/config.ts`(10 308 字节)与上游**逐字节相同**,`files` 已加,
+运行期加载通过(11 个导出)。`readDeepRecallConfig` 现在只做一件事:把 `options.recall` 拆出来
+交给上游的 `normalizePluginConfig(section)`。`DeepRecallConfig` 直接是上游的
+`ResolvedActiveRecallPluginConfig` 类型,不是本地子集。
+
+**键名不需要翻译**:上游把自己的输入类型为 `Partial<ResolvedActiveRecallPluginConfig>`
+(`types.ts:135`),所以 `promptStyle` / `toolsAllow` / `timeoutMs` / `maxSummaryChars` /
+`circuitBreaker*` / `promptOverride` / `promptAppend` 就是 mem-plus 原来那套键。
+
+**换掉之后多出来的字段**(本地 reader 从前没有,现在由上游 resolver 填):
+`queryMode`(且它带一条上游规则:`queryMode=message` → `promptStyle` 默认 `strict`,
+`=full` → `contextual`)、`cacheTtlMs`、`timeoutMsIsDefault`、`transcriptDir`、
+`thinking`、`fastMode`、`agents`、`allowedChatTypes/Ids`、`deniedChatIds`、`model`、
+`modelFallback`、`setupGraceTimeoutMs`、`recent*`、`logging`、`persistTranscripts`。
+
+**旧 reader 的两个缺陷,删掉即修**:
+- **不夹取**。`timeoutMs: 999999` 会被原样接受,现在夹到 `MAX_TIMEOUT_MS` = 120000;
+  `timeoutMs: 5` 夹到 `DEFAULT_MIN_TIMEOUT_MS` = 250;`circuitBreakerMaxTimeouts: 0` 夹到 1;
+  `circuitBreakerCooldownMs: 1` 夹到 5000。
+- **漏了一个 promptStyle 取值**。上游列六个(含 `preference-only`),本地只校验五个,所以用户写
+  `preference-only` 会被静默变成 `balanced`。
+
+顺带测出上游取值的三条分界(探针实测,不是推测):`>0` 走夹取;`<=0` 走
+`parseOptionalPositiveInt` 回落默认 15000;**数字字符串会被接受**(`"9000"` → 9000)——
+`opencode.jsonc` 是带注释的 JSON,`"timeoutMs": "9000"` 是很可能出现的写法,旧 reader 不认。
+
+**一处顺带修掉的提示词缺陷**:`buildRecallPrompt` 此前把 `DEFAULT_MAX_SUMMARY_CHARS` 写死在
+提示词里,而上游那份读的是 `params.config.maxSummaryChars`。用户设 `maxSummaryChars: 400`
+时提示词仍说「under 220」。现在它接的是 `config.maxSummaryChars`。
+
+### 量闭包时我犯的错,记下来
+
+第一次量 `config.ts` 报「需新搬 5 个文件」(`src/infra/fs-observation-*`、
+`file-watch-notifier`、`media/remote-workspace-file`)。**那是一次走三个起点**,
+`query.ts` 的 agent-runtime 依赖被算到了 `config.ts` 头上。单独量 `config.ts` 是 0。
+
+但真正让我发现的是另一件事:`audit-npm-pack` 报 **no drift**,而那 5 个文件既不在 `files`
+也不被任何前缀覆盖 —— 按 P3 记的 2026-10-13 那一课,那就该是「打包带不走 = 装到用户机器上
+是死的」。于是我手工把它们加进 `files`,audit 立刻报 DRIFT 并要 `--write` 删掉它们。
+
+**做决定的是一次实验,不是推理**:把那 5 个移开再 `import` 一次 `config.ts`,照样加载。
+所以 audit 是对的、我的测量是错的,那 5 个已从树里删掉。
+
+> 这里还牵出一件更该记的事:树里当时有 **13 个我没建过的 10 字节文件**
+> (`src/agents/*.ts`、`src/tts/tts.ts`、`src/plugins/plugin-metadata-snapshot.types.ts`),
+> 内容全是 `export {};`,创建时间同一秒,未进 git。它们恰好是 tsc 报 `TS2307` 的那批缺失模块 ——
+> **`export {};` 让缺失的模块「存在且为空」**:tsc 的错误消失,`import` 也不再抛,可任何从它
+> import 真实绑定的代码运行期拿到的是 `undefined` 而不是一句清楚的 "Cannot find module"。
+> 我查了 `link-openclaw-alias.mjs`(只写 `node_modules`)与 `bootstrap.ts`(不碰 `src/`),
+> 都没有创建它们的代码,来源不明。**已全部删除**,并确认删掉后 `config.ts` 仍能加载、门仍
+> 4240 = 基线。留一个来源不明的桩在树里,比留着 17 条明确的 `TS2307` 更糟 —— 后者至少
+> 说清了缺什么。
+
+`session-policy.ts`(9 个文件)与 `recall-state.ts`(21 个文件 / 158 KB,会拖进
+`src/config/sessions/*` 与 `src/routing/*`)还没搬。
+
 ### 双份 `trigger-recall`
 
 | | |

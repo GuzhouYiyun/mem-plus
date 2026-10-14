@@ -62,6 +62,7 @@
     "THIRD_PARTY_NOTICES.md",
     "bootstrap.ts",
     "cli-root-options.mjs",
+    "extensions/active-memory/config.ts",
     "extensions/active-memory/escalation.ts",
     "extensions/active-memory/types.ts",
     "extensions/memory-core/src/capture/constants.ts",

@@ -56,15 +56,17 @@ import {
   ACTIVE_MEMORY_CLOSE_TAG,
   ACTIVE_MEMORY_CONTEXT_HEADER,
   ACTIVE_MEMORY_OPEN_TAG,
-  DEFAULT_ACTIVE_MEMORY_TOOLS_ALLOW,
-  DEFAULT_CIRCUIT_BREAKER_COOLDOWN_MS,
-  DEFAULT_CIRCUIT_BREAKER_MAX_TIMEOUTS,
-  DEFAULT_MAX_SUMMARY_CHARS,
-  DEFAULT_TIMEOUT_MS,
   NO_RECALL_VALUES,
   TIMEOUT_BOILERPLATE_PATTERNS,
   type ActiveMemoryPromptStyle,
+  type ResolvedActiveRecallPluginConfig,
 } from "../../extensions/active-memory/types.js";
+// The config reader is upstream's own function. `config.ts` is vendored byte-identical; its
+// closure is five small files (`src/infra/fs-observation-*`, `file-watch-notifier`,
+// `media/remote-workspace-file`) plus `@openclaw/fs-safe`, which is an installed npm dependency.
+// Unlike `prompt.ts` this one loads at runtime. See `readDeepRecallConfig` for the one-line
+// adaptation and for the two things the old local reader got wrong.
+import { normalizePluginConfig } from "../../extensions/active-memory/config.js";
 import { localiseForRecall } from "./recall-intent.js";
 import { completeThroughHost } from "./llm.js";
 import type { MemoryTool } from "./memory-tools.js";
@@ -154,6 +156,14 @@ export function buildRecallPrompt(params: {
   searchQuery: string;
   promptStyle: ActiveMemoryPromptStyle;
   toolsAllow: readonly string[];
+  /**
+   * `maxSummaryChars` is a parameter rather than a constant because upstream's own
+   * `buildRecallPrompt` reads `params.config.maxSummaryChars` -- one of the five config fields it
+   * touches. Hardcoding the default here meant a user who set `maxSummaryChars: 400` got a prompt
+   * instructing the model to stay under 220. The value now arrives from
+   * `readDeepRecallConfig`, which is upstream's resolver, so it is whatever the operator set.
+   */
+  maxSummaryChars: number;
   promptOverride?: string;
   promptAppend?: string;
 }): string {
@@ -186,7 +196,7 @@ export function buildRecallPrompt(params: {
     `{"tool":"<one of: ${params.toolsAllow.join(", ")}>","args":{...}} to use a memory tool,`,
     '{"summary":"..."} when you have the memory context worth passing on,',
     '{"summary":"NONE"} when you do not.',
-    `Keep the summary under ${DEFAULT_MAX_SUMMARY_CHARS} characters.`,
+    `Keep the summary under ${params.maxSummaryChars} characters.`,
     "Write the summary as a memory note about the user, not as a reply to the user.",
     "Do not explain your reasoning.",
     "Do not return bullets, numbering, labels, XML, JSON, or markdown list formatting outside the object.",
@@ -271,21 +281,44 @@ export function buildRecallOutcomePrefix(outcome: keyof typeof ACTIVE_MEMORY_REC
 
 // --- the runner -------------------------------------------------------------------
 
-/** The config this port reads; every default is upstream's. */
-export type DeepRecallConfig = {
-  readonly enabled: boolean;
-  readonly mode: "off" | "escalate" | "always";
-  readonly promptStyle: ActiveMemoryPromptStyle;
-  readonly toolsAllow: readonly string[];
-  readonly timeoutMs: number;
-  readonly maxSummaryChars: number;
-  readonly circuitBreakerMaxTimeouts: number;
-  readonly circuitBreakerCooldownMs: number;
-  readonly promptOverride?: string;
-  readonly promptAppend?: string;
-};
+/**
+ * The resolved recall config -- upstream's own type, not a subset of it.
+ *
+ * `normalizePluginConfig` returns `ResolvedActiveRecallPluginConfig` (27 fields) and
+ * `normalizePluginConfig`'s output IS that type, so declaring a narrower local shape would mean
+ * every field added upstream later is silently dropped here instead of arriving. Consumers that
+ * only need a few fields read those few. `readonly` is dropped because upstream's type is mutable
+ * and widening mutability at the boundary is cheaper than a cast on every write.
+ */
+export type DeepRecallConfig = ResolvedActiveRecallPluginConfig;
 
-/** Permissive read, like every other section: `ctx.options` is untyped JSON. */
+/**
+ * Read the recall section, upstream's way.
+ *
+ * THE ADAPTATION, AND IT IS ONE LINE
+ *   Upstream's `normalizePluginConfig(pluginConfig, cfg?, recallToolNames?)` takes the config
+ *   SECTION itself; mem-plus nests it at `options.recall` inside the raw OpenCode options JSON,
+ *   so the only thing this does is unwrap that one level. Everything after it -- the choice
+ *   lists, the clamping ranges, the defaults, the `timeoutMsIsDefault` flag, the
+ *   `queryMode`-dependent `promptStyle` default -- is upstream's function running upstream's code.
+ *
+ *   The key names do not need translating: upstream types its input as
+ *   `Partial<ResolvedActiveRecallPluginConfig>` (`types.ts:135`), so `promptStyle`, `toolsAllow`,
+ *   `timeoutMs`, `maxSummaryChars`, `circuitBreakerMaxTimeouts`, `circuitBreakerCooldownMs`,
+ *   `promptOverride` and `promptAppend` are the same keys mem-plus's own reader used.
+ *
+ *   `cfg` and `recallToolNames` are omitted, which is upstream's own call shape for a runtime with
+ *   no plugin registry. `resolveDefaultToolsAllow` (`config.ts:88`) then falls through to
+ *   `DEFAULT_ACTIVE_MEMORY_TOOLS_ALLOW` = `["memory_search", "memory_get"]` -- the two tools
+ *   mem-plus registers under those exact names, so the default is correct rather than merely
+ *   plausible.
+ *
+ * WHAT THE OLD READER GOT WRONG, now fixed by deleting it
+ *   It did not clamp. `timeoutMs: 5` was accepted verbatim where upstream clamps to
+ *   `[minimumTimeoutMs, MAX_TIMEOUT_MS]`, and `timeoutMs: -1` was accepted too. It also lacked
+ *   `preference-only` as a `promptStyle` value -- upstream lists six, this file had validated five,
+ *   so a user's `preference-only` silently became `balanced`.
+ */
 export function readDeepRecallConfig(options: unknown): DeepRecallConfig {
   const root =
     typeof options === "object" && options !== null ? (options as Record<string, unknown>) : {};
@@ -293,35 +326,7 @@ export function readDeepRecallConfig(options: unknown): DeepRecallConfig {
     typeof root["recall"] === "object" && root["recall"] !== null
       ? (root["recall"] as Record<string, unknown>)
       : {};
-  const num = (value: unknown, fallback: number): number =>
-    typeof value === "number" && Number.isFinite(value) ? value : fallback;
-  const mode = section["mode"];
-  return {
-    enabled: section["enabled"] !== false,
-    mode: mode === "off" || mode === "always" ? mode : "escalate",
-    promptStyle:
-      section["promptStyle"] === "strict" ||
-      section["promptStyle"] === "contextual" ||
-      section["promptStyle"] === "recall-heavy" ||
-      section["promptStyle"] === "precision-heavy"
-        ? section["promptStyle"]
-        : "balanced",
-    toolsAllow: Array.isArray(section["toolsAllow"])
-      ? (section["toolsAllow"] as string[])
-      : [...DEFAULT_ACTIVE_MEMORY_TOOLS_ALLOW],
-    timeoutMs: num(section["timeoutMs"], DEFAULT_TIMEOUT_MS),
-    maxSummaryChars: num(section["maxSummaryChars"], DEFAULT_MAX_SUMMARY_CHARS),
-    circuitBreakerMaxTimeouts: num(
-      section["circuitBreakerMaxTimeouts"],
-      DEFAULT_CIRCUIT_BREAKER_MAX_TIMEOUTS,
-    ),
-    circuitBreakerCooldownMs: num(
-      section["circuitBreakerCooldownMs"],
-      DEFAULT_CIRCUIT_BREAKER_COOLDOWN_MS,
-    ),
-    ...(typeof section["promptOverride"] === "string" ? { promptOverride: section["promptOverride"] } : {}),
-    ...(typeof section["promptAppend"] === "string" ? { promptAppend: section["promptAppend"] } : {}),
-  };
+  return normalizePluginConfig(section);
 }
 
 export type DeepRecallOutcome = { readonly context: string } | { readonly context: null; readonly reason: string };
@@ -467,6 +472,7 @@ export async function runDeepRecall(params: {
     searchQuery,
     promptStyle: config.promptStyle,
     toolsAllow: usable,
+    maxSummaryChars: config.maxSummaryChars,
     ...(config.promptOverride ? { promptOverride: config.promptOverride } : {}),
     ...(config.promptAppend ? { promptAppend: config.promptAppend } : {}),
   });
