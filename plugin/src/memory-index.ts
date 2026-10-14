@@ -32,7 +32,88 @@ import {
 } from "../../extensions/memory-core/src/memory/hybrid.js";
 import { stateRoot } from "./paths.js";
 import { parseMemoryDocument, type IndexRoot, type MemoryUnit, type ParsedDocument } from "./memory-parse.js";
+import { writeSourceChunks } from "./memory-index-write.js";
+import { ensureMemoryIndexSchema } from "./memory-index-schema.js";
+import { WIKI_SOURCE } from "./memory-corpus.js";
 import type { MemoryEntryProvenance } from "../../packages/memory-host-sdk/src/host/types.js";
+
+/**
+ * Whether this database has upstream's tables yet.
+ *
+ * `openIndexAt` still creates only the mem-plus schema, so a database opened by the live
+ * plugin does not have `memory_index_chunks` until `ensureMemoryIndexSchema` has run. The
+ * dual write checks rather than assuming, because a missing table here would abort every
+ * capture; a skipped upstream write degrades to "the migration has not started", which is
+ * visible in `indexStats` instead of fatal.
+ */
+function hasUpstreamSchema(db: DatabaseSync): boolean {
+  return (
+    db
+      .prepare("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'memory_index_chunks'")
+      .get() !== undefined
+  );
+}
+
+/**
+ * The workspace-relative path upstream stores.
+ *
+ * Upstream indexes workspace-relative paths -- its curated whitelist is literally
+ * `path IN ('MEMORY.md','USER.md')` -- while mem-plus's `documents.path` is absolute and
+ * unique because absolute paths are. Two files with the same relative path in different
+ * project homes must therefore stay distinguishable, so the project slug is preserved as
+ * the leading segment, the same accommodation `memory-path-provenance.ts` already makes.
+ */
+function upstreamRelativePath(file: string, root: IndexRoot): string {
+  const withoutExtension = file.replace(/\.(md|markdown)$/i, "");
+  const segments = withoutExtension.split(/[\\/]/).filter(Boolean);
+  const memoryIndex = segments.lastIndexOf("memory");
+  const relative = memoryIndex >= 0 ? segments.slice(memoryIndex + 1) : segments;
+  const joined = relative.join("/");
+  return file.match(/\.(md|markdown)$/i) ? `${joined}${file.match(/\.(md|markdown)$/i)![0]}` : joined;
+}
+
+/**
+ * Upstream's per-chunk provenance, which is what the curated gate and the promotion gate
+ * both read. A mem-plus document with no classification produces NO provenance row rather
+ * than a permissive one: upstream's gate fails closed on an absent row, and a row
+ * defaulting to `agent` would silently make unclassified content promotable.
+ */
+function upstreamProvenance(provenance: DocumentProvenance | undefined): {
+  originClass: "owner" | "agent" | "untrusted" | "system";
+  sessionKind: "interactive" | "cron" | "heartbeat" | "subagent" | "unknown";
+  observedAt: number;
+} {
+  if (!provenance) return { originClass: "untrusted", sessionKind: "unknown", observedAt: Date.now() };
+  return {
+    originClass: provenance.originClass as MemoryEntryProvenance["originClass"],
+    sessionKind: provenance.sessionKind as MemoryEntryProvenance["sessionKind"],
+    observedAt: provenance.observedAt,
+  };
+}
+
+/**
+ * The curated annotations upstream keeps in `memory_index_chunk_recall_metadata`.
+ *
+ * `memory-parse.ts` lifts these off a curated section, and upstream reads them from the
+ * same kind of annotation, so the values carry over unchanged. They are only present on
+ * curated sections, which is what makes those sections trigger-injection candidates and
+ * nothing else.
+ */
+function upstreamRecall(units: readonly MemoryUnit[]): {
+  importance?: number | null;
+  triggers?: string | null;
+  projectKey?: string | null;
+} | undefined {
+  const annotated = units.find(
+    (unit) => unit.importance != null || unit.triggers != null || unit.projectKey != null,
+  );
+  if (!annotated) return undefined;
+  return {
+    importance: annotated.importance ?? null,
+    triggers: annotated.triggers ?? null,
+    projectKey: annotated.projectKey ?? null,
+  };
+}
 
 /** `~/.config/opencode/mem-plus/index.db`. */
 export function indexPath(): string {
@@ -216,6 +297,10 @@ export function openIndexAt(
       db.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
     }
     db.exec(SCHEMA_INDEXES);
+    // Upstream's tables, created alongside rather than instead. The readers in this file
+    // still read `documents` / `units`; these exist so the migration has data to move to,
+    // and so `openIndexAt` is the one place that decides what a database contains.
+    ensureMemoryIndexSchema(db);
     return db;
   } catch (error) {
     log?.(
@@ -432,6 +517,40 @@ export function indexDocument(params: {
     if (vector) insertVector.run(unitId, vector.dim, vector.vec);
     written += 1;
   });
+
+  // ALSO WRITE UPSTREAM'S TABLES, from the same bytes.
+  //
+  // This is the migration step, and it is deliberately a dual write. The readers below
+  // still read `documents` / `units`; if they were switched before this ran, every search
+  // would return zero against an empty `memory_index_chunks` -- a failure that looks like
+  // "the memory is gone" rather than like a half-finished migration. So the upstream
+  // tables get populated first, verified against real content, and only then does the
+  // read side move.
+  //
+  // Both sides are written from `text` rather than from `parsed.units`: upstream chunks
+  // come from its own chunker (`memory-chunking.ts`), and translating mem-plus's units
+  // into that row shape would invent a mapping upstream does not have. The old side keeps
+  // using `parsed.units` for its own reasons -- `kind`, `day`, `entry_type` and `marker`
+  // are mem-plus columns that upstream has nowhere to put.
+  //
+  // `mirror` suppression is upstream's model too and is NOT reproduced here: upstream
+  // stores the same bytes under each corpus and lets queries filter by source, rather than
+  // picking a `holder` and recording the other copy with no rows. A mirrored mem-plus
+  // file therefore gets real chunks in both corpora once this is wired, which is the
+  // documented consequence of following upstream.
+  if (!mirrored && hasUpstreamSchema(db)) {
+    writeSourceChunks({
+      db,
+      relativePath: upstreamRelativePath(file, params.root),
+      source: params.root === "wiki" ? WIKI_SOURCE : "memory",
+      content: text,
+      hash,
+      bytes,
+      mtime,
+      provenance: upstreamProvenance(params.provenance),
+      recall: upstreamRecall(parsed.units),
+    });
+  }
 
   return { written, mirrored: false };
 }
