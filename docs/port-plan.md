@@ -1620,3 +1620,82 @@ plugin/src/web/{auth-token,auth,config-file,config,server}.ts
 
 **欠的账。** `scripts/audit-upstream-drift.mjs` 需要第二个参考树(`--ref opencode-mem`),否则「记忆
 逻辑是抄来的」这句话对写入路径的这 20 个文件无法验证。这是判据 1 剩下的唯一一项。
+
+## 第二个参考树:opencode-mem 进了量具,web 不再隐形(2026-10-15)
+
+上一节那笔账结掉了,方式是加第二棵树而不是加一句说明。
+
+**为什么能跨仓库比。** git 的 blob SHA 是内容寻址的 —— `git hash-object` 哈希
+`blob <字节长度>\0<内容>` —— 所以同一份字节在两个仓库里是同一个 SHA,比对不需要下载任何东西,
+也没有行尾或归一化之争。这是唯一能让第二个参考树不加成本成立的理由。
+
+**踩到并修掉的一个坑:工作区是 CRLF,而 git 里存的是 LF。** 第一版自检拿 `readFileSync` 的原始
+字节去对 `git ls-tree`,结果自己算出 `2385cc97` 而 git 记录的是 `d3d23bad` —— 若不查这一条,
+10 个文件会全部报「有差异」,而那个差异是我造出来的。自检因此保留在工具里,并且改成比对
+**LF 归一化后**的字节,也就是比对真正走的那条路径。
+
+**自检两次都有用。** 它先抓到归一化用错,又在 `repos\opencode-mem` **没有 `.git`** 时逼出一件事:
+那个检出是普通目录副本,不是仓库,所以 `ls-tree` 用不了 —— 于是改为自己算 SHA,顺带省掉每个文件
+两次子进程。「要求有 `.git`」这条会让整个第二棵树**静默跳过**,比报错更坏。
+
+**映射表刻意只收 10 条,而且每条都查过。** 收进去的条件是**文件自己的注释写出了 opencode-mem 的
+路径**:七个写了完整路径(`opencode-mem/src/services/auto-capture.ts` 之类),三个写了反引号里的
+相对路径。剩下 10 个只在注释里点名了项目、没点名文件 —— 「ported from opencode-mem's
+`user_prompts` table」、「ported from the opencode-mem ingestion pipeline」—— 这些一律报
+**DECLARED BUT NOT PINNED**,不猜。猜一个看起来合理的对应关系,报出来的「有差异」或「逐字节相同」
+就是在替一个没人做过的比较背书,而这正是这把尺子存在的理由。
+
+**实测结果:20 个声明,10 个钉住,逐字节相同 0,有差异 10。** 全部有差异是预期的:改过标识符
+(`utf8ByteLength` → `captureUtf8ByteLength`)、改过 import、把一个 22 KB 的 `auto-capture.ts`
+拆成四个文件。**「ported from opencode-mem」不等于「逐字节相同」—— 现在这句话是可量的,
+不再是假设。**
+
+web 那一面(用户特别点名的)在表里:`auth-token.ts` 与 `auth.ts` 钉住了,`config.ts`、`server.ts`、
+`config-file.ts` 列在未钉住里。
+
+## 旧版本遗留:脏在规则里,不在代码里(2026-10-15)
+
+先说结论:**本树自己的代码是干净的。** 146 个源文件(`plugin/src`、`extensions`、`scripts`、
+`bootstrap.ts`、`web/src`,不含 vendored 与 node_modules)逐个扫过:
+
+- 没有任何代码还在 `CREATE TABLE` 已退役的 `units` / `documents` / `units_fts` / `vectors` ——
+  那四张表本轮从活区库里删掉了,代码侧也已经不再创建;
+- 剩下的 `units` / `documents` 引用**全在注释里**,是记录沿革的偏离说明,不是死代码;
+- `TODO` / `FIXME` / `deprecated` 只有 5 处,逐个读过:upstream 的 `originClass` 标 deprecated、
+  故意保留的 `maxResults` 别名、`hasDeprecatedModelFallbackPolicy`(一个真功能)、
+  `dreaming-phases.ts` 那条自认的 oversized file 待办。没有一处是遗留。
+
+**脏的是 `.gitignore` 本身,而其中一条规则在藏源码。**
+
+`.gitignore:16` 的 `memory/` 是**裸模式**,匹配任意深度任何叫 `memory` 的目录。而本树有一个源码目录
+就叫 `memory`:`extensions/memory-core/src/memory/`。后果:那个目录**磁盘 8 个文件、git 只跟踪 7 个**,
+差的是 `manager-cpu-entrypoints.ts` —— 一个**上游确实有的文件**(10-08 同路径已核实),
+因为落在被忽略的目录里而对 `git status` 和所有遍历已跟踪树的工具**完全隐形**。
+
+写这条规则的本意是挡住仓库根的 `memory/`(实测那里躺着 3 个 **0 字节**的日期文件,10-13/14/15),
+一条为了挡运行时产物而写的规则,顺手把一个源码目录也挡了。改成 `/memory/` 只锚定根,并把这件事写进
+注释:裸模式匹配任意深度,这条规则曾经做到什么。
+
+**一处自查纠错。** 第一次 grep 在 `plugin/src/memory-index.ts:596` 命中 `manager-cpu-entrypoints`,
+我当时直接判成「被 import、干净克隆会解析失败」。那行在**注释里**,是在列举该目录的文件。补一次针对
+`from "..."` 的正则,结果是零命中 —— 文件确实无人引用,所以不存在克隆后断链。差一步就报出一个
+不存在的问题,所以记下来。
+
+**那个文件本身不是遗留。** 它指向 `manager-search.worker` / `memory-entry-origins.worker` 等
+worker 入口,而这些 worker 正是本树裁掉准入层时移除的 —— 无人引用是裁剪的**必然结果**,与
+port-plan 已登记的「vendor 了但无人引用」同一类。它该在版本库里(同目录另外 7 个都在),所以补进去了。
+
+**清掉的散落文件**(全部是 10-01 前后一次性探针的产物,`git log` 显示从未提交):
+
+| | |
+|---|---|
+| `diag.txt` `fewshot.txt` `meta.txt` `raw.txt` `t2.txt` `t3.txt` | 6 个,2378 B |
+| `serve-test.log` `serve-test.err` | 2 个,2346 B |
+| `mem-plus-0.2.1.tgz` | 1 个,4.53 MB(已被 0.2.2 取代) |
+| `memory/`(仓库根) | 3 个 **0 字节**文件 + 目录 |
+| `.gitignore` 里逐个列名的 10 个探针脚本 | 从未提交过的文件名的名单 |
+
+同时删掉两条更差的规则:`*.txt` 通配(会盖住任何将来的正当 .txt;该在的
+`payload-files.txt` / `payload-dirs.txt` 本来就有具名条目)与
+`!installer/nsis/payload/.gitkeep`(没有这个文件,一条什么都不做的否定,读起来却像「这个目录进版本库」)。
+另修掉 `.gitignore:7` 一个编码坏字符(`搂` 应为 `§`,随 ANALYSIS.txt 条目一并删除)。

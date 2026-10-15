@@ -1,10 +1,7 @@
-# Local analysis notes (not for commit)
-ANALYSIS.txt
-
 # Local model weights (GGUF, ~3.9 GB; not part of the memory subsystem)
 models/
 
-# Installed dependencies (type-check toolchain only; see ANALYSIS.txt 搂7)
+# Installed dependencies (type-check toolchain only)
 node_modules/
 
 # npm pack build artifacts (regenerable via `npm pack`; never commit)
@@ -13,7 +10,19 @@ node_modules/
 # Plugin runtime artifacts. The plugin writes these into whatever workspace it
 # is loaded into -- including this repository, when testing the plugin here --
 # so they must not be committed.
-memory/
+#
+# ANCHORED TO THE ROOT ON PURPOSE. A bare `memory/` matches a directory of that
+# name at ANY depth, and this tree has a source directory called `memory`:
+# `extensions/memory-core/src/memory/`. Under the bare rule, seven of its eight
+# files were tracked and `manager-cpu-entrypoints.ts` was silently not -- an
+# upstream file that happened to land in an ignored directory, invisible to
+# `git status` and to every tool that walks the tracked tree. Nothing a rule
+# meant to keep memory files out of commits should be able to do that, so the
+# rule says `/memory/` and matches the root only.
+#
+# The workspace bootstrap names below share the intent and are already root-only,
+# being file names rather than directory names.
+/memory/
 MEMORY.md
 DREAMS.md
 # Workspace bootstrap files the plugin reads/injects into the prompt;
@@ -37,18 +46,17 @@ serve-test.log
 serve-test.err
 *.log
 
-# Transient probe scripts written next to the code being probed
-probe-binding.mjs
-diag.mjs
-meta.mjs
-raw.mjs
-fewshot.mjs
-t.mjs
-t2.mjs
-t3.mjs
-m2.mjs
-m3.mjs
-*.txt
+# Transient probe scripts used to be listed one by one here -- probe-binding.mjs,
+# diag.mjs, meta.mjs, raw.mjs, fewshot.mjs, t.mjs, t2.mjs, t3.mjs, m2.mjs, m3.mjs
+# -- ten lines naming files that only ever existed in a working tree and were
+# never committed (`git log --diff-filter=A` for all ten is empty). They are gone,
+# and the list was a worse rule than no rule: it invited the next scratch script
+# to be added by name, one more line, forever. A probe left next to the code now
+# shows up as untracked, which is what untracked means.
+#
+# There is no blanket `*.txt` here either. The two .txt files that legitimately
+# belong to this build are listed by name at the bottom; the only others in the
+# tree were scratch output from one afternoon of probing.
 # local dev notes (never publish)
 TODO.md
 
@@ -63,13 +71,16 @@ VERIFY.md
 # build that touches the payload. Committing it would only ever be a stale copy.
 #
 # payload-files.txt / payload-dirs.txt are its runtime counterparts, same origin and same
-# reason, and they get an explicit entry rather than falling under the blanket `*.txt` above:
-# they are the lists one install writes into $INSTDIR for the next install to read back, so a
-# committed copy would be a stale inventory of someone else's machine, and relying on `*.txt`
-# to cover them means tightening that rule silently starts tracking two 80 KB build artifacts.
+# reason. They are named rather than covered by a blanket extension rule on purpose: they are
+# the lists one install writes into $INSTDIR for the next install to read back, so a committed
+# copy would be a stale inventory of someone else's machine -- and a blanket rule that covers
+# them is one nobody will read before tightening it into a rule that starts tracking two 80 KB
+# build artifacts.
 installer/nsis/dist/
 installer/nsis/payload/*
-!installer/nsis/payload/.gitkeep
+# No `.gitkeep` exception: there is no `.gitkeep`, and `build.ps1` creates the
+# staging directory it needs. A negation for a file that does not exist reads as
+# a decision ("the directory is kept in git") while doing nothing.
 installer/nsis/version.nsh
 installer/nsis/nsis-paths.nsh
 installer/nsis/payload-manifest.nsh
