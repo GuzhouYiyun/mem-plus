@@ -95,10 +95,21 @@ const codePaths = localPaths.filter((p) => /\.(ts|mts|tsx|mjs|js)$/.test(p));
 // --- byte-exact verdicts
 const differs = [];
 const upstreamOnly = [];
+// A local path with NO upstream counterpart at this ref. It must never be counted as
+// byte-identical: there is nothing to compare against, so "identical" would be a claim
+// about a comparison that never ran. Measured on 2026-10-15 with `--scope deep-recall`:
+// `plugin/src/deep-recall.ts` has no upstream path at all, and the summary printed
+// "byte-identical to upstream: 1". Reported as its own category so a reader can see which
+// files were actually compared.
+const localOnly = [];
 for (const p of localPaths) {
-  if (!upstream.has(p)) continue;
+  if (!upstream.has(p)) {
+    localOnly.push(p);
+    continue;
+  }
   if (atHead.get(p) !== upstream.get(p)) differs.push(p);
 }
+const compared = localPaths.length - localOnly.length;
 // Upstream has the path and we do not: a file never vendored. Mostly tests, which this repo
 // deliberately does not ship -- reported, never treated as drift to fix.
 for (const p of upstream.keys()) {
@@ -159,7 +170,11 @@ const lines = [];
 lines.push(`reference: openclaw@${ref.slice(0, 10)}`);
 lines.push(`scope: ${scope.source}`);
 lines.push(
-  `local paths in scope: ${localPaths.length}   byte-identical to upstream: ${localPaths.length - differs.length}   differing: ${differs.length}`,
+  `local paths in scope: ${localPaths.length}   compared against upstream: ${compared}   byte-identical: ${compared - differs.length}   differing: ${differs.length}`,
+);
+lines.push(
+  `NO upstream counterpart (never compared, not counted as identical): ${localOnly.length}` +
+    (localOnly.length ? ` -- ${localOnly.slice(0, 6).join(", ")}${localOnly.length > 6 ? ", ..." : ""}` : ""),
 );
 lines.push(`upstream has, this tree does not (mostly tests, deliberately not vendored): ${upstreamOnly.length}`);
 if (rows.some((r) => r.added === null)) {
