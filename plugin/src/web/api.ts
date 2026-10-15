@@ -313,21 +313,6 @@ export async function handlePromptFiles(workspaceDir: string): Promise<Response>
 }
 
 /**
- * Write one of the injected files.
- *
- * This is the write path, so it is guarded the way the rest of the codebase
- * guards writes:
- *   - **Optimistic concurrency.** The client sends the hash it read; if the file
- *     changed since (dreaming promoted something, the user edited it elsewhere)
- *     the save is refused instead of clobbering it.
- *   - **Atomic replace.** Write a sibling temp file and rename it, so a crash
- *     mid-write cannot truncate `MEMORY.md`.
- *   - **Reindex after write.** The index is derived data; a file it knows about
- *     must be refreshed or search would answer from the old bytes.
- *   - **Name allowlist.** Only the six injected names resolve, so a request can
- *     never name a path.
- */
-/**
  * The models OpenCode can reach, for the config form's model picker.
  *
  * A text box asking for `"providerID/modelID"` means either reading
@@ -488,6 +473,21 @@ export async function reindexMemory(params: {
   }
 }
 
+/**
+ * Write one of the injected files.
+ *
+ * This is the write path, so it is guarded the way the rest of the codebase
+ * guards writes:
+ *   - **Optimistic concurrency.** The client sends the hash it read; if the file
+ *     changed since (dreaming promoted something, the user edited it elsewhere)
+ *     the save is refused instead of clobbering it.
+ *   - **Atomic replace.** Write a sibling temp file and rename it, so a crash
+ *     mid-write cannot truncate `MEMORY.md`.
+ *   - **Reindex after write.** The index is derived data; a file it knows about
+ *     must be refreshed or search would answer from the old bytes.
+ *   - **Name allowlist.** Only the six injected names resolve, so a request can
+ *     never name a path.
+ */
 export async function savePromptFile(params: {
   name: string;
   content: string;
