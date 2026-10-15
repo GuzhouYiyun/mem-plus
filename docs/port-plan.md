@@ -1431,3 +1431,58 @@ schema 少了这一整类信息。上游的 chunk 有 `start_line` / `end_line`,
 **教训与 AGENTS.md 那条一致**:我第一版探针手工构造了一个 `startLine: 5` 的 hit,于是问题被
 整个绕过去还「通过」了。改用真实路径(建索引 → 索引文件 → 检索 → 融合)才撞出来。**夹具造的
 字段永远验不出「那个字段根本没有数据」这类缺陷。**
+
+## 器官核查的四处修正与一次自我纠错(2026-10-15)
+
+按目的逐个器官验 openclaw 的记忆器官,在活区真跑。多数环节此前从未被验证过 —— 138 笔提交
+只过了类型门与静态审计,而类型门覆盖不到 `src/`(vendored 树有 434 个 specifier 解析不到)。
+以下是查出来并修掉的东西,以及量具本身的一次错报。
+
+**一、`memory_reindex` 跳过空的 wiki 语料,删掉的文件永远离开不了索引。**
+`plugin/src/memory-tools.ts:668` 的守卫是 `wikiFiles.length > 0`,而 `reindexFiles` 的收尾是
+`pruneMissing({ present })` —— 那是 wiki 文档离开索引的**唯一**路径。于是「扫不到文件」同时
+跳过了那一档唯一的清理。删光 wiki 目录后跑 reindex:源行数不降、chunk 不降、`pruned` 报 0,
+被删页面照样能被 `memory_search {"corpus":"wiki"}` 搜到。改成 `wiki.enabled` 守卫,空的 wiki
+也走 `reindexFiles({ files: [] })`,那是一个纯 prune。
+
+这不是「与上游功能不同」而是本树丢掉的语义:上游 `manager-db-kernel.ts:146-152` 的重建是
+`DELETE FROM memory_index_sources` + `DELETE FROM memory_index_chunks` 之后整表 INSERT,文件从
+磁盘消失自然就不在库里。那两个文件本树没有(`manager-db-kernel.ts` 与
+`manager-chunk-writer.ts` 上游都有,本树用自己的 `memory-scan.ts` 取代),整表清空就是在这一步
+丢的。记忆语料那一档本来就无条件重建,它的注释写着「pruning has to run against the complete
+set for the root」—— wiki 这档漏了同一条。
+
+**二、本地化超时 3 s 是猜的,实测 38% 静默降级。** 活区日志八个含汉字的轮次:五次成功,
+耗时 1951 / 2047 / 2173 / 2228 / 2267 ms,三次撞上限 3003 / 3003 / 3004 ms。失败不报错:用
+原文 → `hasRecallIntent` 拿到中文 → 上游那组 zh-Hans 正则按实测只匹配 13 句里的 4 句,那一轮
+静默退化成「和 openclaw 一样差」。改成 8 秒。`plugin/src/recall-intent.ts` 无上游对应文件
+(`--scope recall-intent` 报 NO upstream counterpart: 1),所以这是本树自己的参数,不是偏离。
+
+**三、提示词加「不许出现原文里没有的东西」。** 原句只管输出格式,不管内容范围。挡的是模型
+把自己拿到的问题**答了**或反问回来 —— 闸门拿到散文,上游那 14 条英文正则不是为散文写的。
+
+**四、一次自我纠错:我自己加的 CJK 标点收紧是错的,已撤。** 曾把兜底从 `[。？！、]` 扩到
+`[\u3000-\u303F\uFF01-\uFF65]` 并给提示词加了标点映射要求。实测之后才知道上游那 14 条英文
+正则**没有一条锚在句末符号上**,匹配的是 `\bhow\s+did\s+we\s+decide\b` 这种词结构,标点落在
+匹配范围之外:拿只差标点的同一句话逐条撞真闸门,ASCII `?`、全角 `？`、无句末符、`「」`
+包住、全角冒号、全角括号、表意空格**七种全部 RECALL**。FTS 那侧同样把标点当分隔符。所以那次
+收紧零收益,而代价是实的:拒一次就退回中文原文,召回从 13/13 掉到 4/13。兜底改回只测两个真正
+说明「不是英文译文」的信号 —— 还有汉字(中文道歉/解释/抄回原文)、含全角拉丁或数字
+(`ｖｅｃｔｏｒ` 不是 `vector`,进索引必然匹配不上)。破折号与省略号特意不拒,两者是正常英文排版。
+
+**量具的错报(影响结论,已修)。** `scripts/audit-upstream-drift.mjs` 用
+`localPaths.length - differs.length` 报「byte-identical」,而 `differs` 只收录上游该路径存在
+且 blob SHA 不同的文件 —— 于是**上游没有对应路径的本地文件被静默跳过,随后又被算成「相同」**。
+实测 `--scope deep-recall` 对一个上游不存在的文件报「byte-identical to upstream: 1」。
+一个从未发生过的比较被当成了比较结果,而它正被用来支撑「记忆逻辑是 openclaw 的」这条判据。
+修后重算:记忆路径 177 个里**真正参与比较 164 个、逐字节相同 145 个**(原报 158)、有差异 19
+个不变、**新增一类 13 个「上游无对应文件」**(全是 `extensions/memory-core/src/capture/*`)。
+因此同日三处「与上游逐字节相同」的说法当场作废:`memory-index-schema.ts`、
+`memory-index-write.ts`、`memory-scan.ts` 上游均无对应路径。
+
+**核过成立的三处**:memory-schema-fts.ts(中文单 token 的成因)、standing-intents 的两文件、
+dreaming-consolidation 系列。**所以 §11 那两个「本树找不到」的缺陷(#67363 verbatim promotion、
+#45415 20K 截断)是 §11 引了别的版本,不是我们的偏离** —— 它们所在文件与 09-30 逐字节相同。
+
+**未解决的判定**:那 13 个 `capture/*` 文件在上游 09-30(工具取的树)与 10-08(本地检出)都没有
+任何同路径文件,是否**存在换了文件名的等价实现尚未查**。这是判据 1 上目前最大的未知。
