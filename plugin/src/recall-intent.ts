@@ -34,8 +34,29 @@ import { completeThroughHost } from "./llm.js";
 import type { HostedModelRef } from "./model/config.js";
 import type { PluginContext } from "./opencode.js";
 
-/** A short translation is cheap; cap it well below the recall tool loop's budget. */
-const LOCALIZE_TIMEOUT_MS = 3_000;
+/**
+ * A short translation is cheap; cap it well below the recall tool loop's budget.
+ *
+ * Raised from 3 000 ms on 2026-10-15. The original value was a guess, and the measured
+ * distribution says it was wrong: over the eight Han-character turns in the live log, five
+ * succeeded at 1951 / 2047 / 2173 / 2228 / 2267 ms and three hit the ceiling at 3003 /
+ * 3003 / 3004 ms -- a 38% failure rate, with every success bunched just under the limit.
+ * A timeout here does not announce itself: the original text is used, `hasRecallIntent` sees
+ * a Chinese sentence, upstream's own zh-Hans group matches 4 of 13, and the turn silently
+ * recalls as badly as openclaw instead of as well as this module makes it possible.
+ *
+ * 8 s is chosen against the observed latency, not against a round number: the slowest success
+ * was 2.3 s, and the failures are all "exceeded 3 s" with no recorded tail, so this buys
+ * headroom without letting one slow provider stall a turn unboundedly. For scale, a capture
+ * extraction on this machine took 43.8 s -- the host model's latency is not small, and a
+ * translation of one sentence should not be the tightest budget in the chain.
+ *
+ * Not an upstream divergence: `plugin/src/recall-intent.ts` has no upstream counterpart at
+ * any ref (`scripts/audit-upstream-drift.mjs --scope recall-intent` reports
+ * "NO upstream counterpart: 1"), so this constant is this tree's own. The divergence already
+ * registered in `docs/port-plan.md` §5 is the localisation step itself.
+ */
+const LOCALIZE_TIMEOUT_MS = 8_000;
 
 /**
  * Scripts that need no help to reach the English patterns. Anything with Han, Kana or
