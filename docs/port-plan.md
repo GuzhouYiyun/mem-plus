@@ -1779,3 +1779,39 @@ A 类的判据是:本地 blob 等于导入点的 blob,就说明**这个仓库从
   另有 `escalation.ts`、`standing-intents.ts`、`memory-entry-origins.ts`
 - 上游提交里相当一部分是 `deslop` / `refactor` / worker 管道,**不能按条数折算成工作量**;
   按路径分类实测过一次,「可按设计跳过」的比例远低于直觉(22 个里 1 个)
+
+## 逐个读那 16 个:只有一处是真缺口(2026-10-15)
+
+98 条积压不值得整体追,但那 16 个「两边都动了」值得逐个读。判据用**导出面**:上游改了导出签名,
+契约就可能变了;导出没变而差异在函数体里,多半是 worker 管道或 deslop。16 个里 **7 个导出面相同**。
+
+| 类别 | 文件 | 结论 |
+|---|---|---|
+| 导出面相同,差异在函数体 | `escalation.ts`、`access-groups.ts`、`facade-loader.ts`、`memory-core-host-runtime-core.ts`、`plugin-entry.ts`、`embedding-*-limits.ts` ×2 | 见下 |
+| 上游把 host 侧搬进 worker,我们保留 `...InDatabase` 变体 | `memory-forget.ts`(上游 1 个导出/我们 6 个)、`memory-entry-origins.ts`(5/8)、`memory-session-tombstones.ts` | **按设计**,不是缺陷 |
+| 需要 openclaw 专属宿主设施 | `standing-intents.ts` 的 `startStandingIntentMaintenance(agentIds, scheduler: PluginServiceSchedulerV1)` | 性能优化(按需调度维护),OpenCode 没有插件服务调度器,**非正确性** |
+| 纯表达差异,行为与默认值完全一致 | `dreaming.ts` | 我们把 recovery 的 6 个默认值内联成 `export const`,上游写进 `MemoryDeepDreamingRecoveryConfig`;**数值逐个相同**(0.35 / 30 / 20 / 0.9 / 0.97 / 0.97) |
+| 重导出 / facade 变动 | `runtime-core.ts`、`file-access-runtime.ts`、`plugin-state-runtime.ts`、`session-transcript-runtime.ts` | 会话层,本树 2 个导出对上游 29 个;与记忆器官无直接关系 |
+
+**唯一的真缺口:法语召回意图。** `escalation.ts` 上游 HEAD 比我们多一整块(1 段注释 + 3 条正则),
+来自 `244862ed fix(active-memory): detect French recall intent in escalate mode (#171370)`。
+我们此前覆盖中、日、韩、俄、葡五种,葡语已有(`45db564b` 早于导入点)。**抄法**:那 5 KB 正则手抄必然
+出错,改成按行号从落盘的上游文件原样搬运(L66–L80),搬完与上游 HEAD **逐字节相同**(归一化行尾后
+12263 字符对 12263 字符)。
+
+**一次错误,记下来。** 脚本第一版锚在文件里第一个 `];`,那是 `RECALL_INTENT_PATTERNS`(正则数组)
+而不是本地化数组 —— 对象字面量落进正则数组,`pattern.test` 会在运行时抛 TypeError,而这类错误
+**类型门看不见**(那个文件根本不在门的三条路径里)。是靠写完读回文件看结构发现的。改锚点为
+`const LOCALIZED_RECALL_INTENT_PATTERNS` 的声明行,并加了一条「本地化数组短于 40 行就拒绝写入」的
+护栏。**类型门覆盖不到的文件,任何改动都要跑一次真实调用。**
+
+**搬完之后仍然不动的两处上游毛刺。** 用真实 `hasRecallIntent` 跑 11 句召回 + 7 句应安静:召回 10/11,
+安静 6/7。两条不符合的是 `rappelle-moi ce que nous avons discuté` 不召回(`ce\s+qu` 后面跟的是
+否定前瞻,而「que」的下一个字符 `e` 是字母,过不去),与 `je te l'ai déjà dit` 误报(上游注释把它列在
+retrospective 组里,理应被 intent 门挡住)。**把同一组句子指向落盘的上游文件跑,结果逐行相同。**
+所以这是上游正则本来的行为,不是本树的偏离 —— 按规矩不改上游代码,登记即可。
+
+### 这轮改了什么
+
+只有一处代码改动:`extensions/active-memory/escalation.ts` 补上上游的本地化块,之后与上游 HEAD
+逐字节相同。类型门 4240 与基线一致、自有三条路径 0,`audit-npm-pack --check` 报 `no drift`。
