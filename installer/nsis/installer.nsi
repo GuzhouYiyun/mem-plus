@@ -107,7 +107,7 @@ VIAddVersionKey /LANG=2052 "LegalCopyright"  "MIT"
 ; "mem-plus 已安装。" to pair with the uninstaller's "mem-plus 已卸载。"; that was
 ; solving for symmetry nobody asked for, and "口语化严重" was about the welcome
 ; page's opening, not this one.
-!define MUI_FINISHPAGE_TEXT "安装成功。$\r$\n$\r$\n向量模型未随本安装包分发。请另行下载 bge-m3（约 2.2 GB），并放置于：$\r$\n$PROFILE\.config\opencode\mem-plus\models\"
+!define MUI_FINISHPAGE_TEXT "安装成功。$\r$\n$\r$\n向量模型未随本安装包分发。请另行下载 bge-m3（约 1.2 GB），并放置于：$\r$\n$PROFILE\.config\opencode\mem-plus\models\"
 
 ; Not an instruction any more. The installer stops OpenCode itself with
 ; `opencode service stop` before writing and starts it again afterwards, so the
@@ -260,29 +260,81 @@ Function ResolveInstallDir
   ; Getting that asymmetry wrong puts the plugin one level off, and it fails
   ; silently: the install reports success and the plugin is simply never loaded.
   ;
-  ; The cmd pipeline does the parsing rather than the script: `findstr /b` keeps
-  ; only the line whose first characters are "config" (so `OPENCODE_CONFIG` style
-  ; labels elsewhere in the output cannot match), and `tokens=*` drops the leading
-  ; whitespace while keeping the rest of the line intact -- which matters because
-  ; a Windows path can contain spaces ("C:\Users\Jane Doe\...").
-  nsExec::ExecToStack 'cmd /c for /f "tokens=*" %a in (''opencode debug paths ^| findstr /b config'') do @echo %a > "$TEMP\mp-oc-config.txt"'
+  ; `opencode debug paths config` prints ONE path and nothing else. Measured on this
+  ; machine it is exactly `C:\Users\21991\.config\opencode` + CRLF -- 33 bytes, no column
+  ; label, no alignment -- so the only thing to remove is the terminator. Asking the tool
+  ; for the value beats parsing its human-readable table, and the previous version parsed
+  ; the table and was wrong twice over:
+  ;
+  ;   * `for /f "tokens=*" %a in ('opencode debug paths ^| findstr /b config')` emitted the
+  ;     WHOLE line, `config     C:\...`. `tokens=*` drops leading whitespace only, never
+  ;     the label, so the path that got appended was `config     C:\...\plugins\mem-plus`
+  ;     -- no drive letter, not a directory that can exist.
+  ;   * the `^|` is only correct at one parse depth. `for /f ('...')` hands the quoted
+  ;     command to a NESTED `cmd /c`, and whether the outer parse eats the caret depends
+  ;     on how the command line was quoted. Under nsExec it did not: the nested cmd saw a
+  ;     literal `^|`, opencode was handed `^|` and `findstr` as arguments, and the call
+  ;     exited 1 with no output and no file. Measured -- `where opencode > file` through
+  ;     the same nsExec worked, so the fault is the nested parse, not PATH.
+  ;
+  ; And that second failure is what hid the first: no file means FileOpen fails, which
+  ; returns early, which leaves $INSTDIR at the compile-time default. On a machine with
+  ; neither XDG_CONFIG_HOME nor OPENCODE_CONFIG_DIR the default happens to be the right
+  ; answer, so the broken branch looked like a working one for as long as nobody set those
+  ; variables. There is no pipeline here now, so there is no nested parse to get wrong.
+  nsExec::ExecToStack 'cmd /c opencode debug paths config > "$TEMP\mp-oc-config.txt" 2>&1'
   Pop $0
+  Pop $9      ; the path also lands on stdout; the file is what gets read
 
   FileOpen $1 "$TEMP\mp-oc-config.txt" r
   ${If} $1 == ""
-    DetailPrint "未能向 OpenCode 询问配置目录，使用默认路径。"
+    DetailPrint "未能向 OpenCode 询问配置目录，使用默认路径：$INSTDIR"
     Return
   ${EndIf}
-  FileRead $1 $2      ; one line; FileRead strips the newline, no trimming needed
+  FileRead $1 $2
   FileClose $1
+  ; FileRead hands back the line WITH its terminator attached -- the same NSIS 3.13
+  ; behaviour that made the upgrade manifest delete nothing (see RemoveStalePayload).
+  ; `StrCpy v v -1` drops exactly that one character.
+  StrCpy $2 "$2" -1
 
   ${If} $2 == ""
     DetailPrint "OpenCode 未报告配置目录，使用默认路径：$INSTDIR"
     Return
   ${EndIf}
 
+  ; Reject anything that is not a rooted path before it becomes $INSTDIR. This is the
+  ; check the old version lacked and would have caught the label bug on its own: the
+  ; parsed value there started with `config`, not a drive. Falling back is the safe
+  ; outcome, because the default at least exists -- a garbage $INSTDIR installs into a
+  ; directory OpenCode never scans and reports success.
+  ;
+  ; Rooted means `X:\...` (character 2 is a colon) or a UNC `\\server\share` (character 1
+  ; is a backslash). Compared by value rather than by `?:`: LogicLib's `${If}` string
+  ; equality does not treat `?` as a wildcard, so the wildcard form rejected every real
+  ; path and sent valid installs back to the default. That was measured, not reasoned --
+  ; an extracted-verbatim probe resolved `C:\...\Temp\opencode\cfgtest` and then installed
+  ; to `$PROFILE\.config\opencode\plugins\mem-plus` instead.
+  StrCpy $3 "$2" 1 1
+  StrCpy $4 "$2" 1 0
+  StrCpy $5 "\\"
+  ${If} $3 == ":"
+    Goto accept
+  ${EndIf}
+  ${If} $4 == $5
+    Goto accept
+  ${EndIf}
+  DetailPrint "OpenCode 报告的配置目录不是绝对路径，改用默认路径：$INSTDIR"
+  Goto use_default
+
+accept:
   StrCpy $INSTDIR "$2\plugins\mem-plus"
   DetailPrint "OpenCode 配置目录：$2"
+  Goto done
+use_default:
+  StrCpy $INSTDIR "$PROFILE\.config\opencode\plugins\mem-plus"
+done:
+  Delete "$TEMP\mp-oc-config.txt"
 FunctionEnd
 
 ; ------------------------------------------------------------------ sections --
@@ -395,7 +447,7 @@ SectionEnd
 ; turn on vector search; it removes one of two prerequisites. Calling it
 ; "本地向量检索" promised a feature the box does not deliver.
 ;
-; The model is not bundled because it is ~2.2 GB against a 3 MB installer, and
+; The model is not bundled because it is ~1.2 GB against a 3 MB installer, and
 ; most installs never need it -- full-text search is a complete mode, not a
 ; degraded one. See the description below for where to put it.
 ; Always installed. The last optional component was removed on 2026-10-12 at the
@@ -573,7 +625,7 @@ Section "Uninstall"
   ;
   ; That is not hypothetical here. `defaultModelDir()`
   ; (plugin/src/model/config.ts:121) resolves `<plugin root>/models` before falling
-  ; back to the state root, so bge-m3 (~2.2 GB) can legitimately sit inside the
+  ; back to the state root, so bge-m3 (~1.2 GB) can legitimately sit inside the
   ; directory being uninstalled. The payload ships no models/ at all, so anything
   ; named that is the user's, and deleting by name leaves it untouched -- in place,
   ; not moved.
@@ -690,7 +742,7 @@ LangString DESC_SecReload  ${LANG_SIMPCHINESE} \
 ; fourth paragraph. If this ever needs to grow, MUI2's default template has a
 ; full-height description pane on the right (see the layout comment above).
 LangString DESC_SecVectors ${LANG_SIMPCHINESE} \
-  "GPU 运行库。还需要另行下载 bge-m3 模型（约 2.2 GB）才能开启向量检索。"
+  "GPU 运行库。还需要另行下载 bge-m3 模型（约 1.2 GB）才能开启向量检索。"
 
 ; These four strings were shown on the components page, which no longer exists.
 ; Kept as a record of what each section is, because the wiring that displayed them
