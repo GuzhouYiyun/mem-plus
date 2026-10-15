@@ -32,7 +32,7 @@ import { Plugin } from "@opencode/plugin";
 import {
   createMemoryCapture,
   deleteCapturePrompt,
-  listPendingCapturePrompts,
+  listAllPendingCapturePrompts,
 } from "../../extensions/memory-core/src/capture/index.js";
 import { configureMemoryCoreDreamingState } from "../../extensions/memory-core/src/dreaming-state.js";
 import { runDreamingSweepPhases } from "../../extensions/memory-core/src/dreaming-phases.js";
@@ -116,7 +116,7 @@ async function resolveFlushWindow(
   return 0;
 }
 
-/** `listPendingCapturePrompts` filters by attempts; pass a huge ceiling to see them all. */
+/** The listing filters by attempts; pass a huge ceiling to see every pending record. */
 const NO_RETRY_LIMIT = Number.MAX_SAFE_INTEGER;
 
 /**
@@ -124,13 +124,16 @@ const NO_RETRY_LIMIT = Number.MAX_SAFE_INTEGER;
  * forever: a prompt whose session was deleted, or whose assistant reply never
  * arrived, stays `captured = 0` indefinitely and is invisible to the age-blind
  * pending query.
+ *
+ * Namespace-wide, not per-project. The pending query is scoped to one workspace and this
+ * used to inherit that scope through `ctx.location.directory`, which left the ceiling
+ * unreachable for every project the process was not currently in -- precisely the growth
+ * the paragraph above exists to prevent. Its reference prunes by age with no project
+ * filter in it at all, so the scope, not the age rule, was the deviation.
  */
-async function pruneStalePrompts(ctx: PluginContext): Promise<number> {
+async function pruneStalePrompts(): Promise<number> {
   const cutoff = Date.now() - PROMPT_MAX_AGE_MS;
-  const all = await listPendingCapturePrompts({
-    workspaceDir: ctx.location.directory,
-    maxRetries: NO_RETRY_LIMIT,
-  });
+  const all = await listAllPendingCapturePrompts({ maxRetries: NO_RETRY_LIMIT });
   let pruned = 0;
   for (const record of all) {
     if (record.createdAt >= cutoff) continue;
@@ -904,7 +907,7 @@ export default Plugin.define({
     // Drain anything a previous process left behind before its settle timer fired.
     void (async () => {
       try {
-        const pruned = await pruneStalePrompts(ctx);
+        const pruned = await pruneStalePrompts();
         if (pruned > 0) log(`pruned ${pruned} stale prompt(s)`);
         const outcomes = await capture.runSweep();
         if (outcomes.length > 0) log(`startup sweep processed ${outcomes.length} prompt(s)`);

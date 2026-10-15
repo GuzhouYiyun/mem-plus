@@ -8,6 +8,7 @@
 import { randomUUID } from "node:crypto";
 import {
   deleteMemoryCoreWorkspaceEntry,
+  openMemoryCoreStateStore,
   readMemoryCoreWorkspaceEntries,
   writeMemoryCoreWorkspaceEntry,
 } from "../dreaming-state.js";
@@ -19,6 +20,29 @@ export type CapturePromptKey = {
   sessionId: string;
   messageId: string;
 };
+
+/**
+ * The record wrapper the state store writes around every value, restated here.
+ *
+ * `dreaming-state.ts` keeps an identical `WorkspaceValue<T>` private, and it is byte-identical to
+ * the vendored upstream copy, so the shape is restated rather than the vendored file reopened. The
+ * namespace-wide read below is the only reader that has to decode it without going through the
+ * workspace-scoped accessors.
+ */
+type WorkspaceValue<T> = {
+  version: 1;
+  workspaceKey: string;
+  workspaceDir: string;
+  key: string;
+  value: T;
+};
+
+/**
+ * The ceiling this namespace is opened with: `DREAMING_WORKSPACE_STATE_MAX_ENTRIES` restated, for
+ * the reason given above. It bounds how much the store keeps, not how much a read returns -- the
+ * listing pages until the scan is exhausted -- so the prune sees every workspace either way.
+ */
+const CAPTURE_PROMPTS_MAX_ENTRIES = 50_000;
 
 function logicalKey(key: CapturePromptKey): string {
   return `${key.sessionId}:${key.messageId}`;
@@ -109,6 +133,41 @@ export async function listPendingCapturePrompts(params: {
         record.captured === 0 &&
         record.captureAttempts < params.maxRetries &&
         (!params.sessionId || record.sessionId === params.sessionId),
+    )
+    .sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id));
+}
+
+/**
+ * The same records, across every workspace the namespace holds.
+ *
+ * The workspace-scoped query above is the right shape for the sweep -- a capture belongs to the
+ * project it was written in -- and the wrong one for an age prune, which has to reach records whose
+ * project is not the one this process happens to be running in. `pruneStalePrompts` passed
+ * `ctx.location.directory`, so a pending record anywhere else could not be named by it at all: the
+ * 7-day ceiling was unreachable for every other project, which is the growth it exists to bound.
+ * Two of the three keys holding those records were scratch directories left behind by this plugin's
+ * own test runs. Measurements are in `docs/port-plan.md`, 2026-10-15.
+ *
+ * opencode-mem's counterpart is `deleteOldPrompts(cutoffTime)` in `user-prompt-manager.ts`, whose
+ * statement is `DELETE FROM user_prompts WHERE created_at < ?` with no project filter anywhere in
+ * it. The project scope was the divergence, not the age rule. Pending-only stays narrower than the
+ * reference on purpose: a captured record is a completed one, which the caller's docstring does not
+ * put in scope, and a deletion is the direction to differ in.
+ */
+export async function listAllPendingCapturePrompts(params: {
+  maxRetries: number;
+}): Promise<CapturePromptRecord[]> {
+  const store = openMemoryCoreStateStore<WorkspaceValue<CapturePromptRecord>>({
+    namespace: CAPTURE_PROMPTS_NAMESPACE,
+    maxEntries: CAPTURE_PROMPTS_MAX_ENTRIES,
+  });
+  return (await store.entries())
+    .map((entry) => entry.value.value)
+    .filter(
+      (record) =>
+        record.version === 1 &&
+        record.captured === 0 &&
+        record.captureAttempts < params.maxRetries,
     )
     .sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id));
 }

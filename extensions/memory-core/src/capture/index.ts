@@ -56,6 +56,7 @@ export { formatMemoryDreamingDay, isSameMemoryDreamingDay } from "./day.js";
 export {
   claimCapturePrompt,
   deleteCapturePrompt,
+  listAllPendingCapturePrompts,
   listPendingCapturePrompts,
   markCapturePromptCaptured,
   recordCapturePrompt,
