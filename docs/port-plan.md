@@ -1123,6 +1123,47 @@ snippet 为空」单独拆一支;上游 `!targetSnippet` 分支返回的本来�
 加一条语言,不是改上游的行为。保留并登记 —— 它是**功能新增**而不是形态偏离,若要收敛只能是把
 葡语拿掉或推给上游,那是产品决定不是搬运决定。
 
+### 器官核查逮到的一处未登记偏离:`standing_intents` 的 schema 准入(2026-10-15)
+
+按目的逐个器官验 openclaw 的记忆器官时,拿漂移审计按 `standing-intents` 范围跑了一遍
+(`node scripts/audit-upstream-drift.mjs --scope 'standing-intents'`),7 个本地路径里 5 个与
+`6daee6e4bd` 逐字节相同,2 个有差异:
+
+```
++59  -66   src/state/openclaw-agent-standing-intents-schema.ts
++69  -43   extensions/memory-core/src/standing-intents.ts
+```
+
+后者已登记四处。**前者在本文件里一处登记都没有** —— C 类那条只把
+`infra/sqlite-schema-facts` 列为「保留的运行时底座模块」,没有覆盖它被改写这件事,而它落在
+记忆器官路径上。按「每处偏离必须登记在此,不藏在代码注释里」,补上。
+
+**上游的准入逻辑。** `hasCurrentStandingIntentsSchema` 信任一份 `admittedSchemas` WeakMap:
+拿到 facts 对象、与缓存同一个引用就返回 true,否则 `admittedSchemas.delete(db)` 后返回 false;
+提交后由 `rememberCommittedStandingIntentsSchema(db, schemaSql)` 失效缓存,并且引入
+`deferSqlitePostCommitPublication` 与 `collectSqliteSchemaIssues` 这套提交后发布机制。
+也就是说上游**不检查 schema 长什么样**,它信任「这份 facts 是它自己的 SQL 准入过的」。
+
+**本树的改写。** 换成正面结构校验:逐个确认 `standing_intents`、`standing_intents_fts` 与
+四个 FTS 影子表存在、两个索引 `idx_standing_intents_lifecycle` 与 `idx_standing_intents_scope`
+存在、三个触发器 `standing_intents_fts_after_{insert,delete,update}` 存在,再用
+`tableHasColumn(db, STANDING_INTENTS_TABLE, "creator_sender")` 确认那一列在;辅助来自
+`ensureColumn` / `tableHasColumn`,另引入 `runSqliteReadOperationSync`。提交后发布机制整块
+不在树里。
+
+**为什么算血管。** schema 准入属于「宿主运行时」这一层:上游那份 facts 是它**每 agent 共享
+的会话库**的准入凭据,而本树没有那个共享库(记忆索引有自己的库),准入语义无处对齐,只能自己
+判定。这与 C 类保留 `infra/sqlite-*` 的理由是同一条,但多了一层行为差异,所以必须单列。
+
+**行为差异的方向。** 更严,不是更松:老库若缺 `creator_sender`,上游凭缓存会认为「已是当前」
+而不重建,本树会判定不满足并重新应用 schema。不会因此漏读或多读记忆,但与上游不同。
+
+**功能面已核实等价。** §7 那套常量与生命周期对着真库逐条验过,全部对上(创建直接落 `armed`
+而非 `pending`、`expiresAt − createdAt` 实测正好 7,776,000,000 ms、`maxFires` 3、
+`cooldownSeconds` 86400、owner-only 且记录 `creatorSender`、`scope: conversation` 解析为项目
+slug);并且重建索引前后 intent 仍在(state 库不在插件目录里),实测 create → list → cancel 一轮
+正常。**保留并登记。**
+
 ### 收尾时探针逮到的三处:不是回退,是既有状态(2026-10-14)
 
 收尾探针逐个真导入本轮动过的模块,`retry-runtime.ts` / `time-runtime.ts` /
