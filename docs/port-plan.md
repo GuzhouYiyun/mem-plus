@@ -1952,7 +1952,7 @@ prune 都出自家目录那个实例(1 / 2 / 7 / 5 / 16 条),仓库实例跑着 
 
 | 删了什么 | 量 | 判据 |
 |---|---|---|
-| `dist/` 的 0.1.1 / 0.2.0 / 0.2.1 | 3 个 / 9.40 MB | 被 0.2.2 取代;0.2.2 是当前版本、Release 上那一个,留着 |
+| `dist/` 的 0.1.1 / 0.2.0 / 0.2.1 | 3 个 / 9.40 MB | 见下方订正:0.2.0 与 0.2.1 的 exe 在各自 Release 上有资产,0.1.1 的没有 |
 | `installer/nsis/payload/` | 2539 文件 / 18.43 MB | `build.ps1` 每次重建的暂存区 |
 | `payload-files.txt` / `payload-dirs.txt` / `payload-manifest.nsh` | 265 KB | `.gitignore:86-88`;`build.ps1` 自己写;过期模板正是静默升级 bug 的来源 |
 | 死 `short-term-*` store(仓库目录键) | 204 行 | 记录**自带的 `workspaceDir`**,不是猜哈希 |
@@ -1964,3 +1964,17 @@ prune 都出自家目录那个实例(1 / 2 / 7 / 5 / 16 条),仓库实例跑着 
 剥了两层:`{c, v}` 剥掉之后是 `WorkspaceValue`,而**它自己也有 `value` 字段**(内层记录),循环的第一个
 分支便又剥一层,`workspaceDir` 正好在被剥掉的那层上。看一眼原始字节三分钟就能发现,靠推理则会一直
 认为「这批数据没有 workspaceDir」。
+
+### 订正:0.2.2 从来没有发布过
+
+同一轮里我写过一句「0.2.2 是当前版本、Release 上那一个」——**没量就写,是错的**。查完的事实:
+
+| | 实测(2026-10-15,`gh release list` 与 `api.github.com/repos/GuzhouYiyun/mem-plus/releases` 两个来源一致) |
+|---|---|
+| 最新 Release | **v0.2.1**,2026-10-12 13:48Z 发布,标记 Latest |
+| 全部 Release | v0.1.0(tgz)/ v0.1.1(tgz)/ v0.2.0(tgz + exe)/ v0.2.1(tgz + exe) |
+| v0.2.2 | **没有 tag、没有 Release**;只存在于 `package.json`、`version.nsh` 和本地那个 13:41 构建的 exe |
+| 删除的真实代价 | 0.2.0 与 0.2.1 的 exe 在各自 Release 上有资产,**不丢**;0.1.1 的 Release 只挂了 tgz,**那个 exe 是本地唯一一份**,需要时从 tag `v0.1.1` 重建 |
+
+两个后果值得记着:版本号 0.2.2 仍是空的(发 0.2.2 不会与已发布的东西撞名);而**本树没有任何一个
+Release 带这次清理修复** —— 修复要到达用户手里,必须重新构建并发布一次。
