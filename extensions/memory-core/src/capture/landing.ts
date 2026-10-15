@@ -231,21 +231,35 @@ export async function deleteCapturePrompt(record: CapturePromptRecord): Promise<
 /**
  * Claims held longer than the TTL belong to a worker that died mid-capture. Return
  * them to pending so the next sweep retries instead of parking them forever.
+ *
+ * Namespace-wide, like `listAllPendingCapturePrompts` above and for the same reason.
+ * opencode-mem's counterpart is `UPDATE user_prompts SET captured = 0 WHERE captured = 2`
+ * in `initDatabase` (`user-prompt-manager.ts:94`): every startup returns every claim to
+ * pending, with no project filter anywhere in the statement. Scoping this read to the
+ * running workspace made the recovery unreachable rather than merely late, and a record
+ * stuck at `captured = 2` is outside the age prune's pending-only filter too -- so a claim
+ * orphaned in a project that is never reopened was stranded permanently, not for one TTL.
+ * Measurements are in `docs/port-plan.md`, 2026-10-15.
+ *
+ * The TTL itself stays, and is mem-plus's divergence: opencode-mem can reset every claim
+ * at startup because a single process owns its table, while mem-plus runs one instance per
+ * OpenCode project against this same store, so "nothing can be in flight" is not knowable
+ * there. The write-back is unaffected either way -- `writeRecord` keys each record under
+ * its own `workspaceDir`, so a claim is released in place.
  */
 export async function reclaimOrphanedCapturePrompts(params: {
-  workspaceDir: string;
   nowMs?: number;
   ttlMs?: number;
 }): Promise<number> {
   const nowMs = params.nowMs ?? Date.now();
   const ttlMs = params.ttlMs ?? CAPTURE_CLAIM_TTL_MS;
-  const entries = await readMemoryCoreWorkspaceEntries<CapturePromptRecord>({
+  const store = openMemoryCoreStateStore<WorkspaceValue<CapturePromptRecord>>({
     namespace: CAPTURE_PROMPTS_NAMESPACE,
-    workspaceDir: params.workspaceDir,
+    maxEntries: CAPTURE_PROMPTS_MAX_ENTRIES,
   });
+  const records = (await store.entries()).map((entry) => entry.value.value);
   let reclaimed = 0;
-  for (const entry of entries) {
-    const record = entry.value;
+  for (const record of records) {
     if (
       record.version !== 1 ||
       record.captured !== 2 ||

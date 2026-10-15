@@ -186,6 +186,10 @@ async function capturePrompt(params: {
 /**
  * Run one capture sweep: reclaim orphaned claims, then drain pending prompts for
  * `sessionId` (or every session when omitted).
+ *
+ * The reclaim is namespace-wide, because a claim orphaned by a crash has to be reachable
+ * from whichever instance runs next; the drain stays scoped to this workspace, and
+ * therefore to the project the capture belongs to. See `reclaimOrphanedCapturePrompts`.
  */
 export async function performCapture(params: {
   deps: CaptureDependencies;
@@ -201,7 +205,6 @@ export async function performCapture(params: {
     const nowMs = params.nowMs ?? Date.now();
     const maxRetries = params.maxRetries ?? CAPTURE_DEFAULT_MAX_RETRIES;
     await reclaimOrphanedCapturePrompts({
-      workspaceDir: params.deps.workspaceDir,
       nowMs,
       ttlMs: CAPTURE_CLAIM_TTL_MS,
     });

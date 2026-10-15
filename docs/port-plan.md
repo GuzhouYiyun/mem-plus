@@ -1638,20 +1638,28 @@ plugin/src/web/{auth-token,auth,config-file,config,server}.ts
 那个检出是普通目录副本,不是仓库,所以 `ls-tree` 用不了 —— 于是改为自己算 SHA,顺带省掉每个文件
 两次子进程。「要求有 `.git`」这条会让整个第二棵树**静默跳过**,比报错更坏。
 
-**映射表刻意只收 10 条,而且每条都查过。** 收进去的条件是**文件自己的注释写出了 opencode-mem 的
-路径**:七个写了完整路径(`opencode-mem/src/services/auto-capture.ts` 之类),三个写了反引号里的
-相对路径。剩下 10 个只在注释里点名了项目、没点名文件 —— 「ported from opencode-mem's
-`user_prompts` table」、「ported from the opencode-mem ingestion pipeline」—— 这些一律报
-**DECLARED BUT NOT PINNED**,不猜。猜一个看起来合理的对应关系,报出来的「有差异」或「逐字节相同」
-就是在替一个没人做过的比较背书,而这正是这把尺子存在的理由。
+**映射表的准入规则:文件自己点名 opencode-mem 的路径,而且那个路径在对方树里查过命中。** 十条写在
+头部;**2026-10-15 又查出三条写在正文**,证据同一种,只是位置不同 —— `landing.ts` :151(`deleteOldPrompts`)
+与 :236(`initDatabase` 的声明重置)点名 `user-prompt-manager.ts`;`types.ts` 镜像的 `user_prompts` 行在
+那边只出现在一个文件里(实测 40 处命中,且 `interface UserPrompt` 就在其中);`web/server.ts` :9 点名
+`web-server.ts`。上一版只认头部,于是这三条被算进了「未钉住」——**错在规则的位置,不在证据**。
 
-**实测结果:20 个声明,10 个钉住,逐字节相同 0,有差异 10。** 全部有差异是预期的:改过标识符
-(`utf8ByteLength` → `captureUtf8ByteLength`)、改过 import、把一个 22 KB 的 `auto-capture.ts`
-拆成四个文件。**「ported from opencode-mem」不等于「逐字节相同」—— 现在这句话是可量的,
+**七个「引而不抄」单列,不混进比较。** 它们只在注释里点名项目:`capture/index.ts`(本模块的聚合桶,
+部件都在表里)、`render.ts`(它引的 `memories` 行在那边由 `vector-search.ts` 与 `api-handlers.ts` 两个
+文件写,没有单一对方可钉 —— 钉它就是猜)、`standing-intents.ts`(引 `AISessionManager` 作旁证,文件本体
+是 vendored openclaw)、`config-file.ts`(引 `opencode-mem/src/config.ts:8-13, :563-577` 说明设置放在哪,
+不是引它的代码)、`model/config.ts`(引 4747 说明端口选择)、`web/config.ts`(镜像五个 `webServer*` 键名,
+是命名映射不是模块)、`web/config-file.ts`(指向本树的 `config-file.ts`)。报告里显示为
+**NAMED BUT NOT PORTED**:「不是搬运」与「找不到对应文件」是两件不同的事,量具应该说得出区别。
+
+**实测结果(2026-10-15 改后):20 个声明,13 个钉住,逐字节相同 0,有差异 13。** 全部有差异是预期的:
+改过标识符(`utf8ByteLength` → `captureUtf8ByteLength`)、改过 import、把一个 22 KB 的
+`auto-capture.ts` 拆成四个文件。**「ported from opencode-mem」不等于「逐字节相同」—— 现在这句话是可量的,
 不再是假设。**
 
-web 那一面(用户特别点名的)在表里:`auth-token.ts` 与 `auth.ts` 钉住了,`config.ts`、`server.ts`、
-`config-file.ts` 列在未钉住里。
+新钉住的三条把 web 那一面补齐了:18,790 B 的 `web/server.ts` 对 27,095 B 的 `services/web-server.ts`,
+10,687 B 的 `landing.ts` 与 5,182 B 的 `types.ts` 对同一个 13,065 B 的 `user-prompt-manager.ts`。
+这三行以前不在报告里,是因为规则没看正文,不是因为它们没问题。
 
 ## 旧版本遗留:脏在规则里,不在代码里(2026-10-15)
 
@@ -1900,8 +1908,9 @@ DELETE FROM user_prompts WHERE created_at < ?
 - **`linkedMemoryId` 只写不读。** 全树 grep:写入 3 处(`landing.ts` 的 `linkCapturePromptMemory`、
   `flush-run.ts:146` 置 null、`types.ts` 声明),**读取 0 处**;`forget` 路径完全不碰 capture,
   上游 vendored 树里也没有读者。
-- **`reclaimOrphanedCapturePrompts` 是同一形状的邻居,没修。** 它同样按工作区分区、同样够不到别的项目,
-  但盘上 `captured = 2` 的记录是 **0 条**,没有复现 —— 按规矩不登记成缺口。
+- **`reclaimOrphanedCapturePrompts` 是同一形状的邻居。** 它同样按工作区分区、同样够不到别的项目,而当时
+  盘上 `captured = 2` 的记录是 **0 条**,于是按「没复现不登记成缺口」放过了。**2026-10-15 已修** —— 判据
+  换了一个:「有没有一条**永远到不了任何人**的路」,这个是能实测的。见本文末尾那一节。
 - **一份死掉的 `short-term-*` 存储。** `short-term-recall` / `-phase-signals` / `-meta` /
   `dreaming-daily-ingestion` 各有一份键为**仓库目录**的副本,共 204 行,**全部冻结在
   `2026-10-03T02:11:06.579Z` 同一瞬间**(一次性批量写入,`recallCount` 全 0)。当前代码写的是记忆家键
@@ -2045,3 +2054,84 @@ agree」现在才真的成立。无宿主写入器的 `else` 分支保持上游�
 
 安装包那一份**没动**:`installer/nsis/dist/mem-plus-installer-0.2.2.exe` 是本机唯一一份 0.2.2,且
 `installer/nsis` 现在只有它加 4 个源文件(本报早先删掉了 0.1.1 / 0.2.0 / 0.2.1 与 `payload/`)。
+
+## 落地区的 TTL 回收也只看得见一个项目(2026-10-15)
+
+上一节的兄弟:同一病根、同一族读者,但**后果比年龄清理更重 —— 那条记录再也回不来。**
+
+### 判据换了,因为它本来就能实测
+
+上一轮的判据是「盘上 `captured = 2` 的记录是 0 条,所以没复现」。那条判据问的是「现在有没有受害者」,
+而这一处要问的是「**有没有一条永远到不了任何人的路**」。后者可以实测,而且不需要等一个受害者出现:
+
+| 断言 | 怎么量的 | 结果 |
+|---|---|---|
+| 旧读法够不到别的项目 | `readMemoryCoreWorkspaceEntries({ workspaceDir: B })`,即旧 reclaim 循环里那一句 | A 的 2 条记录,**可见 0 条** |
+| 三个角色都够不到它 | 回收按工作区分区;年龄清理的候选集只收 `captured = 0`(`landing.ts:169`);drain 按工作区分区 | `captured = 2` 的记录**不在任何角色的可见集合里** |
+
+所以状态一旦停在 2(进程死在 `claimCapturePrompt` 之后、`releaseCaptureClaim` 之前 —— 崩溃、断电、强杀,
+或 `finally` 里那次 release 自身抛错,它被 `catch {}` 吞掉),在「你不再打开那个项目」的世界里它就是
+**永久垃圾**:不回收、不清理、不捕获。年龄清理修好之后这一点更刺眼 —— 它让别的项目**够得着**了,而这
+一个仍然够不着。
+
+### 参照物:`WHERE captured = 2`,没有项目过滤
+
+opencode-mem 的 `user-prompt-manager.ts:94` 在 `initDatabase()` 里就一句:
+
+```
+UPDATE user_prompts SET captured = 0 WHERE captured = 2
+```
+
+每次启动、无项目过滤、无 TTL —— 与 `deleteOldPrompts` 是同一形状:**项目过滤是我们的偏离,不是回收规则**。
+TTL 本身是本树的正当偏离(opencode-mem 一个进程独占那张表,「启动时不可能有东西在飞」才成立;mem-plus
+每个 OpenCode 项目一个实例、共用一个 store,这件事不可知),保留不动。`constants.ts` 里那条注释原先只写了
+「对方靠 finally 里的行锁释放」,漏了这句启动重置,**已一并订正**。
+
+### 改了什么
+
+`reclaimOrphanedCapturePrompts` 的参数去掉 `workspaceDir`,读法换成命名空间全量(与 `listAllPendingCapturePrompts`
+同一个形状:`openMemoryCoreStateStore(...).entries()`);写回一行没动 —— `writeRecord` 按记录**自带的**
+`workspaceDir` 落键,所以是**就地退回,不是搬家**。`pipeline.ts` 的调用点同步去掉那个参数,`performCapture`
+的头注释写明:**回收是全量的,drain 仍是本工作区的**。
+
+### 验证:两个工作区、一张过期声明单、真 sweep
+
+探针只替身一件事:OpenCode 的宿主存储面(`ctx.storage` 的 `get` / `set` / `remove` / `scan`)。其余全真:
+`kv.ts` 的键布局、`dreaming-state` 的工作区哈希、`landing` 的状态机、`pipeline` 的 sweep 次序。
+
+| 验什么 | 结果 |
+|---|---|
+| 布置:A 里一条过期(10 分钟)、一条新鲜(1 分钟)声明,B 里 0 条记录 | 存储读出 `captured2 / 10 分钟`、`captured2 / 1 分钟` |
+| 旧读法在 B 里看到的 A 的记录 | **0 条** |
+| 在 B 跑真 `performCapture`(`loadTurn` 一被调用就抛) | 返回 0 条结果,`loadTurn` **0 次** —— 回收不是跨项目捕获 |
+| 回收后 | 过期那条 `captured 2 → 0`、`claimedAt → null`;新鲜那条**未动**(`captured 2`,`claimedAt` 同值) |
+| 记录落在谁的切片 | 两条都在 **A 的哈希**下 |
+| drain 的范围 | A 的 pending 里有那条;B 的 pending 里没有 |
+| 计数与幂等 | 过期 1 + 新鲜 1 → 第一次返回 **1**,第二次 **0** |
+| 类型门 | `tsconfig.plugin.json` 4240、`tsconfig.capture.json` 331,与基线逐数字一致,自有三条路径 **0** |
+
+**探针自己先错了一次,值得记:** 第一版拿 `claimCapturePrompt` 的**入参**对象断言,而它返回的是**新**对象,
+于是「TTL 内的声明没被动」报失败。代码是对的,断言是错的 —— 一个失败的绿色检查会让人去改对的代码。
+
+### 顺带:同一族的普查(六个命名空间)
+
+既然病根是「全局命名空间 + 按工作区取键的读取器」,这轮把**活库里所有命名空间的键**摊出来,拿每条记录
+自带的 `workspaceDir` 对照当前代码会写的键:
+
+| 命名空间 | 键 | 行数 | 与当前代码 |
+|---|---|---|---|
+| `capture-prompts` | 6 个**项目目录** | 560 | 一致(`recordCapturePrompt` 的设计就是按项目落键) |
+| `dreaming-daily-ingestion` / `short-term-meta` / `-phase-signals` / `-recall` | **记忆家**各一个 | 3 / 2 / 12 / 59 | 一致(10-03 那批按仓库目录的死副本已删,没有复活) |
+| `workspace-files`(来源登记) | 记忆家哈希 `55cd9152…`(实测还原出原文) | 10 | 一致(`write-provenance` 传 `memoryHome`) |
+
+结论:「键传错了种类」这一族在活库里**是干净的**,今天这一处是它唯一的残留表现。
+
+### 顺带:安装器写进活区的时间戳是 1985-10-26
+
+量的是活区 `~/.config/opencode/plugins/mem-plus` 的自有树:2539 个文件的 mtime 全等于
+`1985-10-26 16:15:00Z`,另外 4 个是 NSIS 自己写的时刻(`2026-10-15 13:41`)。2539 与 `payload/` 的文件数
+一致,所以这是嵌进 exe 的 payload 被解开时的固定时间戳,NSIS 的 `File` 行为,不是我们的脚本。
+
+**登记而不修**:没找到会因此出错的路径(OpenCode 的加载器不看 mtime;本树里唯一按 mtime 判「文件未变」
+的是索引器,对象是记忆家的 markdown,不是这棵树)。它反倒是个有用的指纹:**看到 1985 就说明这棵树来自
+exe 安装,而不是开发镜像** —— 本次就是这么确认用户装的是安装器产物的。不要把它当成版本信号。

@@ -68,24 +68,22 @@ const jsonOut = value("--json", undefined);
 
 // --- second reference tree: opencode-mem
 //
-// Twenty files in this tree name opencode-mem in their header as the project they were ported
-// from. openclaw is a different codebase with a different layout, so none of them has an
-// openclaw counterpart at ANY path: against `--ref` they fall into "NO upstream counterpart",
-// which reads like an omission and is not one. Without this section the memory *write* path is
-// the one part of the tree the drift measure cannot see at all, and five of the twenty are the
-// web surface.
+// Twenty files in this tree name opencode-mem: thirteen as the project they were ported from,
+// seven to cite a decision. openclaw is a different codebase with a different layout, so none of
+// them has an openclaw counterpart at ANY path: against `--ref` they fall into "NO upstream
+// counterpart", which reads like an omission and is not one. Without this section the memory
+// *write* path is the one part of the tree the drift measure cannot see at all, and five of the
+// twenty are the web surface.
 //
 // Blob SHAs are content-only -- `git hash-object` hashes "blob <len>\0<content>" -- so a SHA
 // comparison is valid ACROSS repositories. There is no line-ending or normalisation question to
 // disagree about, which is the only reason this works without vendoring anything.
 //
-// The map is explicit and deliberately partial. An entry is admitted only where the file's own
-// header names the opencode-mem file it came from; several were checked path by path for that.
-// Where a header names the project but not the file -- "ported from opencode-mem's `user_prompts`
-// table", "ported from the opencode-mem ingestion pipeline" -- the file is reported as UNPINNED
-// rather than matched to whatever path looks plausible. A guessed counterpart would be exactly
-// the unmeasured claim this tool exists to refuse, and it would report "differs" or "identical"
-// about a comparison nobody chose.
+// The map is explicit and deliberately partial. An entry is admitted only where the file itself
+// names the opencode-mem file it came from -- the header for most, the body for three -- and each
+// of those names was checked for a unique hit in that checkout before it was pinned. A counterpart
+// matched to "whatever path looks plausible" would be exactly the unmeasured claim this tool
+// exists to refuse, and it would report "differs" or "identical" about a comparison nobody chose.
 const OPENCODE_MEM_MAP = {
   "extensions/memory-core/src/capture/constants.ts": "src/services/auto-capture.ts",
   "extensions/memory-core/src/capture/context-limit.ts": "src/utils/context-limit.ts",
@@ -97,22 +95,41 @@ const OPENCODE_MEM_MAP = {
   "plugin/src/recall-inject.ts": "src/v2/adapter.ts",
   "plugin/src/web/auth-token.ts": "src/services/auth-token.ts",
   "plugin/src/web/auth.ts": "src/services/web-auth.ts",
+  // Named in the body rather than the header -- same evidence, measured 2026-10-15:
+  //   landing.ts names `user-prompt-manager.ts` (:151 as `deleteOldPrompts`, :236 as the claim
+  //     reset in `initDatabase`);
+  //   types.ts mirrors the `user_prompts` row, and `user_prompts` occurs in exactly ONE file
+  //     there (40 hits, `user-prompt-manager.ts`, which also declares `interface UserPrompt`);
+  //   web/server.ts:9 says "Same shape as opencode-mem's `web-server.ts`", and that path exists.
+  "extensions/memory-core/src/capture/landing.ts": "src/services/user-prompt/user-prompt-manager.ts",
+  "extensions/memory-core/src/capture/types.ts": "src/services/user-prompt/user-prompt-manager.ts",
+  "plugin/src/web/server.ts": "src/services/web-server.ts",
 };
 
-// The other ten files that name opencode-mem. Kept as a list so the report can say "declared but
-// not pinned" with the names attached, which is the actionable part: each one is a decision
-// waiting to be made, not a gap to be forgotten.
-const OPENCODE_MEM_UNPINNED = [
+// The remaining seven of the twenty. Each names opencode-mem to cite a decision, and none copies
+// code from it, so a blob comparison has nothing on the other side to compare with. They are
+// printed so the report can tell "not a port" apart from "no counterpart found", which the
+// openclaw section above cannot say. Why each one is here, measured 2026-10-15:
+//   capture/index.ts           -- the barrel for the capture module, assembled here; its parts are
+//                                 pinned in the map above
+//   capture/render.ts          -- cites `memories` as opencode-mem's store, and that row is
+//                                 written from two files there (`vector-search.ts`,
+//                                 `api-handlers.ts`), so no single counterpart exists to name
+//   standing-intents.ts        -- cites `AISessionManager` as an independent parallel; the file
+//                                 itself is vendored openclaw (`resolveOpenClawAgentSqlitePath`)
+//   plugin/src/config-file.ts  -- cites `opencode-mem/src/config.ts:8-13, :563-577` for where the
+//                                 settings live, not for the code in this one
+//   plugin/src/model/config.ts -- cites opencode-mem's 4747 in a comment about port choice
+//   plugin/src/web/config.ts   -- mirrors five `webServer*` key names: a naming map, not a module
+//   plugin/src/web/config-file.ts -- refers to `plugin/src/config-file.ts` for that precedent
+const OPENCODE_MEM_NAMED_NOT_PORTED = [
   "extensions/memory-core/src/capture/index.ts",
-  "extensions/memory-core/src/capture/landing.ts",
   "extensions/memory-core/src/capture/render.ts",
-  "extensions/memory-core/src/capture/types.ts",
   "extensions/memory-core/src/standing-intents.ts",
   "plugin/src/config-file.ts",
   "plugin/src/model/config.ts",
   "plugin/src/web/config-file.ts",
   "plugin/src/web/config.ts",
-  "plugin/src/web/server.ts",
 ];
 
 const opencodeMemDefault = path.join(root, "..", "opencode-mem");
@@ -189,7 +206,7 @@ const om = {
   identical: [],
   differing: [],
   unresolvable: [],
-  unpinned: OPENCODE_MEM_UNPINNED,
+  namedNotPorted: OPENCODE_MEM_NAMED_NOT_PORTED,
   selfCheck: "not run",
 };
 
@@ -317,7 +334,7 @@ lines.push("");
 if (om.enabled) {
   lines.push(`second reference: opencode-mem (${om.dir}) -- blob hashing self-check vs git: ${om.selfCheck}`);
   lines.push(
-    `declared ported from opencode-mem: ${Object.keys(OPENCODE_MEM_MAP).length + om.unpinned.length}` +
+    `declared to name opencode-mem: ${Object.keys(OPENCODE_MEM_MAP).length + om.namedNotPorted.length}` +
       `   pinned to a named file: ${Object.keys(OPENCODE_MEM_MAP).length}` +
       `   byte-identical: ${om.identical.length}   differing: ${om.differing.length}`,
   );
@@ -330,9 +347,9 @@ if (om.enabled) {
     );
   }
   lines.push(
-    `  DECLARED BUT NOT PINNED (header names the project, not the file; deliberately not guessed): ${om.unpinned.length}`,
+    `  NAMED BUT NOT PORTED (cites a decision, copies no code -- nothing to compare): ${om.namedNotPorted.length}`,
   );
-  for (const p of om.unpinned) lines.push(`    ${p}`);
+  for (const p of om.namedNotPorted) lines.push(`    ${p}`);
 } else if (opencodeMemFlag) {
   lines.push(`second reference: opencode-mem -- SKIPPED, no checkout at ${opencodeMemFlag}`);
 } else {
@@ -371,7 +388,7 @@ if (jsonOut) {
           identical: om.identical,
           differing: om.differing,
           unresolvable: om.unresolvable,
-          unpinned: om.unpinned,
+          namedNotPorted: om.namedNotPorted,
         },
       },
       null,

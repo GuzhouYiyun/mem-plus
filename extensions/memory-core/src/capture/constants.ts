@@ -26,8 +26,10 @@ export const CAPTURE_LATEST_MEMORY_CHARS = 500;
 
 /**
  * A claim older than this is treated as orphaned by a crashed worker and returns to
- * pending. opencode-mem relies on a SQL row lock release in `finally`; keyed plugin
- * state has no equivalent, so the claim carries its own expiry instead.
+ * pending. opencode-mem resets `captured = 2` unconditionally at startup
+ * (`user-prompt-manager.ts:94`) because one process owns its table; mem-plus runs one
+ * instance per OpenCode project against this same store, so a claim has to carry its own
+ * expiry instead of waiting for a boundary that does not exist here.
  */
 export const CAPTURE_CLAIM_TTL_MS = 5 * 60_000;
 
