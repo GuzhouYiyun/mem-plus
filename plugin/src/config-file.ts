@@ -71,8 +71,6 @@ const CONFIG_TEMPLATE = `{
     // "auto"（独显优先）/ "discrete"（仅 NVIDIA·Apple 独显）/ "integrated"（vulkan，核显）
     // 旧的 "cuda" / "vulkan" 值按 "discrete" / "integrated" 处理
     "gpu": "auto",
-    "contextSize": 16384,
-    "maxNewTokens": 512,
     "logLevel": "warn"
   },
 

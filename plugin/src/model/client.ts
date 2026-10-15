@@ -258,8 +258,6 @@ export function createServiceClient(
         "--port", String(service.port),
         "--idle-minutes", String(service.idleMinutes),
         "--gpu", models.gpu,
-        "--context-size", String(models.contextSize),
-        "--max-tokens", String(models.maxNewTokens),
         // Embedding only: the content model was removed with local generation, so the
         // service is started for the vector slot and nothing else.
         "--embed", models.embedModelPath,

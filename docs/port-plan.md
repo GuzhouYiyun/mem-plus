@@ -2135,3 +2135,27 @@ TTL 本身是本树的正当偏离(opencode-mem 一个进程独占那张表,「�
 **登记而不修**:没找到会因此出错的路径(OpenCode 的加载器不看 mtime;本树里唯一按 mtime 判「文件未变」
 的是索引器,对象是记忆家的 markdown,不是这棵树)。它反倒是个有用的指纹:**看到 1985 就说明这棵树来自
 exe 安装,而不是开发镜像** —— 本次就是这么确认用户装的是安装器产物的。不要把它当成版本信号。
+
+## 删掉本地生成时代的最后一层壳(2026-10-15)
+
+抽取搬到宿主模型之后推理服务只剩嵌入一件事 —— `client.ts` 里那句 "the content model was
+removed with local generation" 就压在两个内容模型参数上面,却只删到了注释为止。三层壳一起清掉:
+
+| 位置 | 壳 | 为什么是死的 |
+|---|---|---|
+| `server.mjs` 用法注释 | `[--content <gguf>]` | `readArgs` 里从来没有这个 case,全文唯一出现就是这行注释 |
+| `server.mjs` 参数表 | `--context-size` / `--max-tokens` | 解析进 `args` 之后没有任何读取方(嵌入上下文写死 2048) |
+| `server.mjs` 状态与 shutdown | `content` / `grammar` / `completion` 三个状态位,`state.completion?.dispose()` 与**两个空 `try {} catch {}`** | 状态位没有写读点;空 try 块是删代码时没扫干净的壳 |
+| 配置面 | `model.contextSize` / `model.maxNewTokens` | 只剩三处:类型声明、默认值读取、spawn 传参;宿主抽取(`llm.ts`)只传 `prompt` + `model` |
+| 文档面 | README 模型选项表与 `config.jsonc` 模板的两行 | 无效旋钮被当设置项列出;模板只在文件缺失时写一次,不会回改用户已有的文件 |
+
+这不是与 openclaw 的偏离 —— openclaw 没有这个本地服务,这些旋钮从头就是 mem-plus 自己的。**可观察
+行为零变化**:未知参数本来就被 switch 安静跳过,用户配置里这两个键本来就不产生效果。保留未动:
+`--gpu-layers` / `--threads` / `--log-level`(都有读取方)、`LEGACY_GPU` 与 `gpu=cpu` 的降级
+(老配置文件照旧能读)。
+
+**验证**(5 个文件 +2/−25 行)。`node --check` 通过;两门类型门 4240 / 331 与基线逐数字一致,
+自有三条路径 0;`audit-npm-pack --check` = no drift。真服务冒烟走真入口:仓库根
+`spawn node plugin/serve/server.mjs --port 4761 --idle-minutes 1`,**故意把已删的
+`--context-size` / `--max-tokens` 照老插件的传法带上** —— 服务照常启动(`vulkan`),`/health`
+ok,`/embed` 一条中文返回 200、1024 维向量,未知参数被安静跳过;进程退出、端口释放、探针删除。

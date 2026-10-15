@@ -18,7 +18,7 @@
 //   CPU 和内存都被占着。用 --idle-minutes 控制，默认 10 分钟无请求就自己走。
 //
 // 用法（一般由插件自动拉起，无需手动执行）：
-//   node server.mjs [--port 4748] [--idle-minutes 10] [--content <gguf>] [--embed <gguf>]
+//   node server.mjs [--port 4748] [--idle-minutes 10] [--embed <gguf>]
 //   端口被占用时自动顺延，最多尝试 11 个端口。
 
 import { createServer } from "node:http";
@@ -78,7 +78,7 @@ function log(message, detail) {
 // ---------------------------------------------------------------- 配置
 
 function readArgs(argv) {
-  const args = { port: 4748, idleMinutes: 10, gpu: "auto", threads: 0, gpuLayers: "auto", contextSize: 16384, maxTokens: 512, logLevel: "warn" };
+  const args = { port: 4748, idleMinutes: 10, gpu: "auto", threads: 0, gpuLayers: "auto", logLevel: "warn" };
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i];
     const value = argv[i + 1];
@@ -88,8 +88,6 @@ function readArgs(argv) {
       case "--gpu": args.gpu = value; i++; break;
       case "--threads": args.threads = Number(value); i++; break;
       case "--gpu-layers": args.gpuLayers = value === "auto" ? "auto" : Number(value); i++; break;
-      case "--context-size": args.contextSize = Number(value); i++; break;
-      case "--max-tokens": args.maxTokens = Number(value); i++; break;
       case "--log-level": args.logLevel = value; i++; break;
       case "--embed": args.embedPath = path.resolve(value); i++; break;
     }
@@ -129,9 +127,6 @@ const runEmbed = createMutex();
 const state = {
   llama: null,
   backend: "not loaded",
-  content: null,
-  grammar: null,
-  completion: null,
   embed: null,
   lastUsedAt: Date.now(),
 };
@@ -374,15 +369,8 @@ idleTimer.unref();
 async function shutdown(code) {
   clearInterval(idleTimer);
   try {
-    await state.completion?.dispose();
-  } catch {}
-  try {
-    } catch {}
-  try {
     await state.embed?.context.dispose();
   } catch {}
-  try {
-    } catch {}
   try {
     await state.embed?.model.dispose();
   } catch {}

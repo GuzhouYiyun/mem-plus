@@ -92,9 +92,6 @@ export type ModelConfig = {
    * here", which degrades silently.
    */
   readonly embedPathExplicit: boolean;
-  /** KV-cache size for the extraction session. The capture prompt is bounded at 128 KB. */
-  readonly contextSize: number;
-  readonly maxNewTokens: number;
   /** CPU threads for host-side work (inference itself runs on the GPU). */
   readonly threads: number;
   /**
@@ -280,8 +277,6 @@ export function readModelConfig(options: unknown): ModelConfig {
     embedModelPath: readString(nested["embedPath"]) ?? path.join(modelDir, "bge-m3-FP16.gguf"),
     embedEnabled: nested["embed"] !== false,
     embedPathExplicit: readString(nested["embedPath"]) !== undefined,
-    contextSize: readNumber(nested["contextSize"], 16_384, 512, 262_144),
-    maxNewTokens: readNumber(nested["maxNewTokens"], 512, 32, 8_192),
     threads: readNumber(nested["threads"], 0, 0, 128),
     gpuLayers: readGpuLayers(nested["gpuLayers"]),
     logLevel: readLogLevel(nested["logLevel"]),

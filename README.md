@@ -177,8 +177,6 @@ memory_reindex { "embed": true }
 | `model.embed` | `true` | `false` 时只用全文检索 |
 | `model.gpu` | `"auto"` | GPU 后端：`auto` / `discrete` / `integrated` |
 | `model.gpuLayers` | `"auto"` | 分配至显存的层数，`"auto"` 按当前显存计算，也可填 0–999 |
-| `model.contextSize` | `16384` | 抽取上下文窗口 |
-| `model.maxNewTokens` | `512` | 单次抽取的最大 token 数 |
 | `model.threads` | `0` | 宿主侧运算的 CPU 线程数，`0` 为运行时决定 |
 | `model.logLevel` | `"warn"` | 本地推理日志：`silent` / `warn` / `info` / `debug` |
 
