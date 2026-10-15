@@ -1905,9 +1905,14 @@ DELETE FROM user_prompts WHERE created_at < ?
 - **一份死掉的 `short-term-*` 存储。** `short-term-recall` / `-phase-signals` / `-meta` /
   `dreaming-daily-ingestion` 各有一份键为**仓库目录**的副本,共 204 行,**全部冻结在
   `2026-10-03T02:11:06.579Z` 同一瞬间**(一次性批量写入,`recallCount` 全 0)。当前代码写的是记忆家键
-  (45 行,10-11 起),所以那份没人读。inert,但下一个查这事的人会撞上孪生 store。
+  (45 行,10-11 起),所以那份没人读。inert,但下一个查这事的人会撞上孪生 store。**2026-10-15 已删除**
+  —— 见本文末尾那节(kv 845 → 641 行,活 store 与 `capture-prompts` 一行未动)。
 - **`installer/nsis/dist/` 躺着 4 个安装包**(0.1.1 / 0.2.0 / 0.2.1 / 0.2.2),前两个已被取代;
-  `installer/nsis/payload/` 18.43 MB 构建中间产物。两者都在 `.gitignore` 里,可重建。
+  `installer/nsis/payload/` 18.43 MB 构建中间产物。两者都在 `.gitignore` 里,可重建。**2026-10-15 已删**:
+  0.1.1 / 0.2.0 / 0.2.1(留 0.2.2,它是当前版本、Release 上那一个)、`payload/`(2539 文件 / 18.43 MB),
+  以及三个过期清单 `payload-files.txt` / `payload-dirs.txt` / `payload-manifest.nsh` —— 后三个留着才是
+  坑:它们是被嵌进 exe 的升级清单模板(`installer.nsi:401,402,643`),`build.ps1` 自己重建,而过期模板
+  正是 AGENTS.md 记的那个静默升级 bug 的来源。
 - **孤儿文件扫描是干净的。** 107 个自有文件里只有 1 个无人 import(`manager-cpu-entrypoints.ts`),
   且早已登记 —— 上游确有此文件,worker 没搬过来所以悬着。
 
@@ -1916,3 +1921,46 @@ DELETE FROM user_prompts WHERE created_at < ?
 `listAllPendingCapturePrompts` 的第一版注释写着「captured 记录是 `forget` 会走的溯源」。写完去 grep:
 `linkedMemoryId` 没有任何读者,`forget` 也不碰 capture。**断言先于核实,已改** —— 现在那句只陈述「比
 参照物窄,且窄在删除方向上」,不编理由。
+
+## 第二轮:删掉的东西,和 `linkedMemoryId` 查清(2026-10-15)
+
+### 那个 bug 的形状,被日志照得更亮
+
+日志里同时跑着**两个插件实例**:`workspace C:\Users\21991` 与 `workspace repos\mem-plus`。今天所有
+prune 都出自家目录那个实例(1 / 2 / 7 / 5 / 16 条),仓库实例跑着 274 条记录、**一次都没清过** ——
+不是它没东西可清,是它那 274 条里陈旧的正好是 0,而别处的陈旧正在一分钟一分钟地长大。
+
+家目录键里 10-08 那批的年龄读数:11:47Z 越过 5 条 → 12:48Z 越过 16 条 → 13:21Z 又积 9 条。同期
+`e2e` 11 条与 `probe` 5 条已经 **14 天**、从写下起就没动过。合计 25 条陈旧待捕,那种清理只碰得到其中
+9 条。这就是「7 天天花板只对当前项目生效」在真实时间轴上的样子。
+
+### `linkedMemoryId`:不是死字段,是我们没有它的消费者
+
+上一节把它判成「只写不读」时,理由是不完整的。它在 opencode-mem 里**不是连带删除,而是保护名单**:
+`cleanup-service.ts:60-61` 把 `pinnedMemoryIds` 与 `linkedMemoryIds` 并成 `protectedMemoryIds`,删记忆
+的循环里 `continue` 跳过 —— 仍被某条 landed prompt 引用的记忆,即使超过 retention 也留着。顺带一个
+事实:对方返回结构里的 `linkedMemoriesDeleted` 是**写死的 0**、从没累加过,对方自己也有个死字段。
+
+而那一层在本树不存在,也不是漏抄:mem-plus 没有任何按年龄删除记忆的机制(grep 干净)。上游 openclaw
+同样没有 —— 它的 `maxAgeDays` 是**提升候选的年龄门槛**(`cli-index-search.runtime.ts:604`:
+`candidate.ageDays <= thresholds.maxAgeDays`),问的是「够不够格被提升」,不是删除规则。
+
+所以 `linkedMemoryId` 在本树**按构造就是惰性的**:没有年龄删除,就没有东西需要它保护。字段保留不动
+(照抄优先),不修。
+
+### 删掉的东西
+
+| 删了什么 | 量 | 判据 |
+|---|---|---|
+| `dist/` 的 0.1.1 / 0.2.0 / 0.2.1 | 3 个 / 9.40 MB | 被 0.2.2 取代;0.2.2 是当前版本、Release 上那一个,留着 |
+| `installer/nsis/payload/` | 2539 文件 / 18.43 MB | `build.ps1` 每次重建的暂存区 |
+| `payload-files.txt` / `payload-dirs.txt` / `payload-manifest.nsh` | 265 KB | `.gitignore:86-88`;`build.ps1` 自己写;过期模板正是静默升级 bug 的来源 |
+| 死 `short-term-*` store(仓库目录键) | 204 行 | 记录**自带的 `workspaceDir`**,不是猜哈希 |
+
+库那份先取 `VACUUM INTO` 一致快照再删,删完复核:kv 845 → 641 行;活 store 剩 45 / 12 / 2 / 3 行、
+`workspaceDir` 全是记忆家;`capture-prompts` 568 行一行未动;`/api/health` 仍 `status: ok`。
+
+**一处工具上的错,记下来。** 第一版探针报「0 条可删」,而数据明明是 166 + 33 + 2 + 3。原因是解包循环
+剥了两层:`{c, v}` 剥掉之后是 `WorkspaceValue`,而**它自己也有 `value` 字段**(内层记录),循环的第一个
+分支便又剥一层,`workspaceDir` 正好在被剥掉的那层上。看一眼原始字节三分钟就能发现,靠推理则会一直
+认为「这批数据没有 workspaceDir」。
