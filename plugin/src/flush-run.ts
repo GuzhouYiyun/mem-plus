@@ -28,7 +28,9 @@
 //   and then calls `ensureMemoryFlushTargetFile`, so by the time the flush turn
 //   can decide there is nothing to write, `memory/<day>.md` already exists. Same
 //   order here: the flush turn is the expensive, irreversible part, and a target
-//   that cannot be prepared should cost nothing.
+//   that cannot be prepared should cost nothing. The file is the writer's own
+//   `<home>/memory/<project-slug>/<day>.md` -- the memory home, never the project
+//   directory; the reason is at the guard below.
 //
 // A BOUNDED VIEW THAT DOES NOT FIT IS TRUNCATED, NOT REFUSED
 //   This used to refuse, and it made the flush dead: `buildCaptureMarkdownContext`
@@ -50,6 +52,7 @@
 //   and the oldest ones this drops are exactly what per-turn capture already wrote to
 //   the day file after each turn -- the flush is the second line of defence, not the
 //   only one. Refusing saved nothing and cost everything.
+import path from "node:path";
 import {
   buildCaptureMarkdownContext,
   getCaptureMarkdownBudget,
@@ -66,6 +69,7 @@ import type {
 } from "../../extensions/memory-core/src/capture/types.js";
 import { buildFlushPrompt, buildFlushSystemPrompt } from "./flush-config.js";
 import { ensureFlushTargetFile } from "./flush-target.js";
+import { dailyMemoryFile, memoryHomeDir } from "./paths.js";
 import { withWriteProvenance } from "./write-provenance.js";
 
 /** Which layer opened the gate. Both share one idempotency key per day. */
@@ -180,18 +184,32 @@ export async function runFlush(params: {
     return { trigger: params.trigger, kind: "skipped", detail: "no recent turn" };
   }
 
-  // Upstream prepares the target before the turn runs (see the header note). The
-  // returned path is the same one `resolveCaptureWriteTarget` names; asking the
-  // guard for it is what proves the two agree.
+  // Upstream prepares the target before the turn runs (see the header note), and the
+  // file it prepares is the one the writer appends to: `dailyMemoryFile`, the same
+  // function `writeEntry` and `hasEntry` resolve through. Asking the guard for that
+  // path is what proves "prepared" and "written" name one file.
+  //
+  // THE ROOT IS THE MEMORY HOME, NOT `deps.workspaceDir`. Upstream can resolve
+  // `memory/<day>.md` against its workspace because there the workspace *is* the memory
+  // home; here `deps.workspaceDir` is OpenCode's project directory and the home is a
+  // different tree (see `paths.ts`: "the project directory is never written"). Resolving
+  // it against the project created an empty `memory/<day>.md` in the user's project on
+  // every flush and never wrote to it -- measured 2026-10-15, seven flushes in this
+  // repository, one 0-byte `memory/2026-10-15.md` at the repository root. See the entry
+  // in `docs/port-plan.md`.
   const target = resolveCaptureWriteTarget({
     workspaceDir: params.deps.workspaceDir,
     nowMs,
     timezone: params.deps.timezone,
   });
+  const home = memoryHomeDir();
   try {
     await ensureFlushTargetFile({
-      workspaceDir: params.deps.workspaceDir,
-      relativePath: target.relativePath,
+      workspaceDir: home,
+      relativePath: path.relative(
+        home,
+        dailyMemoryFile(params.deps.workspaceDir, nowMs, params.deps.timezone),
+      ),
     });
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
@@ -262,6 +280,11 @@ export async function runFlush(params: {
       // Same provenance the capture path records: the flush is another agent
       // append to the same file, and a human edit in between must downgrade it
       // exactly as it would downgrade a capture.
+      //
+      // This branch is the ported no-host-writer shape: it keeps upstream's
+      // workspace-relative path, which is correct only where the workspace *is* the
+      // memory home. The plugin always supplies `writeEntry`, so nothing reaches it
+      // here -- and it is deliberately not the path the guard prepared above.
       await withWriteProvenance({
         memoryHome: params.deps.workspaceDir,
         absolutePath: target.absolutePath,

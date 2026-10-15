@@ -1978,3 +1978,70 @@ prune 都出自家目录那个实例(1 / 2 / 7 / 5 / 16 条),仓库实例跑着 
 
 两个后果值得记着:版本号 0.2.2 仍是空的(发 0.2.2 不会与已发布的东西撞名);而**本树没有任何一个
 Release 带这次清理修复** —— 修复要到达用户手里,必须重新构建并发布一次。
+
+## flush 把空的 `memory/<日期>.md` 建进用户的项目(2026-10-15)
+
+`plugin/src/paths.ts` 的头注释写着「**The project directory is never written**」,而 flush 的预创建是
+全树唯一违反它的地方。判据不是一个 0 字节文件而已 —— 有机制、有时刻、有数量、有天数。
+
+### 症状与时刻
+
+| 观测 | 值 |
+|---|---|
+| 文件 | `repos\mem-plus\memory\2026-10-15.md`,**0 字节**,mtime `18:26:01` 本地 = `10:26:01Z` |
+| 那一刻日志 | `10:26:09.992Z llm capture extract: ok in 8038ms`(提取耗时 8.0 s,故它始于 `10:26:01.9`),而 `ensureFlushTargetFile` 恰在提取**之前**调用 → 秒级吻合 |
+| 数量 | 日志里 **7 次 flush 全部**落在项目 `mem-plus--83e5df`(本仓库)、全部在 10-15 → 同一天只该有 **1** 个文件,正好 1 个 |
+| 存在了多久 | 本轮早先的清理里,被当「散落文件」删掉的仓库根 `memory/` 中是 **10-13 / 10-14 / 10-15 三个 0 字节文件** —— 所以 **0.2.1(已发布)也在这么做**,不是今天新上线的代码 |
+
+上一节把仓库根那个 `memory/` 归给「10-01 前后的探针产物」,**那条判断是错的**,在这儿订正:它是这个
+bug 的产物,而且比今天那个构建要老。
+
+### 机制
+
+`flush-run.ts` 做对了两件事、做错了一件。它拿 `deps.workspaceDir` 当 workspace root,而那是 **OpenCode
+的项目目录**(`capture-deps.ts:152`),于是 `memory/<day>.md` 被解析到项目下 —— `flush-target.ts` 的三道
+守卫全部通过,因为那个路径确实在项目根之内。而**真正的写入**走 `deps.writeEntry`,落在
+`<home>/memory/<项目 slug>/<day>.md`(`capture-deps.ts:171`,同一个文件也是 `hasEntry` 读的那个)。
+于是:文件被建出来,**没有任何人往里写**。
+
+上游这么写是对的 —— openclaw 里 workspace 就是记忆家,`memory/<day>.md` 相对 workspace 解析恰恰就是
+它要写的那个文件。mem-plus 把记忆家搬到 `~/.config/opencode/mem-plus/workspace` 之后,同一个调用变成
+了往用户项目里建空文件。**这是「记忆家搬家」这个已登记偏离的连带后果,不是上游的 bug。**
+
+### 改法与验证
+
+改:`flush-run.ts` 的预创建改用**写入器自己的那个文件** —— `dailyMemoryFile`,`writeEntry` 与
+`hasEntry` 正是用它 —— root 传 `memoryHomeDir()`。`path.relative(home, …)` 仍是相对路径、仍然出不了
+家,所以守卫的三条检查照旧成立,而它原来那句注释「asking the guard for it is what proves the two
+agree」现在才真的成立。无宿主写入器的 `else` 分支保持上游的 workspace 相对形状(在 mem-plus 里不可达,
+`writeEntry` 恒存在),加注释说明它不是守卫准备的那个路径。
+
+验证走**真 `runFlush`**:真 deps 构建器(`createCaptureDependencies`)、真守卫、真写入器,只把
+`XDG_CONFIG_HOME` 与 `OPENCLAW_STATE_DIR` 指到临时目录,项目目录就是本仓库。
+
+| 验什么 | 结果 |
+|---|---|
+| 修复后跑真 `runFlush` | 项目里**没有** `memory/`;条目落在 `<临时家>/memory/mem-plus--83e5df/2026-10-15.md`,**226 字节**,含 `<!-- openclaw-capture:flush:compaction:… -->` 与 `<!-- project: github.com/GuzhouYiyun/mem-plus -->` |
+| 对照:旧写法(`workspaceDir` = 项目目录) | `<repo>/memory/2026-10-15.md` **0 字节** —— 与被删掉的那个文件同形状,机制复现 |
+| 类型门 | 4240(与基线一致),`plugin/`+`extensions/`+`bootstrap` 三条自有路径 **0** |
+
+探针里 `runFlush` 返回 `failed`(「memory-core dreaming SQLite state store is not configured」)**是探针
+副作用**:它没跑插件的 `setup`,宿主事件库没配置。写入本身已经完成(226 字节在盘上),线上 7 次 flush
+全部 `appended`。
+
+### 顺带:安装包里有条链接指向 404
+
+`installer/nsis/installer.nsi:428` 的 `HelpLink` 写的是 `https://github.com/mem-plus/mem-plus`,而真实
+远端是 `GuzhouYiyun/mem-plus` —— 设置 → 应用 → mem-plus 的「帮助」链接指向一个不存在的仓库。已改。
+注册表里那个键由下次安装重写,本机当前仍是旧值。
+
+### 本轮删掉的
+
+| 删了什么 | 量 | 判据 |
+|---|---|---|
+| `%TEMP%` 里 13 个测试安装目录(`mp-fix` `mp-npm2` `mp-probe-run` `mp-quote*` `mp-real*` `mp-uninst-e2e` `mp-inject-probe` `mp-sqlite-probe` `probe-size-target`) | **1,535.9 MB / 244,629 文件** | 名字与日期(10-10、10-11)全是一次性 `/D=` 测试安装;注册表指向的是真实安装目录,不受影响 |
+| `mem-plus-0.2.2.tgz`(仓库根) | 4.53 MB | `npm pack` 的产物,`build.ps1:36` 每次构建自己删旧的再生成 |
+| 仓库根 `memory/`(那个 0 字节文件) | 0 B | 本 bug 的产物;修复后不会再出现 |
+
+安装包那一份**没动**:`installer/nsis/dist/mem-plus-installer-0.2.2.exe` 是本机唯一一份 0.2.2,且
+`installer/nsis` 现在只有它加 4 个源文件(本报早先删掉了 0.1.1 / 0.2.0 / 0.2.1 与 `payload/`)。

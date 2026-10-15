@@ -425,7 +425,7 @@ SectionIn RO
   WriteRegStr   HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\mem-plus" "DisplayIcon"      "$INSTDIR\Uninstall.exe"
   WriteRegStr   HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\mem-plus" "InstallLocation"  "$INSTDIR"
   WriteRegStr   HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\mem-plus" "UninstallString"  '"$INSTDIR\Uninstall.exe"'
-  WriteRegStr   HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\mem-plus" "HelpLink"         "https://github.com/mem-plus/mem-plus"
+  WriteRegStr   HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\mem-plus" "HelpLink"         "https://github.com/GuzhouYiyun/mem-plus"
   ; NoModify/NoRepair: there is no repair path, and offering one that cannot
   ; work is worse than not offering it.
   WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\mem-plus" "NoModify" 1
