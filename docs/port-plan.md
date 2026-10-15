@@ -1708,3 +1708,74 @@ port-plan 已登记的「vendor 了但无人引用」同一类。它该在版本
 这把尺子第一段注释写的就是这件事:对着一个比导入点更新的检出做 diff,会把「上游的工作」「我们的
 工作」「检出本身的陈旧」三件事混在一起,读不出哪一件是自己的。现在它在一个具体文件上把三件事分开了
 —— 这是它唯一值得存在的理由,值得有一处明文记录它被验证过。
+
+## 把 09-30 到上游 HEAD 的账算清楚(2026-10-15)
+
+尺子就位之后该做的事:树里 vendor 的是 09-30,而上游 HEAD 是 **10-15**(当天)。差距多大、
+哪些是上游改了而我们没跟、哪些是我们自己的偏离,以前没有答案。
+
+**三档参照,同一把尺子。**
+
+| 参照 | 逐字节相同 | 有差异 | 总差异行数 |
+|---|---|---|---|
+| `6daee6e4` 09-30(导入点) | **145** | 19 | — |
+| `d1ebf36c` 10-08(本地检出) | **72** | **92** | +3868 / −3464 |
+| `9b2bc0ed` 10-15(上游 HEAD) | **49** | **114** | +5699 / −5679 |
+
+对 HEAD 的 114 条里,按「本树的 blob 是否等于导入点」分开:
+
+| | 数量 | 含义 |
+|---|---|---|
+| A | **98** | 上游改了,我们的字节还是 09-30 的 —— 纯积压,**全部有真实行数变化,没有一个是空改名** |
+| B | **16** | 两边都动了 —— 唯一可能藏着真问题的一类 |
+| C | **15** | 本树有、路径在新参照里没了 |
+
+A 类的判据是:本地 blob 等于导入点的 blob,就说明**这个仓库从没有人碰过它**,那么它对更新参照的
+任何差异都只能是上游的。这是不需要逐行归因就能下的最强判断。
+
+**上游这 15 天动了记忆路径 193 个提交,其中 `fix` / `feat` 71 条。** 不是笔误,是数出来的。
+
+**一处我自己下结论下早了,实测推翻。** 我先说「积压里有很大一块是本树按设计不取的 worker
+重构」—— 送查积压里改动量最大的 22 个路径,按上游提交说明分类,**只有 1 个**是「历史全是 worker
+重构」。所以**积压不是大部分可以跳过的重构**,是 98 个文件真差异。那个判断在 `memory-forget.ts`
+一个文件上成立(11 次上游改动里 10 次是「把工作搬进 worker」),推广到全体是错的。
+
+**两处逐条查过的。**
+
+- `67f15551 fix(memory): accept numeric strings for standing intent limits` —— 实测**不缺**。用
+  `standing_intent` 工具把 `maxFires` 传成字符串 `"2"`,工具接受,查库 `max_fires = 2`,
+  `typeof number`。转型在我们这一层已经发生。
+- `memory-forget.ts` 上游 10 次 worker 重构 + 1 次 `646c42b4 fix(memory): keep corpus discovery
+  read-only during forget`。**这条也不适用**:本树的 forget 根本没有 corpus 分支
+  (`sessionCorpusFiles` 恒为 0,已登记的裁剪偏离),没有「保持语料发现只读」这回事。
+
+**一处去找而没找到的,不能算缺口。** 上游 `keyword-query.ts` 从 684 B 扩到 8.1 KB,新增
+`tokenizeFtsQuery` / `canonicalTermForms` / `planKeywordSearch` 与
+`type FtsCanonicalTokenizer = "unicode61" | "trigram"`,提交里有
+`find indexed words across Unicode normalization forms (#150968)` 与
+`memory search misses answers to natural-language questions (#161165)`。本树那份只发一个词形,
+所以我按「我们缺这个修复」去找。**探针四个方向全部命中** —— 建 mem-plus 真实的 FTS 表
+(`tokenize = 'unicode61'`),NFC 写入查 NFC、NFC 写入查 NFD、NFD 写入查 NFC、NFD 写入查 NFD,
+本树查询器**四次都命中**。SQLite 的 unicode61 在这个构建里处理了这两种形态。
+
+**所以那条修复不是我能演示出来的缺口。** 可能它针对的是探针够不到的路径(带 `remove_diacritics`
+的分词配置、我们没用的形态),也可能本树的单词形已经够用。**没有复现就不登记成缺口** —— 拿一条
+提交标题去推断一个 bug 的存在,和拿注释里的断言当事实,是同一种错。今天已经犯过一次
+(`memory-index.ts:596`),不犯第二次。
+
+**顺带确认了一件不是 CJK 问题的事。** 我一度以为上面那个修复就是本树已登记的「`TOKENIZE_CLAUSE = ""`
+导致 `unicode61` 把连续汉字当一个 token」。**不是。** 上游那三样是 NFC/NFD 词形、matchAny 的六词
+语言扩展、trigram 短词改走子串;连续汉字当一个 token 那个问题在上游那边不存在,因为上游
+`memory-schema-fts.ts` 本身支持 `trigram`。那个仍是本树独有的选择。
+
+**这轮没有改任何代码。** 它产出一个可以据以决策的数字,和两条不该记成缺口的排除。
+
+### 决策依据(量出来的,不是估的)
+
+- 追 10-08:92 个文件,+3868/−3464 行;追 HEAD:98 个文件,+5699/−5679 行
+- 最大几笔:`session-store-runtime.ts` +303/−316、`dreaming-phases.ts` +386/−224、
+  `memory-schema.ts` +398/−188、`session-transcript-corpus.ts` +347/−160
+- 风险集中在那 **16 个两边都动的文件**,其中 `memory-forget.ts` 差异最大(+537/−475),
+  另有 `escalation.ts`、`standing-intents.ts`、`memory-entry-origins.ts`
+- 上游提交里相当一部分是 `deslop` / `refactor` / worker 管道,**不能按条数折算成工作量**;
+  按路径分类实测过一次,「可按设计跳过」的比例远低于直觉(22 个里 1 个)
