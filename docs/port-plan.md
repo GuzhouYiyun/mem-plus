@@ -1815,3 +1815,104 @@ retrospective 组里,理应被 intent 门挡住)。**把同一组句子指向落
 
 只有一处代码改动:`extensions/active-memory/escalation.ts` 补上上游的本地化块,之后与上游 HEAD
 逐字节相同。类型门 4240 与基线一致、自有三条路径 0,`audit-npm-pack --check` 报 `no drift`。
+
+## 落地区的清理只看得见一个项目(2026-10-15)
+
+一处能复现的真 bug,修了,验证走的是线上记录。
+
+### 症状
+
+`plugin/src/index.ts` 的 `pruneStalePrompts` 是唯一一处给待捕 prompt 收尸的地方,它调
+`listPendingCapturePrompts({ workspaceDir: ctx.location.directory })` —— 落地区的每个读取函数都按
+工作区分区,所以它只看得见**进程当前所在的那一个项目**。而 `capture-prompts` 这个命名空间是全局的:
+六个项目键,每条记录自带 `workspaceDir`。
+
+| 项目键 | 行数 | 记录自带的 `workspaceDir` |
+|---|---|---|
+| `e33e0f9c…` | 273 | `repos\mem-plus` |
+| `813a06bc…` | 240 | `C:\Users\21991` |
+| `5bc7ae08…` | 43 | `…\Temp\opencode\e2e` ← **本插件自己跑测试留下的** |
+| `5cb0439e…` | 16 | `…\Temp\opencode\probe` ← 同上 |
+| `5f1bd4f0…` | 10 | `repos\rea` |
+| `06498b36…` | 6 | `repos\c++` |
+
+按项目键数陈旧(超过 7 天仍未捕)的记录:**21 条,全部落在清理够不到的键里**,当前项目键 0 条。
+(这个数会动:两次测量相隔约一小时,家目录那一项从 5 条变成 4 条 —— 插件的捕获在正常完成,一条陈旧
+记录被真正捕走就从待捕集合里走了。下面探针那次读到的是 20 条,差值全在这里。)
+也就是说 `PROMPT_MAX_AGE_MS` 这条 7 天天花板,对它本该防的那种增长形同不存在 —— 它自己的注释写的是
+「否则命名空间永远增长」,而「增长」在别的项目里。
+
+清理本身一直在正确工作,只是能力所及只有一项:日志里 `pruned 7 stale prompt(s)`(10:46Z)与
+`pruned 5`(11:47Z)。
+
+### 参照物:错的是项目过滤,不是年龄规则
+
+`capture/` 这 12 个文件的来源是 opencode-mem(见上文那节),对应的函数是
+`src/services/user-prompt/user-prompt-manager.ts` 的 `deleteOldPrompts(cutoffTime)`:
+
+```sql
+DELETE FROM user_prompts WHERE created_at < ?
+```
+
+**里面没有任何项目过滤。** 所以偏离是加进去的那层 `workspaceDir`,年龄规则本身没错 —— 照它改,
+而不是自创一个「遍历所有项目」的写法。
+
+### 改了什么
+
+`extensions/memory-core/src/capture/landing.ts` 加一个跨工作区的兄弟读
+`listAllPendingCapturePrompts`(经 `openMemoryCoreStateStore` 直接开命名空间;`kv.ts` 的 `entries()`
+本来就是分页扫尽整个命名空间,而记录自带 `workspaceDir`,所以删除时不需要任何反查),
+`plugin/src/index.ts` 的 `pruneStalePrompts` 改调它,不再接受 `ctx`。
+
+**保持 pending-only,比参照物更窄,这是有意的。** opencode-mem 那条 SQL 连 `captured = 1` 一起删;
+这里只删 `captured = 0`,因为调用方注释给这件事的 scope 是「谁也完不成的落地记录」,而删得更少是安全
+方向。
+
+**两处照抄名字,是为了不动上游文件。** `WorkspaceValue<T>` 与
+`DREAMING_WORKSPACE_STATE_MAX_ENTRIES` 在
+`dreaming-state.ts` 里都是私有的,而那个文件与 09-30 导入点逐字节相同 —— 所以形状与数值在 `landing.ts`
+里重述并注明出处,而不是把上游文件撬开。`maxEntries` 只约束存储保留量、不约束读取,所以清理看得见每个
+工作区。
+
+### 验证:一致快照 + 真适配器 + 真记录
+
+没有造夹具。库用 `VACUUM INTO` 取一致快照(`Copy-Item` 在 WAL 下拷出的是撕裂镜像),`ctx.storage` 的
+四个方法由探针提供(OpenCode 持有那个对象,会话外拿不到),其余全是真的:`kv.ts` 的
+`createStorageOpenKeyedStore`、真实键布局与 `{c,v}` 包装、`landing.ts` 的函数、以及**线上那 583 条
+真实记录**。
+
+| | 待捕 | 超过 7 天 |
+|---|---|---|
+| 旧触达(当前项目) | 136 | **0** |
+| 新触达(全部项目) | 376 | **20** |
+
+陈旧那 20 条 = `e2e` 11 + `probe` 5 + `C:\Users\21991` 4,**其中 16 条是本插件自己跑测试留下的目录**。
+接着原样跑 `pruneStalePrompts` 的循环:删 20 条,命名空间 583 → 563,重扫 0 条陈旧,待捕 376 → 356,
+被删记录里仍在的 0 条。
+
+**探针第一次跑是失败的,原因值得记。** bun 按路径字符串缓存模块,探针里的字面量
+`C:/Users/.../dreaming-state.js` 与仓库内部解析出的 `C:\Users\...\dreaming-state.ts` 不归一,于是
+`configureMemoryCoreDreamingState` 配的是 A 实例、`landing.ts` 用的是 B 实例,报「状态存储未配置」。
+把探针放进仓库根、改用相对说明符即一致。**类型门看不见这种错,只有真调用看得见。**
+
+### 同一轮扫到的旧东西(未修,登记)
+
+- **`linkedMemoryId` 只写不读。** 全树 grep:写入 3 处(`landing.ts` 的 `linkCapturePromptMemory`、
+  `flush-run.ts:146` 置 null、`types.ts` 声明),**读取 0 处**;`forget` 路径完全不碰 capture,
+  上游 vendored 树里也没有读者。
+- **`reclaimOrphanedCapturePrompts` 是同一形状的邻居,没修。** 它同样按工作区分区、同样够不到别的项目,
+  但盘上 `captured = 2` 的记录是 **0 条**,没有复现 —— 按规矩不登记成缺口。
+- **一份死掉的 `short-term-*` 存储。** `short-term-recall` / `-phase-signals` / `-meta` /
+  `dreaming-daily-ingestion` 各有一份键为**仓库目录**的副本,共 204 行,**全部冻结在
+  `2026-10-03T02:11:06.579Z` 同一瞬间**(一次性批量写入,`recallCount` 全 0)。当前代码写的是记忆家键
+  (45 行,10-11 起),所以那份没人读。inert,但下一个查这事的人会撞上孪生 store。
+- **`installer/nsis/dist/` 躺着 4 个安装包**(0.1.1 / 0.2.0 / 0.2.1 / 0.2.2),前两个已被取代;
+  `installer/nsis/payload/` 18.43 MB 构建中间产物。两者都在 `.gitignore` 里,可重建。
+- **孤儿文件扫描是干净的。** 107 个自有文件里只有 1 个无人 import(`manager-cpu-entrypoints.ts`),
+  且早已登记 —— 上游确有此文件,worker 没搬过来所以悬着。
+
+### 一次自我纠错
+
+`listAllPendingCapturePrompts` 的第一版注释写着「captured 记录是 `forget` 会走的溯源」。写完去 grep:
+`linkedMemoryId` 没有任何读者,`forget` 也不碰 capture。**断言先于核实,已改** —— 现在那句只陈述「比
+参照物窄,且窄在删除方向上」,不编理由。
