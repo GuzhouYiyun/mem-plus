@@ -1569,3 +1569,54 @@ uses schema version 0; run openclaw doctor --fix to migrate persisted media befo
 
 **八、类型门。** 总错误 4240(与基线一致),`plugin/` + `extensions/` + `bootstrap` 三条自有路径 0,
 改动文件 0 错。
+
+## 判据 1 上那个最大的未知:`capture/` 的来源不是 openclaw,是 opencode-mem(2026-10-15)
+
+上一节留下的判定是「13 个 `capture/*` 文件在上游 09-30 与 10-08 都没有同路径文件,是否**存在换了
+文件名的等价实现尚未查**」。查完了,**答案是:它们本来就不该是 openclaw 的代码。**
+
+那 12 个文件的头注释自己写着来源:
+
+| 文件 | 头注释 |
+|---|---|
+| `constants.ts` / `index.ts` / `pipeline.ts` / `types.ts` | ported from **opencode-mem** |
+| `context.ts` | ported from **opencode-mem**'s |
+| `extract.ts` | ported from **opencode-mem**'s `generateSummary` |
+| `landing.ts` | ported from **opencode-mem**'s `user_prompts` table |
+| `language.ts` | ported from **opencode-mem**/src/services/language-detector.ts |
+
+只有两个是真 openclaw 的:`day.ts`("vendored from openclaw's",即 `formatMemoryDreamingDay`)与
+`write.ts`("persisting a capture into **openclaw's** storage")。
+
+本机有 `C:\Users\21991\repos\opencode-mem`,所以不止读了注释,还对了字节 —— **没有一个逐字节相同**:
+
+| 本树 | opencode-mem | 本树 | 对方 |
+|---|---|---|---|
+| `capture/context-limit.ts` | `src/utils/context-limit.ts` | 1905 B | 1729 B |
+| `capture/language.ts` | `src/services/language-detector.ts` | 3128 B | 1033 B |
+| `capture/landing.ts` | `src/services/user-prompt/user-prompt-manager.ts` | 6839 B | 13065 B |
+| `capture/extract.ts` `pipeline.ts` `index.ts` | `src/services/auto-capture.ts`(一个 22 KB 文件被拆成多个) | 7619 / 7220 / 4982 B | 22082 B |
+
+差在 import 改写、文件拆分,以及 `context-limit.ts` 里三个函数加了前缀
+(`utf8ByteLength` → `captureUtf8ByteLength`,另两个同例)。逻辑是逐字搬的,**「verbatim」指逻辑
+不指字节** —— 说得通,但这是这棵树里**第三句经不起字节检查的注释**(前两句:`standing-intents.ts`
+自称在自家 state root、`context-limit.ts` 自称 verbatim)。
+
+**真正的缺口是登记,不是实现。** 全树有 **20 个文件**在注释里声明来源是 opencode-mem,而
+`docs/port-plan.md` 里 **0 处**提到它:
+
+```
+extensions/memory-core/src/capture/{constants,context-limit,context,extract,index,
+                                   landing,language,pipeline,render,types}.ts
+extensions/memory-core/src/standing-intents.ts
+plugin/src/{config-file,event-compat,recall-inject}.ts
+plugin/src/model/config.ts
+plugin/src/web/{auth-token,auth,config-file,config,server}.ts
+```
+
+后果很具体:漂移量具只对 openclaw 取参考树,所以这 20 个文件对「逐字节相同」这条判据**完全隐形** ——
+它们既不会被算成相同,也不会出现在「上游无对应」那一栏(那一栏是拿 openclaw 找的)。而其中
+`recall-inject.ts` 与 `web/*` 在**每一轮对话的注入路径**上。
+
+**欠的账。** `scripts/audit-upstream-drift.mjs` 需要第二个参考树(`--ref opencode-mem`),否则「记忆
+逻辑是抄来的」这句话对写入路径的这 20 个文件无法验证。这是判据 1 剩下的唯一一项。
