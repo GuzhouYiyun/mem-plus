@@ -103,6 +103,42 @@ export function configHome(): string {
 }
 
 /**
+ * Point openclaw's vendored state layer at mem-plus's own state root.
+ *
+ * The vendored code resolves its state directory from `OPENCLAW_STATE_DIR`
+ * (`src/config/state-dir.ts`) and otherwise falls back to `~/.openclaw` --
+ * openclaw's home, not ours. Three things live there and all three are
+ * mem-plus's: the agent database (standing intents, and the lineage table
+ * `forget` selects through), the global state database (`plugin_state_entries`,
+ * where the memory host's event log and its cursors land), and `locks/`.
+ *
+ * Unset, a plugin distributed as mem-plus writes megabytes into another
+ * product's home directory, uninstalling takes none of it with it, and
+ * installing real openclaw later lands on the same databases. Measured on this
+ * machine with openclaw not installed and no openclaw process running:
+ * 1.62 MB across five files, including a 105-table state database at
+ * `user_version=19` that mem-plus itself had migrated.
+ *
+ * This also makes a comment in `standing-intents.ts` true, which had claimed
+ * the connection was opened "inside mem-plus's own state root" while the
+ * resolver was handing it openclaw's.
+ *
+ * Upstream's own override wins: a caller who sets `OPENCLAW_STATE_DIR` before
+ * loading the plugin gets what they asked for. Setting it once here is enough
+ * because every resolver reads `process.env` at call time and memoises on the
+ * *resolved* root -- `resolveOpenClawAgentSqlitePath` keys its cache by
+ * `${agentId}:${stateDir}`, so a changed root selects a different entry rather
+ * than a stale one. No module resolves a path at import time (checked: no
+ * top-level `resolveStateDir` / `resolveOpenClawAgentSqlitePath` binding in
+ * `src/`, `extensions/` or `plugin/`), so calling this first in `setup` is
+ * early enough.
+ */
+export function adoptOpenclawStateDir(): void {
+  if (process.env["OPENCLAW_STATE_DIR"]?.trim()) return;
+  process.env["OPENCLAW_STATE_DIR"] = stateRoot();
+}
+
+/**
  * OpenCode's plugin API exposes no logger -- `Context` has no `log`, and
  * `console.log` from a plugin reaches neither `--print-logs` nor
  * `~/.local/share/opencode/log/opencode.log`. Without a file of its own,

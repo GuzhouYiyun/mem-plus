@@ -1,5 +1,6 @@
+import { mkdirSync } from "node:fs";
 import path from "node:path";
-import type { DatabaseSync } from "node:sqlite";
+import { DatabaseSync } from "node:sqlite";
 import {
   ensureMemoryEntryOriginsSchema,
   readMemoryEntryOriginsInDatabase,
@@ -9,11 +10,11 @@ import {
 import {
   executeSqliteQuerySync,
   getNodeSqliteKysely,
-  openOpenClawAgentDatabase,
+  resolveOpenClawAgentSqlitePath,
   runSqliteImmediateTransactionSync,
   tableExists,
-  withOpenClawAgentDatabaseReadOnly,
 } from "openclaw/plugin-sdk/sqlite-runtime";
+import { resolveStateDir } from "openclaw/plugin-sdk/state-paths";
 import { DREAMS_FILENAMES, readDreamsFile } from "./dreaming-dreams-file.js";
 import {
   ensureMemorySessionTombstones,
@@ -89,8 +90,46 @@ function ensureMemoryIndexStateSchema(db: DatabaseSync): void {
   db.prepare("INSERT INTO memory_index_state (id, revision) VALUES (?, ?)").run(1, 0);
 }
 
+// MEM-PLUS DEVIATION (database open). The reasoning is the same one already recorded in
+// `standing-intents.ts:38-49`: upstream's agent-database open is not available in this tree
+// -- the admission owner and the worker thread were removed from the port -- so the
+// connection is taken directly on the *same* path upstream resolves.
+//
+// What is additionally gone is the version gate those openers run.
+// `assertCanonicalAgentPersistenceVersion` (`src/state/openclaw-agent-db-schema-read.ts:34`)
+// refuses to read an agent database whose `user_version` predates openclaw's, and points at
+// `openclaw doctor --fix` to repair it.
+//
+// That refusal is right for openclaw and wrong here, for two measured reasons.
+//
+// 1. What the gate protects does not exist. It exists because the agent database holds
+//    sessions, transcripts and identity: reading one written by an older openclaw could hand
+//    back rows the current code misinterprets. This database is created by
+//    `ensureMemoryEntryOriginsSchema` below and by `standing-intents.ts`, and holds memory
+//    lineage and standing intents. There is no session row in it to misinterpret.
+// 2. The migration it asks for is not something a mem-plus user can perform. `openclaw` is
+//    not installed and has no `doctor --fix`; running the real migration would materialise
+//    openclaw's entire agent schema here to satisfy a version check over tables mem-plus
+//    never reads.
+//
+// Measured, not assumed: with the gate in place `/api/forget` returned HTTP 500 and
+// "uses schema version 0; run openclaw doctor --fix" for *every* input, so the browser's
+// only deletion surface was dead on arrival. Registered in `docs/port-plan.md`.
+
+const memoryOriginDatabases = new Map<string, DatabaseSync>();
+
 function openMemoryOriginDatabase(agentId: string): DatabaseSync {
-  const db = openOpenClawAgentDatabase({ agentId }).db;
+  // Upstream's opener returns a process-held handle and this mirrors that shape, which is
+  // also what keeps `ensuredDatabases` meaningful: ensure once per connection.
+  const held = memoryOriginDatabases.get(agentId);
+  if (held) return held;
+  const env = { ...process.env, OPENCLAW_STATE_DIR: resolveStateDir() };
+  const pathname = resolveOpenClawAgentSqlitePath({ agentId, env });
+  mkdirSync(path.dirname(pathname), { recursive: true });
+  const db = new DatabaseSync(pathname);
+  // Upstream's worker holds a WAL connection; a single in-process writer wants the same.
+  db.exec("PRAGMA journal_mode = WAL");
+  db.exec("PRAGMA busy_timeout = 5000");
   if (!ensuredDatabases.has(db)) {
     ensureMemoryEntryOriginsSchema(db);
     // Same wrapper as the origins schema, so it runs inside the same WeakSet guard:
@@ -98,7 +137,21 @@ function openMemoryOriginDatabase(agentId: string): DatabaseSync {
     ensureMemoryIndexStateSchema(db);
     ensuredDatabases.add(db);
   }
+  memoryOriginDatabases.set(agentId, db);
   return db;
+}
+
+/**
+ * Upstream's `withOpenClawAgentDatabaseReadOnly` minus the version gate. Upstream borrows
+ * the process-held handle when it is outside a transaction and opens a scoped connection
+ * otherwise; the held handle is what this borrows, and it is the same one the write path
+ * uses, so the schema guard above has already run on it.
+ */
+function withMemoryOriginDatabaseReadOnly<T>(
+  operation: (db: DatabaseSync) => T,
+  agentId: string,
+): T {
+  return operation(openMemoryOriginDatabase(agentId));
 }
 
 export function listMemoryEntryOrigins(params: {
@@ -109,13 +162,12 @@ export function listMemoryEntryOrigins(params: {
   if (params.sessionIds?.length === 0 || params.entryKeys?.length === 0) {
     return [];
   }
-  const result = withOpenClawAgentDatabaseReadOnly(({ db }) => {
-    if (!ensuredDatabases.has(db) && !tableExists(db, "memory_entry_origins")) {
+  return withMemoryOriginDatabaseReadOnly((db) => {
+    if (!tableExists(db, "memory_entry_origins")) {
       return [];
     }
     return readMemoryEntryOriginsInDatabase(db, params);
-  }, params);
-  return result.found ? result.value : [];
+  }, params.agentId);
 }
 
 export function listMemorySessionTombstones(params: {
@@ -125,7 +177,7 @@ export function listMemorySessionTombstones(params: {
   if (params.sessionIds?.length === 0) {
     return [];
   }
-  const result = withOpenClawAgentDatabaseReadOnly(({ db }) => {
+  return withMemoryOriginDatabaseReadOnly((db) => {
     if (!memorySessionTombstonesExist(db)) {
       return [];
     }
@@ -143,8 +195,7 @@ export function listMemorySessionTombstones(params: {
       reason: row.reason,
       createdAt: row.created_at,
     }));
-  }, params);
-  return result.found ? result.value : [];
+  }, params.agentId);
 }
 
 /** Record on the supplied connection; the caller retains write admission. */
@@ -249,8 +300,8 @@ function deleteMemoryEntryOrigins(params: {
   if (params.entryKeys.length === 0 || params.sessionIds?.length === 0) {
     return 0;
   }
-  const existing = withOpenClawAgentDatabaseReadOnly(({ db }) => {
-    if (!ensuredDatabases.has(db) && !tableExists(db, "memory_entry_origins")) {
+  const existing = withMemoryOriginDatabaseReadOnly((db) => {
+    if (!tableExists(db, "memory_entry_origins")) {
       return false;
     }
     let query = getNodeSqliteKysely<MemoryOriginDatabase>(db)
@@ -262,8 +313,8 @@ function deleteMemoryEntryOrigins(params: {
       query = query.where("session_id", "in", params.sessionIds);
     }
     return executeSqliteQuerySync(db, query.limit(1)).rows.length > 0;
-  }, params);
-  if (!existing.found || !existing.value) {
+  }, params.agentId);
+  if (!existing) {
     return 0;
   }
   return deleteMemoryEntryOriginsInDatabase(openMemoryOriginDatabase(params.agentId), params);
@@ -372,9 +423,33 @@ export async function pruneMemoryEntryOrigins(params: {
   for (const agentId of new Set(params.agentIds)) {
     // A sibling may still index an older shared MEMORY snapshot. Retain its
     // lineage until that agent can identify and purge those derived records.
-    const indexed = withOpenClawAgentDatabaseReadOnly(
-      ({ db }) =>
-        new Set(
+    const indexed = withMemoryOriginDatabaseReadOnly(
+      (db) => {
+        // MEM-PLUS DEVIATION: upstream reads promoted memory out of the agent
+        // database's `memory_index_chunks`, because in openclaw the index lives
+        // beside the lineage it belongs to. In mem-plus it does not: the index is
+        // a separate projection in `index.db` (`plugin/src/memory-index.ts`), and
+        // this connection is the agent database, which holds no such table --
+        // measured, not inferred: the query raises `no such table:
+        // memory_index_chunks` against it.
+        //
+        // The check is skipped rather than answered from `index.db`, and that is
+        // not a shortcut around the safety it provides. Upstream retains lineage
+        // for "an older shared MEMORY snapshot" a sibling agent might still have
+        // indexed. mem-plus never indexes `MEMORY.md` at all -- measured: 0 rows
+        // in `index.db` match `MEMORY.md`, and the only rows matching the
+        // promotion marker are this repository's own indexed session transcripts,
+        // which contain the marker because debugging this code prints it. There is
+        // no shared MEMORY snapshot holding a stale reference, so the retention set
+        // is empty for the same reason it is unverifiable.
+        //
+        // Reaching the real answer would mean handing memory-core a handle on the
+        // plugin's index, which inverts the layering this tree is built on: the
+        // index is a projection of the markdown, and nothing upstream of it reads
+        // from it. If a future port ever indexes `MEMORY.md`, this guard is the
+        // line that has to change with it.
+        if (!tableExists(db, "memory_index_chunks")) return new Set<string>();
+        return new Set(
           executeSqliteQuerySync(
             db,
             getNodeSqliteKysely<MemoryOriginDatabase>(db)
@@ -383,14 +458,13 @@ export async function pruneMemoryEntryOrigins(params: {
               .where("source", "=", "memory")
               .where("text", "like", "%openclaw-memory-promotion:%"),
           ).rows.flatMap(({ text }) => extractPromotionKeys(text)),
-        ),
-      { agentId },
+        );
+      },
+      agentId,
     );
     deleteMemoryEntryOrigins({
       agentId,
-      entryKeys: entryKeys.filter(
-        (key) => !diaryKeys.has(key) && !(indexed.found && indexed.value.has(key)),
-      ),
+      entryKeys: entryKeys.filter((key) => !diaryKeys.has(key) && !indexed.has(key)),
     });
   }
 }

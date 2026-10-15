@@ -59,7 +59,7 @@ import { installMemoryInjection } from "./recall-inject.js";
 import { recallToolsFor, readDeepRecallConfig } from "./deep-recall.js";
 import { runPromotionRound } from "./promotion.js";
 import { resolveOptions } from "./config-file.js";
-import { dreamingMarker, homeProjectMemoryDir, homeProjectSlug, logFile, memoryHomeDir, stateRoot } from "./paths.js";
+import { adoptOpenclawStateDir, dreamingMarker, homeProjectMemoryDir, homeProjectSlug, logFile, memoryHomeDir, stateRoot } from "./paths.js";
 import {
   activeProjectKeys,
   clearActiveProjectKeys,
@@ -143,6 +143,11 @@ async function pruneStalePrompts(ctx: PluginContext): Promise<number> {
 export default Plugin.define({
   id: "mem-plus",
   async setup(ctx) {
+    // First thing, before anything reads a path: the vendored openclaw code resolves its
+    // state directory from `OPENCLAW_STATE_DIR` and otherwise lands in `~/.openclaw`.
+    // Everything it owns -- the agent database, the global state database, `locks/` -- is
+    // mem-plus's, so it has to resolve into the state root above. See `adoptOpenclawStateDir`.
+    adoptOpenclawStateDir();
     const log = createLogger("[mem-plus]");
     const workspaceDir = ctx.location.directory;
     // Lane-one injection (trigger recall + project memory), once the index exists.

@@ -87,9 +87,12 @@ async function executeStandingIntent<Key extends keyof StandingIntentOperations>
   // Why that is sound rather than a shortcut: the admission machinery exists to arbitrate
   // a database that several runtimes open. This one is opened by exactly one writer -- the
   // plugin process -- inside mem-plus's own state root, so there is no lease to take and no
-  // host database to share. opencode-mem reaches the same conclusion on this same host: its
-  // `AISessionManager` opens `ai-sessions.db` in its own data directory with no admission
-  // layer and no worker.
+  // host database to share. The state-root clause used to be false: nothing set
+  // `OPENCLAW_STATE_DIR`, so this connection opened openclaw's home instead, and that is
+  // where the whole tree ended up. `adoptOpenclawStateDir` (`plugin/src/paths.ts`) is what
+  // makes it true, and it has to keep running before anything resolves a path.
+  // opencode-mem reaches the same conclusion on this same host: its `AISessionManager`
+  // opens `ai-sessions.db` in its own data directory with no admission layer and no worker.
   //
   // Everything that decides behaviour -- the path, the schema, the lifecycle kernel, the
   // matcher, the tool -- is upstream's and untouched.

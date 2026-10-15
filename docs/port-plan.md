@@ -1486,3 +1486,86 @@ dreaming-consolidation 系列。**所以 §11 那两个「本树找不到」的�
 
 **未解决的判定**:那 13 个 `capture/*` 文件在上游 09-30(工具取的树)与 10-08(本地检出)都没有
 任何同路径文件,是否**存在换了文件名的等价实现尚未查**。这是判据 1 上目前最大的未知。
+
+## 插件把状态写进了 openclaw 的家目录,以及因此死掉的 forget(2026-10-15)
+
+从浏览器 API 表面查起(此前从未打过),`POST /api/forget` 对**任何**输入都返回 HTTP 500:
+
+```
+OpenClaw agent database C:\Users\21991\.openclaw\agents\main\agent\openclaw-agent.sqlite
+uses schema version 0; run openclaw doctor --fix to migrate persisted media before using it.
+```
+
+追下去发现不是一个 bug 而是一整类:插件从没设过 `OPENCLAW_STATE_DIR`,vendored 的代码一律回落到
+`~/.openclaw`。而 openclaw **没装、也没有 openclaw 进程在跑** —— 那个目录里的一切都是 mem-plus 自己
+写的,实测 1.66 MB / 5 个文件:
+
+| 文件 | 表 | 内容 |
+|---|---|---|
+| `state/openclaw.sqlite` | 104 | `user_version=19`,`plugin_state_entries` 184 行(`plugin_id: memory-core`,`memory-host.events` 与游标) |
+| `agents/main/agent/openclaw-agent.sqlite` | 6 | `standing_intents` 14 行,`user_version=0` |
+| `state/openclaw-quarantine.sqlite` | 2 | `user_version=2`,空 |
+
+**一、一处假注释盖住一个真 bug。** `standing-intents.ts` 里那段写明的 deviation 论证「这个库由唯一
+写者在 **mem-plus 自家 state root** 内打开」—— 实测它在 `~/.openclaw`。理由成立(单一写者),事实
+不成立,所以 forget 那条路的问题被这段注释挡住了。
+
+**二、剥了一半:门还留着。** `memory-entry-origins.ts` 与上游差 492 行,剥掉的是
+`runOpenClawAgentWriteAdmission` / `withOpenClawAgentDatabaseRuntime` / worker,但**留下了上游那两
+个带版本门的开库器**。于是 standing intents 活着(它直接 `node:sqlite` 开),`forget` 死着
+(`withOpenClawAgentDatabaseReadOnly` → `assertCanonicalAgentPersistenceVersion`,`user_version=0`
+必然抛)。
+
+**三、照抄上游已有的偏离,不自己造。** 改法是把 `memory-entry-origins.ts` 的开库换成
+`standing-intents.ts` 已经写明论证的那一种:同一个上游解析出的路径,直接开,跳过门。上游的
+`resolveStateDir` 本来就把 `OPENCLAW_STATE_DIR` 写成覆盖开关(`src/config/state-dir.ts`),照搬即可 ——
+新增 `paths.ts` 的 `adoptOpenclawStateDir()`,在 `setup` 第一行调用。**上游自己的覆盖优先**:调用方
+先设了 `OPENCLAW_STATE_DIR` 就用它。
+
+为什么这道门可以拿掉,而不是该去满足它:
+
+1. **门保护的东西不存在。** 它存在是因为 openclaw 的 agent 库装会话、转录与身份,读一个旧版本写
+   的库可能返回当前代码会误解的行。mem-plus 这个库由 `ensureMemoryEntryOriginsSchema` 与
+   `standing-intents.ts` 创建,装的是记忆血缘与 standing intents,**一个会话行都没有**。
+2. **它要求的迁移用户做不了。** `openclaw` 没装、没有 `doctor --fix`;真去跑上游的迁移,会为了满足
+   一张**从不读取**的表的版本检查,把整个 agent schema 搬进这里。
+
+**四、潜伏缺陷:`pruneMemoryEntryOrigins` 查错了库。** 它在 agent 连接上跑
+`SELECT ... FROM memory_index_chunks WHERE source='memory'`。实测那个连接上**没有这张表**,查询抛
+`no such table: memory_index_chunks`(agent 库 6 张表全是 standing_intents;mem-plus 的索引在另一
+个 `index.db`)。今天不炸,是因为 `entryKeys` 来自 `MEMORY.md` 的现役 preimage,而 `MEMORY.md`
+不存在(promotion `applied` 恒为 0)→ 提前 return。**一旦 promotion 真的写进去,下一次 dreaming
+就会抛。**
+
+不是简单地跳过:`index.db` 里 `source='memory'` 有 2937 行、其中 7 行带 promotion 标记,所以这个
+检查在 mem-plus 里**不是空转**,跳过后果是实的。上游保留血缘是为了「还有旧的**共享 MEMORY 快照**
+被索引着」。实测 `index.db` 里 **`MEMORY.md` 一行都没有**(`path LIKE '%MEMORY.md'` → 0),而那 7 行
+是**本仓库自己的会话快照** —— 它们含 `openclaw-memory-promotion:` 是因为调试这段代码时把它打印了
+出来。**前提在 mem-plus 里是假的**,所以保留集为空不是因为跳过了检查,而是因为没有共享 MEMORY 快照
+可保留。要拿到真答案就得把 `index.db` 的句柄塞进 memory-core,那会倒转本树的分层(索引是投影,
+它上游没有任何东西从它读)。真去索引 `MEMORY.md` 的那天,这个 guard 就是必须一起改的那一行。
+
+**五、搬数据而不是重建。** 进程正开着那三个库,`Copy-Item` 在 WAL 下会拷出撕裂快照,用 `VACUUM INTO`
+取一致快照(同一个手法用在 `index.db` 上)。三个库搬完逐个对表数与非空行:104/185、2/0、6/73,全部
+一致,`integrity=ok`。`~/.openclaw` 先留着,等新构建验证过再删。
+
+**六、验证(全部走活区真实路径,不是夹具)。**
+
+| 验什么 | 怎么验的 | 结果 |
+|---|---|---|
+| 分发门 | 静默装 0.2.2 到活区后读 `mem-plus.log` | `plugin loaded` + 四个工具齐 |
+| forget | `POST /api/forget` 先打不存在的会话、再打当前真实会话(2904 条消息) | 从 **HTTP 500** 变 **HTTP 200 + 完整报告**(agentId / entryKeys / 十三项 artifact 计数) |
+| 探针落在新家 | 工具建一条 `zzmigrprobe` 意图,再查两个库 | mem-plus 自家 **15 条**(命中 1),`~/.openclaw` **14 条**(命中 0) |
+| 迁移完整 | `standing_intents` 逐库计数 | 两边都是 14,`user_version=0` |
+| 状态库 | `plugin_state_entries` 按命名空间分组 | `memory-host.events` 164 + 游标 20 = **184**,与源一致 |
+| 旧家不再被写 | 静置 50 秒比 `~/.openclaw` 全部文件 mtime | **零变化**(13:44:15 那次是探针自己开库造成的,不是插件) |
+| 删掉旧家后 | 删 `~/.openclaw` 再打 `/api/health` | `status: ok` |
+| 核心功能没坏 | text / vector / wiki 三条检索 | 全命中预期,wiki 的 `ZZDEADBRANCH` 仍搜不到 |
+
+**七、forget 报 0 是对的,不是还没找到。** `sessionCorpusFiles` / `Lines` 恒为 0 是**已登记的裁剪
+偏离**(本文件 457 行),第 497 行的注释写着 `minus the corpus branch` —— mem-plus 从不扫会话快照。
+而 `entryKeys` 来自血缘,而 promotion `applied` 恒为 0,所以没有血缘行、没有 entry key、没有文件
+改写。**三者都是 0 是自洽的**:现在能跑完全程并量出每项都是零,而不是还没跑起来。
+
+**八、类型门。** 总错误 4240(与基线一致),`plugin/` + `extensions/` + `bootstrap` 三条自有路径 0,
+改动文件 0 错。
