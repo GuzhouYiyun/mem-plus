@@ -664,8 +664,21 @@ async function runReindex(
   // The wiki is deliberately NOT given a memoryHome: `classify` maps any non-`memory`
   // source to `untrusted`, which keeps imported reference material out of automatic
   // injection. That is the point of the corpus, so it stays unclassified on purpose.
+  //
+  // Gated on `wiki.enabled`, NOT on `wikiFiles.length > 0`. `reindexFiles` ends in
+  // `pruneMissing({ present })`, and that prune is the only thing that removes a wiki
+  // document that has been deleted from disk -- so skipping the call because the scan found
+  // nothing also skips the only cleanup that root has. Measured 2026-10-15: deleting the last
+  // wiki page and running `memory_reindex` left its 29th source row and its chunk in place,
+  // still returned by `memory_search {"corpus": "wiki"}`, and `pruned` reported 0. The home
+  // root above is reindexed unconditionally for the same reason, and its own comment says why:
+  // pruning has to run against the complete set for the root.
+  //
+  // `reindexFiles` with an empty list is a pure prune -- the loop body never runs, `seen` is
+  // empty, and every row of that `source` is cleared. Passing `[]` when the wiki is enabled
+  // and empty is exactly the "there is nothing on disk" answer.
   const wikiReport =
-    wikiFiles.length > 0 ? await reindexFiles({ db, files: wikiFiles, root: "wiki" }) : null;
+    wiki.enabled ? await reindexFiles({ db, files: wikiFiles, root: "wiki" }) : null;
 
   // A first reindex has nothing embedded yet, so vector mode would return
   // nothing at all. Filling the budget here means one tool call is enough to
