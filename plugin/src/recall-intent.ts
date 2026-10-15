@@ -72,7 +72,14 @@ export function needsLocalisation(message: string): boolean {
 
 const SYSTEM_PROMPT = [
   "Translate the user's message into English.",
-  "Output ONLY the translation -- no preamble, no quotes, no explanation, no notes.",
+  "Output the translation and nothing else: no preamble, no quotes, no explanation, no notes.",
+  // Scope, as distinct from format above: nothing may appear that the user's own message
+  // did not contain. The failure this prevents is not a mistranslation -- it is the model
+  // answering the question it was handed, or asking one back, which turns the gate's input
+  // into prose the English recall patterns were never written for. "As written rather than
+  // resolving them" is the operative half: an ambiguous fragment is translated literally
+  // instead of being interpreted.
+  "Add nothing that is not in the user's message. Do not answer it, comment on it, or ask about it -- translate unclear or ambiguous parts as written rather than resolving them.",
   "Keep file names, paths, identifiers, error text, flags and commands exactly as written.",
   "Keep the question mark. If the message is a request or a command rather than a question, translate it as such.",
 ].join("\n");
