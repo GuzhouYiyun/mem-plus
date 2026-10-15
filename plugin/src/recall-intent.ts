@@ -80,12 +80,11 @@ const SYSTEM_PROMPT = [
   // resolving them" is the operative half: an ambiguous fragment is translated literally
   // instead of being interpreted.
   "Add nothing that is not in the user's message. Do not answer it, comment on it, or ask about it -- translate unclear or ambiguous parts as written rather than resolving them.",
-  // Spelled out as a mapping rather than "use English punctuation": the model already knows
-  // what English punctuation is, and what it does not do without being told is the mechanical
-  // conversion of a string it is copying character by character. Left unconverted, the reply
-  // trips the runtime guard below and the whole localisation is thrown away -- the turn falls
-  // back to the Chinese original and recalls as badly as openclaw.
-  "Convert Chinese punctuation to its English equivalent: ？→ ?, 。→ ., ，→ ,, 、→ ,, ；→ ;, ：→ :, 「」→ \"\", （）→ (), and full-width spaces → ordinary spaces.",
+  // No line about converting Chinese punctuation. It was added to satisfy the guard that
+  // rejected CJK punctuation, and that guard is gone: measured against upstream's 14 English
+  // patterns, punctuation falls outside every one of their matches, so requiring the model to
+  // convert it solved nothing while giving it one more way to fail the guard and lose the
+  // translation. Left to the model, which converts when it writes English anyway.
   "Keep file names, paths, identifiers, error text, flags and commands exactly as written.",
   "Keep the question mark. If the message is a request or a command rather than a question, translate it as such.",
 ].join("\n");
@@ -131,22 +130,28 @@ export async function localiseForRecall(params: {
   }
 
   const translated = result.text.trim();
-  // A refusal, an apology preamble or a copied-back echo means we got prose, not a
-  // translation. The one-character case is almost always a stray quote or newline.
+  // What this is actually for: noticing that the reply is not English at all. A refusal, an
+  // apology preamble or the source echoed back comes back in the source language, and a
+  // half-translated reply keeps fullwidth Latin -- `ｖｅｃｔｏｒ` is not `vector`, so it would
+  // never match the index. Those are the two signals, and both are tested directly.
   //
-  // The punctuation half used to test `[。？！，、]` -- five characters -- while the prompt
-  // asks for the whole class converted. Everything the old test missed therefore passed
-  // straight into the gate with Chinese punctuation intact: ；(U+FF1B), ：(U+FF1A),
-  // 「」(U+300C/300D), （）(U+FF08/FF09), and the ideographic space (U+3000). A reply like
-  // 「How did we decide on the vector model?」 is a plausible English translation that would
-  // have been accepted, and quoted brackets are not what the 14 English patterns were written
-  // against. The range below is CJK symbols and punctuation (U+3000-303F) plus the fullwidth
-  // forms (U+FF01-FF65, which also catches fullwidth Latin and digits -- a reply containing
-  // those is not English either).
+  // CJK punctuation is deliberately NOT one of them. Measured against upstream's 14 English
+  // patterns (`extensions/active-memory/escalation.ts`), none is anchored on a terminator: a
+  // sentence ending in `？`, wrapped in `「」`, or carrying a fullwidth colon mid-clause all
+  // fire exactly as they do with ASCII punctuation, because the patterns match word structure
+  // and the punctuation falls outside the match. FTS treats punctuation as a separator, so
+  // the search side is insensitive too. An earlier version of this test rejected the whole
+  // CJK/fullwidth range (`[\u3000-\u303F\uFF01-\uFF65]`); it bought nothing on the gate and
+  // cost real recall, because one stray bracket threw away a translation that would have
+  // worked -- and losing it drops the turn back to upstream's own zh-Hans group, 4 of 13.
   //
-  // Em dash (U+2014) and ellipsis (U+2026) are deliberately NOT rejected: both are ordinary
-  // English typography, and there is no reason to throw a translation away over them.
-  if (translated.length < 2 || /[\u3000-\u303F\uFF01-\uFF65]/u.test(translated)) {
+  // Rejected ranges are fullwidth digits (FF10-FF19), fullwidth uppercase (FF21-FF3A) and
+  // fullwidth lowercase (FF41-FF5A). Fullwidth punctuation is allowed.
+  if (
+    translated.length < 2 ||
+    /\p{Script=Han}/u.test(translated) ||
+    /[\uFF10-\uFF19\uFF21-\uFF3A\uFF41-\uFF5A]/u.test(translated)
+  ) {
     params.log("recall localisation: reply is not a translation, using the original text");
     return { text: original, localised: false };
   }
