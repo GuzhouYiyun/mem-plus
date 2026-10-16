@@ -2265,3 +2265,20 @@ http://127.0.0.1:4810`;修复后日志出现第二次 `starting service`,embed #
 `utf8-truncate.ts`),其后再无一条;两个工作区均 `plugin loaded`。自愈在装好的活区
 实测:向量查询拉起服务(12:35:16Z)→ 杀进程 → 再查询,服务被重新拉起、返回
 vector 结果(7.8s)。发布状态不变:仍未发布,本地领先远端 6 笔(含本笔)。
+
+## 0.3.0 发布(2026-10-16 晚)
+
+用户拍板:推送,并用 `gh` 发 Release(文案结构照 openclaw 的 Release)。全部实测。
+本文件早先三处「发布状态:仍未发布」写在发布之前,以本节为准。
+
+| | 实测 |
+|---|---|
+| 推送 | `c3606b17..eecc6ec5 main -> main` 与同批新 tag `v0.3.0`(轻量,与 v0.2.1 同型;`--atomic`),一次成功,`main` 与 `origin/main` 同步 |
+| Release | v0.3.0,2026-10-16T13:01:38Z 发布,标记 **Latest**(上一个 Latest 是 v0.2.1) |
+| 资产 | `mem-plus-installer-0.3.0.exe` 3,310,181 字节,sha256 `01DE1F4E2098E5147BC7E8CE960A25CE573477C6C25E228347C9C5699E1722B5` —— 与本地 18:09 重打产物同字节;`mem-plus-0.3.0.tgz` 4,543,383 字节,sha256 `FF353D6BB155996845E75AAACCBEF831F0D2F5E6AC61F51B7B7DFE9D4E76887E`(tgz 内 `client.ts` blob = HEAD `6f5b26f8…`,版本 0.3.0) |
+| 文案 | 覆盖 v0.2.1..HEAD 共 87 笔,扣除 v0.2.1 文案已宣布的 4 笔(`f767e9e0` / `7bc182af` / `5acaab05` / `89833475`;v0.2.1 的 tag 落在这 4 笔之前,所以 tag 区间比较页会把它们列为 0.3.0 的改动,属标注噪声) |
+| 功能体检(发布前) | 文本 / 混合 / 向量搜索均命中;`memory_get`、standing intents 正常;浏览器 4747 与 `/api/health` 200;wiki 语料为空,查询无命中属预期;捕获流水线当晚 20:39 有一次线级提取成功(106.8 s)落快照 7576 B、索引 6 块 |
+
+顺带发现、未改:`installer/nsis/installer.nsi:112-115` 的注释仍在描述旧设计
+(「安装器自己先 `stop` 再 `start`」),与实现不符 —— `RestartOpenCode` 只查状态、只
+`restart`;欢迎页文案与实现一致。
