@@ -226,7 +226,18 @@ export function createServiceClient(
         lastHealth = health;
         return { url: resolvedUrl, health };
       }
-      throw new Error(`no mem-plus service at ${resolvedUrl}`);
+      if (resolvedUrl === service.url) {
+        // A URL the user configured is theirs: never shadow it with a service of
+        // our own. Report it dead and leave the decision to them.
+        throw new Error(`no mem-plus service at ${resolvedUrl}`);
+      }
+      // A URL we discovered is ours to re-find. The service exits by itself after
+      // `service.idleMinutes`, and a cached URL used to outlive it: the probe threw
+      // here, so the discovery + autostart branch below never ran again and every
+      // later search silently fell back to text ranking until the plugin reloaded.
+      // Clearing the cache sends the next request back through that branch.
+      resolvedUrl = null;
+      lastHealth = null;
     }
 
     // Short deadline: this runs before the autostart decision, so a generous

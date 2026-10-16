@@ -2230,3 +2230,29 @@ gitignore 的生成物或本文件的历史数字里,没有第二处要手改。
 
 安装方式不变:双击安装器,装完自动 `opencode reload`;记忆数据与安装、卸载互不触碰。
 旧的 0.2.2 exe 与两个 tgz(0.2.2、0.3.0)留在本地,未删。
+
+## 0.3.0 重打:向量服务闲置退出后能自愈(2026-10-16 晚)
+
+排查「功能是否正常」时发现的真缺陷,出在本仓自己的 `plugin/src/model/client.ts`
+(非上游偏离):服务地址一经缓存,`/health` 探测失败就直接抛错 —— `resolvedUrl`
+不清除,后面的「发现 → autostart」分支再也到不了。后果是本地向量服务按
+`service.idleMinutes` 自行退出后,此后每次语义查询都静默降级为纯文本,直到插件
+重载;日志里只剩一行 `query embedding failed, falling back to text ranking ::
+no mem-plus service at http://127.0.0.1:4748`。修法:探测失败时按地址来源分流 ——
+用户配置的 `service.url` 照旧报错(那是用户自己的服务,不代管);自动发现/自拉起的
+地址则清空缓存,回落进原有流程。
+
+真路径探针(import 本仓 client.ts,真 spawn `serve/server.mjs`,真杀进程,再发一次
+embed):修复前 `embed #2 FAILED in 0ms => no mem-plus service at
+http://127.0.0.1:4810`;修复后日志出现第二次 `starting service`,embed #2 ok
+(6550ms,1024 维;首次 6496ms)。
+
+| | 实测 |
+|---|---|
+| 修复 | `plugin/src/model/client.ts` +12/-1;门同基线:插件 4240(src 4097 + packages 143)、capture 331(src 326 + packages 5),自有路径 0 |
+| 重打产物 | `installer/nsis/dist/mem-plus-installer-0.3.0.exe`(2026-10-16 18:09 本地构建),3,310,181 字节;payload 2540 文件 / 18.5 MB;`build.ps1` exit 0 |
+| 字节核对 | 这次不再抽样:payload **全部 2540 个文件**对工作树逐字节比对,diff 0、missing 0 |
+| 发布状态 | **仍未发布**:无 tag、无 Release,Latest 仍是 v0.2.1;本地领先远端 5 笔(含本笔),未推送 |
+
+重打覆盖了当天早晨那版 0.3.0 exe(同版本号同路径,旧字节不再保留);0.2.2 exe 与
+两个 tgz(0.2.2、0.3.0)不受影响,照旧留着。
