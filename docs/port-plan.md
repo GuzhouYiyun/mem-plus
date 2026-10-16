@@ -2212,3 +2212,21 @@ ok,`/embed` 一条中文返回 200、1024 维向量,未知参数被安静跳过;
 的日志内容被存进会话记录、以及应用记录我那条搜索命令的 "spawning process" 日志行。故重做:
 探针包一层 fetch 捕获生产调用真正发出的 id,只写进 escrow 文件、绝不进日志/命令行/对话,再全量搜。
 正对照(escrow 文件本身必须命中)通过,其余零命中。
+
+## 本地打包 0.3.0(2026-10-16)
+
+用户定版 0.3.0。版本号只有一个来源:`package.json` —— `build.ps1` 读它生成 `version.nsh`,
+exe 文件名、`VIProductVersion`、卸载项的 `DisplayVersion` 全从那里展开;其余引用都落在
+gitignore 的生成物或本文件的历史数字里,没有第二处要手改。
+
+| | 实测 |
+|---|---|
+| 产物 | `installer/nsis/dist/mem-plus-installer-0.3.0.exe`,3.16 MB;payload 2540 文件 / 18.5 MB |
+| 构建 | `build.ps1` exit 0(`npm pack` 4.33 MB → 暂存 → makensis;LZMA 后为原大小的 16.4%) |
+| 门 | 审计 no drift;插件门 4240、capture 门 331,与基线逐数字一致,三条自有路径 0;`node --check serve/server.mjs` 通过 |
+| 字节核对 | payload 与 HEAD 逐字节一致,12 个关键文件:wire.ts、llm.ts、flush-run.ts、捕获管道全部、server.mjs、model 两文件、package.json、bootstrap.ts |
+| 版本落点 | `version.nsh` 与 payload/`package.json` 均为 0.3.0;`VIProductVersion "0.3.0.0"` |
+| 发布状态 | **仍未发布**:无 tag、无 Release,Latest 仍是 v0.2.1;本地领先远端 4 笔(含本笔),未推送 |
+
+安装方式不变:双击安装器,装完自动 `opencode reload`;记忆数据与安装、卸载互不触碰。
+旧的 0.2.2 exe 与两个 tgz(0.2.2、0.3.0)留在本地,未删。
