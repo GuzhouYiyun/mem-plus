@@ -18,6 +18,10 @@
 //   requests carry tools, a freshly minted session id and `stream: true`, so this
 //   module mints those three things and sends the same body straight at the gateway.
 //
+//   The client also sends generation parameters (`temperature`, `top_p`,
+//   `max_tokens`) when the user configured them, and omits the `tools` field entirely
+//   when the call has no tools. This module mirrors that shape on the wire.
+//
 // WHEN IT RUNS
 //   Only after the host path has already been refused, and only when the target model
 //   resolves to the OpenCode gateway. `completeThroughHost` always tries
@@ -86,23 +90,15 @@ function mintSessionId(): string {
 }
 
 /**
- * The gate reads `tools` as "this request can be a conversation"; one legal function
- * definition is enough, and this one is the definition the accepted probe requests
- * carried. It is deliberately inert: nothing executes it, and a model that calls it
- * anyway only costs that single answer.
+ * One tool definition, mirroring OpenCode's client shape. Only sent when the call
+ * actually has tools; a call with no tools omits the `tools` field entirely, same as
+ * the official client.
  */
-const PLACEHOLDER_TOOL = {
-  type: "function",
-  function: {
-    name: "read",
-    description: "Read a file.",
-    parameters: {
-      type: "object",
-      properties: { filePath: { type: "string" } },
-      required: ["filePath"],
-    },
-  },
-} as const;
+export type WireTool = {
+  readonly name: string;
+  readonly description: string;
+  readonly parameters?: unknown;
+};
 
 type WireEndpoint = {
   readonly providerID: string;
@@ -191,8 +187,14 @@ async function resolveEndpoint(
   return undefined;
 }
 
-/** Longest a wire call may run when the caller did not set a deadline of its own. */
-const WIRE_TIMEOUT_MS = 120_000;
+/** Longest a single wire call may run when the caller did not set a deadline of its own. */
+const WIRE_TIMEOUT_MS = 30_000;
+
+/** How many times the wire call may be retried after a failure. */
+const WIRE_MAX_ATTEMPTS = 3;
+
+/** Backoff between attempts, in milliseconds. */
+const WIRE_BACKOFF_MS = 1_000;
 
 export type WireRequest = {
   readonly ctx: PluginContext;
@@ -201,6 +203,12 @@ export type WireRequest = {
   readonly prompt: string;
   readonly timeoutMs?: number;
   readonly signal?: AbortSignal;
+  /** Generation parameters, forwarded to the gateway like OpenCode's client does. */
+  readonly temperature?: number;
+  readonly topP?: number;
+  readonly maxTokens?: number;
+  /** Tool definitions, if the call has any. Omitted entirely when there are none. */
+  readonly tools?: readonly WireTool[];
 };
 
 /**
@@ -208,22 +216,40 @@ export type WireRequest = {
  * short reason (`HTTP 403: ...`, `timed out after 8000ms`, ...) that the caller labels,
  * keeping the host-path refusal as the primary reason.
  */
-export async function wireText(request: WireRequest): Promise<string> {
-  const endpoint = await resolveEndpoint(request.ctx, request.ref);
-  if (!endpoint) throw new Error("no endpoint for the target model");
-  // This exists for exactly one gate: the hosted gateway's free-tier refusal. Any other
-  // endpoint that happened to fail the same way must not receive a request shaped for
-  // that gate, so the destination is checked rather than assumed.
-  let host: string;
-  try {
-    host = new URL(endpoint.baseURL).hostname;
-  } catch {
-    throw new Error(`unusable base URL: ${endpoint.baseURL}`);
+/** Build the request body, mirroring OpenCode's client shape from `openai-chat.ts`. */
+function buildWireBody(endpoint: WireEndpoint, request: WireRequest): string {
+  const body: Record<string, unknown> = {
+    model: endpoint.modelID,
+    messages: [{ role: "user", content: request.prompt }],
+    stream: true,
+    stream_options: { include_usage: true },
+  };
+  // Mirror OpenCode's client: send `tools` only when the call has tools, paired with
+  // `tool_choice: "auto"`. A call with no tools omits `tools` entirely -- a lone
+  // placeholder tool satisfies nothing the gate checks and can only confuse the model.
+  if (request.tools?.length) {
+    body.tools = request.tools.map((tool) => ({
+      type: "function",
+      function: {
+        name: tool.name,
+        description: tool.description,
+        parameters: tool.parameters ?? {},
+      },
+    }));
+    body.tool_choice = "auto";
   }
-  if (host !== "opencode.ai" && !host.endsWith(".opencode.ai")) {
-    throw new Error(`endpoint is not the OpenCode gateway: ${host}`);
-  }
-  const timeoutMs = request.timeoutMs ?? WIRE_TIMEOUT_MS;
+  if (request.temperature !== undefined) body.temperature = request.temperature;
+  if (request.topP !== undefined) body.top_p = request.topP;
+  if (request.maxTokens !== undefined) body.max_tokens = request.maxTokens;
+  return JSON.stringify(body);
+}
+
+/** One attempt: open the SSE stream, read it to completion, return the assembled text. */
+async function runWireAttempt(
+  endpoint: WireEndpoint,
+  request: WireRequest,
+  timeoutMs: number,
+): Promise<string> {
   const controller = new AbortController();
   let timedOut = false;
   const timer = setTimeout(() => {
@@ -236,7 +262,6 @@ export async function wireText(request: WireRequest): Promise<string> {
   request.signal?.addEventListener("abort", forwardAbort, { once: true });
   if (request.signal?.aborted) controller.abort();
   try {
-    const app = request.ctx.app;
     const response = await fetch(`${endpoint.baseURL.replace(/\/+$/, "")}/chat/completions`, {
       method: "POST",
       headers: {
@@ -245,16 +270,10 @@ export async function wireText(request: WireRequest): Promise<string> {
         // Two of the three measured constituents of the accepted shape: the client's own
         // name, and a session id minted a moment ago. The third -- `stream: true` -- is
         // in the body below.
-        "user-agent": `opencode/${app.channel}/${app.version}/${app.name}`,
+        "user-agent": `opencode/${request.ctx.app.channel}/${request.ctx.app.version}/${request.ctx.app.name}`,
         "x-opencode-session": mintSessionId(),
       },
-      body: JSON.stringify({
-        model: endpoint.modelID,
-        messages: [{ role: "user", content: request.prompt }],
-        stream: true,
-        stream_options: { include_usage: true },
-        tools: [PLACEHOLDER_TOOL],
-      }),
+      body: buildWireBody(endpoint, request),
       signal: controller.signal,
     });
     if (!response.ok) {
@@ -303,11 +322,54 @@ export async function wireText(request: WireRequest): Promise<string> {
     }
     if (!text) throw new Error("empty completion");
     return text;
-  } catch (error) {
-    if (timedOut) throw new Error(`timed out after ${String(timeoutMs)}ms`);
-    throw error instanceof Error ? error : new Error(String(error));
   } finally {
     clearTimeout(timer);
     request.signal?.removeEventListener("abort", forwardAbort);
   }
+}
+
+/**
+ * One generation sent at the wire level. Resolves with the model's text; rejects with a
+ * short reason (`HTTP 403: ...`, `timed out after 30000ms`, ...) that the caller labels,
+ * keeping the host-path refusal as the primary reason.
+ *
+ * Failed attempts are retried with a small backoff, up to `WIRE_MAX_ATTEMPTS` total,
+ * because the free-tier gateway can be momentarily overloaded even when the request
+ * shape is exactly what the client sends.
+ */
+export async function wireText(request: WireRequest): Promise<string> {
+  const endpoint = await resolveEndpoint(request.ctx, request.ref);
+  if (!endpoint) throw new Error("no endpoint for the target model");
+  // This exists for exactly one gate: the hosted gateway's free-tier refusal. Any other
+  // endpoint that happened to fail the same way must not receive a request shaped for
+  // that gate, so the destination is checked rather than assumed.
+  let host: string;
+  try {
+    host = new URL(endpoint.baseURL).hostname;
+  } catch {
+    throw new Error(`unusable base URL: ${endpoint.baseURL}`);
+  }
+  if (host !== "opencode.ai" && !host.endsWith(".opencode.ai")) {
+    throw new Error(`endpoint is not the OpenCode gateway: ${host}`);
+  }
+
+  let lastError: unknown;
+  for (let attemptIndex = 0; attemptIndex < WIRE_MAX_ATTEMPTS; attemptIndex += 1) {
+    if (attemptIndex > 0) {
+      await new Promise((resolve) => {
+        const backoffTimer = setTimeout(resolve, WIRE_BACKOFF_MS * attemptIndex);
+        (backoffTimer as unknown as { unref?: () => void }).unref?.();
+      });
+    }
+    const timeoutMs = request.timeoutMs ?? WIRE_TIMEOUT_MS;
+    try {
+      return await runWireAttempt(endpoint, request, timeoutMs);
+    } catch (error) {
+      lastError = error;
+      if (attemptIndex === WIRE_MAX_ATTEMPTS - 1) {
+        throw error instanceof Error ? error : new Error(String(error));
+      }
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error(String(lastError));
 }

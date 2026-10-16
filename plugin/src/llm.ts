@@ -50,6 +50,10 @@ export type LlmRequest = {
   /** For the log line: what this call was for. */
   readonly purpose: string;
   readonly signal?: AbortSignal;
+  /** Generation parameters forwarded to the gateway when the wire fallback runs. */
+  readonly temperature?: number;
+  readonly topP?: number;
+  readonly maxTokens?: number;
 };
 
 /**
@@ -104,6 +108,9 @@ export async function completeThroughHost(
           ...(request.model ? { ref: request.model } : {}),
           ...(request.timeoutMs ? { timeoutMs: request.timeoutMs } : {}),
           ...(request.signal ? { signal: request.signal } : {}),
+          ...(request.temperature !== undefined ? { temperature: request.temperature } : {}),
+          ...(request.topP !== undefined ? { topP: request.topP } : {}),
+          ...(request.maxTokens !== undefined ? { maxTokens: request.maxTokens } : {}),
         });
         log(`llm ${request.purpose}: ok in ${String(Date.now() - started)}ms (wire fallback)`);
         return { text };
