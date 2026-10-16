@@ -2256,3 +2256,12 @@ http://127.0.0.1:4810`;修复后日志出现第二次 `starting service`,embed #
 
 重打覆盖了当天早晨那版 0.3.0 exe(同版本号同路径,旧字节不再保留);0.2.2 exe 与
 两个 tgz(0.2.2、0.3.0)不受影响,照旧留着。
+
+**装后核对(当晚 20:28 本地,用户自行双击安装)**:活区与 payload 全部 2540 个文件
+逐字节一致(diff 0、missing 0;`client.ts` blob = `e916da1d`),升级无残留(多出的只有
+`.mem-plus-payload-files.txt`(2540 行)、`.mem-plus-payload-dirs.txt`、`package-lock.json`、
+`Uninstall.exe`)。安装窗口内(20:28:04-06 本地)10 条瞬时 `failed to load plugin`
+(文件替换竞态,ENOENT 命中的是尚未落盘的 `plugin-lru-cache.ts` / `exec.ts` /
+`utf8-truncate.ts`),其后再无一条;两个工作区均 `plugin loaded`。自愈在装好的活区
+实测:向量查询拉起服务(12:35:16Z)→ 杀进程 → 再查询,服务被重新拉起、返回
+vector 结果(7.8s)。发布状态不变:仍未发布,本地领先远端 6 笔(含本笔)。
