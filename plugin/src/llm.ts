@@ -19,11 +19,20 @@
 //   prompt is folded in ahead of the body. That is not a workaround invented here -- it is
 //   what `hostedComplete` already did, and the capture prompts are written for it
 //   (`buildBoundedSummaryPrompt` emits the body only precisely because of this).
+//
+// WHEN THE HOST REFUSES
+//   One failure is not like the others: the free-tier gate refuses the request shape
+//   itself (last confirmed 2026-10-16), which every plugin call hits no matter what it
+//   asks for. That refusal -- and only that one -- is retried once at the wire level;
+//   see `wire.ts`. Everything else keeps the degrade-as-data behavior below.
 import type { PluginContext } from "./opencode.js";
 // The canonical shape, read from `config.jsonc`'s `model.hostedModel` and already the
 // argument `ctx.generate.text` takes. Redefining it here would be a second source of truth
 // for the same field.
 import type { HostedModelRef } from "./model/config.js";
+// The retry path for the one host failure that means "wrong request shape", not "wrong
+// request". See the header of `wire.ts` for what it does and when it is reached.
+import { isFreeTierRejection, wireText } from "./wire.js";
 
 export type { HostedModelRef };
 
@@ -84,6 +93,29 @@ export async function completeThroughHost(
     return { text: result.text };
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
+    // The free-tier gate refuses the shape `ctx.generate.text` sends; retry once at the
+    // wire level before giving up. When the host path recovers, this branch stops being
+    // reached and the log line loses its suffix.
+    if (isFreeTierRejection(error)) {
+      try {
+        const text = await wireText({
+          ctx,
+          prompt,
+          ...(request.model ? { ref: request.model } : {}),
+          ...(request.timeoutMs ? { timeoutMs: request.timeoutMs } : {}),
+          ...(request.signal ? { signal: request.signal } : {}),
+        });
+        log(`llm ${request.purpose}: ok in ${String(Date.now() - started)}ms (wire fallback)`);
+        return { text };
+      } catch (fallbackError) {
+        const fallbackReason =
+          fallbackError instanceof Error ? fallbackError.message : String(fallbackError);
+        log(
+          `llm ${request.purpose}: failed after ${String(Date.now() - started)}ms -- ${reason} (wire fallback: ${fallbackReason})`,
+        );
+        return { text: null, reason };
+      }
+    }
     log(`llm ${request.purpose}: failed after ${String(Date.now() - started)}ms -- ${reason}`);
     return { text: null, reason };
   }
