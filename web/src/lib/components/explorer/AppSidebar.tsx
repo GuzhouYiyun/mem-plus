@@ -124,18 +124,10 @@ export function AppSidebar({
             <Sparkles className="size-4 shrink-0" />
             <span className="truncate text-start">{dreamsLabel}</span>
           </a>
-          <a
-            href={ROUTES.config}
-            className={navClass(currentView === "config")}
-            aria-current={currentView === "config" ? "page" : undefined}
-            onClick={(e) => onNavClick(e, ROUTES.config)}
-          >
-            <FileCog className="size-4 shrink-0" />
-            <span className="truncate text-start">{configLabel}</span>
-          </a>
-          {/* After 设置, not beside it by accident: this is the same settings with
-              the file taking shape on the left, which reads as the more verbose
-              take on the same thing. */}
+          {/* Before 设置, and the order is deliberate: both entries are the same
+              settings -- this one as the file's own JSON, 设置 below it as the
+              labelled form. The file is the ground truth of what is configured,
+              so it leads and the shaped view follows it. */}
           <a
             href={ROUTES.configFile}
             className={navClass(currentView === "configFile")}
@@ -144,6 +136,15 @@ export function AppSidebar({
           >
             <FileJson className="size-4 shrink-0" />
             <span className="truncate text-start">{configFileLabel}</span>
+          </a>
+          <a
+            href={ROUTES.config}
+            className={navClass(currentView === "config")}
+            aria-current={currentView === "config" ? "page" : undefined}
+            onClick={(e) => onNavClick(e, ROUTES.config)}
+          >
+            <FileCog className="size-4 shrink-0" />
+            <span className="truncate text-start">{configLabel}</span>
           </a>
         </nav>
 

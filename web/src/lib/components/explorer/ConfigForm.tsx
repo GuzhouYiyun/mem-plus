@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Info, RefreshCw, ShieldCheck, TriangleAlert } from "lucide-react";
 import { fetchAPI } from "$lib/api";
-import { CONFIG_SECTIONS, isAction, isHeading, readPath, writePath, type ConfigField } from "$lib/config-schema";
+import { CONFIG_SECTIONS, isAction, isHeading, readPath, writePath, type ConfigAction, type ConfigField, type ConfigItem } from "$lib/config-schema";
 import { ReindexRow } from "$lib/components/explorer/ReindexRow";
 import { ForgetRow } from "$lib/components/explorer/ForgetRow";
 import { Alert, AlertDescription } from "$lib/components/ui/alert";
@@ -254,9 +254,55 @@ export function ConfigParseErrors({
   );
 }
 
+/** One renderable row of the form: a setting or one of the action widgets. */
+type ConfigRow = ConfigField | ConfigAction;
+
+/** A heading plus the rows that sit under it. `heading` is null for the group the section opens with, before its first heading. */
+type ConfigGroup = {
+  heading: string | null;
+  rows: readonly ConfigRow[];
+};
+
 /**
- * The form: every field the schema knows, in the order the schema gives, under
- * the headings that group it.
+ * Cut a section's flat field list into groups at its headings. This is the one
+ * place that knows a heading opens a group; rendering walks groups instead of
+ * re-deriving the split inside a per-item conditional, so the rhythm between a
+ * heading, its rows and the next group is one structural decision rather than
+ * padding applied element by element.
+ */
+function groupFields(items: readonly ConfigItem[]): ConfigGroup[] {
+  const groups: ConfigGroup[] = [];
+  let heading: string | null = null;
+  let rows: ConfigRow[] = [];
+  const flush = (): void => {
+    if (heading !== null || rows.length > 0) groups.push({ heading, rows });
+  };
+  for (const item of items) {
+    if (isHeading(item)) {
+      flush();
+      heading = item.heading;
+      rows = [];
+    } else {
+      rows.push(item);
+    }
+  }
+  flush();
+  return groups;
+}
+
+/**
+ * The form: every field the schema knows, in the order the schema gives, in the
+ * groups the schema's headings cut.
+ *
+ * The body is three levels, outermost first: the sections the schema declares,
+ * the groups a section's headings produce, and the rows of a group. Spacing at
+ * every level is the same `space-y-3`, and the heading carries the asymmetric
+ * padding that dies the rhythm in -- which lands on exactly the gaps the old
+ * flat list produced (12px between siblings, 8px more above a heading, 2px
+ * more below it: 20px above a heading, 14px under it). The refactor changes the
+ * shape of the layout logic, not the shape of the page: a heading is now a
+ * child of the group it introduces, where before it was merely the next item in
+ * a flat run with padding to fake the difference.
  *
  * There is no section header and no collapse. Each namespace's fields sit under
  * one 抽取/文件/运行/服务/网页/文档语料 heading, which is what actually carries
@@ -281,45 +327,51 @@ export function ConfigFormFields({
 }) {
   return (
     <div className="space-y-3 pb-2">
-      {CONFIG_SECTIONS.flatMap((section) =>
-        section.fields.map((item) =>
-          isHeading(item) ? (
-            // A divider, not a setting. `text-sm` rather than smaller: the
-            // file header above is `text-base`, and a heading two steps
-            // below that is all the weight it needs without going quiet.
-            // Spacing is asymmetric on purpose -- more room above than
-            // below, so the group it introduces reads as belonging to what
-            // follows.
-            <h4
-              key={`${section.id}:h:${item.heading}`}
-              className="pt-2 pb-0.5 text-sm font-medium text-muted-foreground"
-            >
-              {item.heading}
-            </h4>
-          ) : isAction(item) ? (
-            item.action === "forgetSessions" ? (
-              <ForgetRow key={`${section.id}:${item.action}`} />
-            ) : (
-              <ReindexRow
-                key={`${section.id}:${item.action}`}
-                embedEnabled={readPath(draft, "model.embed") !== false}
-              />
-            )
-          ) : (
-            <FieldRow
-              key={`${section.id}:${item.key}`}
-              field={item}
-              value={readPath(draft, item.key)}
-              secretSet={secrets[item.key] === true}
-              models={models}
-              modelsAvailable={modelsAvailable}
-              disabled={disabled}
-              onChange={(next) => onChange(item.key, next)}
-              onReset={() => onChange(item.key, item.defaultValue)}
-            />
-          )
-        )
-      )}
+      {CONFIG_SECTIONS.map((section) => (
+        <div key={section.id} className="space-y-3">
+          {groupFields(section.fields).map((group, index) => (
+            <div key={`${section.id}:g:${group.heading ?? `lead:${index}`}`} className="space-y-3">
+              {group.heading ? (
+                // A divider, not a setting. `text-sm` rather than smaller: the
+                // file header above is `text-base`, and a heading two steps
+                // below that is all the weight it needs without going quiet.
+                // Spacing is asymmetric on purpose -- more room above than
+                // below, so the group it introduces reads as belonging to what
+                // follows.
+                <h4
+                  className="pt-2 pb-0.5 text-sm font-medium text-muted-foreground"
+                >
+                  {group.heading}
+                </h4>
+              ) : null}
+              {group.rows.map((row) =>
+                isAction(row) ? (
+                  row.action === "forgetSessions" ? (
+                    <ForgetRow key={`${section.id}:${row.action}`} />
+                  ) : (
+                    <ReindexRow
+                      key={`${section.id}:${row.action}`}
+                      embedEnabled={readPath(draft, "model.embed") !== false}
+                    />
+                  )
+                ) : (
+                  <FieldRow
+                    key={`${section.id}:${row.key}`}
+                    field={row}
+                    value={readPath(draft, row.key)}
+                    secretSet={secrets[row.key] === true}
+                    models={models}
+                    modelsAvailable={modelsAvailable}
+                    disabled={disabled}
+                    onChange={(next) => onChange(row.key, next)}
+                    onReset={() => onChange(row.key, row.defaultValue)}
+                  />
+                )
+              )}
+            </div>
+          ))}
+        </div>
+      ))}
     </div>
   );
 }
