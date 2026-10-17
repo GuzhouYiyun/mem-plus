@@ -99,7 +99,7 @@ function readArgs(argv) {
       case "--embed": args.embedPath = path.resolve(value); i++; break;
     }
   }
-  if (!args.embedPath) args.embedPath = path.resolve(PLUGIN_ROOT, "..", "models", "bge-m3-FP16.gguf");
+  if (!args.embedPath) args.embedPath = path.resolve(PLUGIN_ROOT, "..", "models", "bge-m3-Q8_0.gguf");
   return args;
 }
 

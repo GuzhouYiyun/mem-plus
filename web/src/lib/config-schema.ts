@@ -132,7 +132,7 @@ export const CONFIG_SECTIONS: readonly ConfigSection[] = [
         label: "嵌入模型",
         kind: "text",
         defaultValue: "",
-        help: "留空 = 模型目录下的 bge-m3-FP16.gguf。写了路径又找不到 = 明确的坏配置。",
+        help: "留空 = 模型目录下的 bge-m3-Q8_0.gguf。写了路径又找不到 = 明确的坏配置。",
       },
       {
         key: "model.embed",

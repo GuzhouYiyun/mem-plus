@@ -65,7 +65,7 @@ const CONFIG_TEMPLATE = `{
 
     // 本地只剩向量模型。删掉 = 用模型目录下的默认文件名。
     // "dir": "C:/Users/你的用户名/models",
-    // "embedPath": "…/models/bge-m3-FP16.gguf",
+    // "embedPath": "…/models/bge-m3-Q8_0.gguf",
 
     "embed": true,
     // "auto"（独显优先）/ "discrete"（仅 NVIDIA·Apple 独显）/ "integrated"（vulkan，核显）

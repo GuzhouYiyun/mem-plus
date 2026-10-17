@@ -441,7 +441,7 @@ SectionIn RO
 SectionEnd
 
 ; Named "依赖" on purpose. What this row installs is node-llama-cpp -- the GPU
-; runtime -- and NOT the embedding model: bge-m3-FP16.gguf lives in models/, which
+; runtime -- and NOT the embedding model: bge-m3-Q8_0.gguf lives in models/, which
 ; is gitignored and never packed, and nothing in the plugin fetches it (there is
 ; no download path in plugin/src/model at all). Ticking this row alone does not
 ; turn on vector search; it removes one of two prerequisites. Calling it

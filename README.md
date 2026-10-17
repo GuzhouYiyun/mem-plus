@@ -78,7 +78,7 @@ opencode service restart
 
 ```bash
 mkdir -p ~/.config/opencode/mem-plus/models
-# 放入 bge-m3-FP16.gguf，约 1.2 GB
+# 放入 bge-m3-Q8_0.gguf，约 635 MB
 ```
 
 ```powershell
@@ -104,7 +104,7 @@ New-Item -ItemType Directory -Force "$env:USERPROFILE\.config\opencode\mem-plus\
 |---|---|
 | 装上并确认能用 | [安装](#安装) · [故障排查](#故障排查) |
 | 改配置 | [配置](#配置) |
-| 开语义检索 | [模型](#模型) · `bge-m3-FP16.gguf` 约 1.2 GB |
+| 开语义检索 | [模型](#模型) · `bge-m3-Q8_0.gguf` 约 635 MB |
 | 了解 agent 能调什么 | [工具](#工具) |
 | 让人工能读能改 | [记忆浏览器](#记忆浏览器) |
 | 导入自己的文档 | [文档语料](#文档语料) |
@@ -146,15 +146,14 @@ New-Item -ItemType Directory -Force "$env:USERPROFILE\.config\opencode\mem-plus\
 
 ### 向量模型：文件与后端
 
-默认目录 `~/.config/opencode/mem-plus/models/`。插件目录下若存在 `models/` 则优先用它。默认文件名 `bge-m3-FP16.gguf`；名字或位置不同用 `model.embedPath` 指定，`model.dir` 可整体指定目录。**模型不包含在安装包内，需自行下载。**
+默认目录 `~/.config/opencode/mem-plus/models/`。插件目录下若存在 `models/` 则优先用它。默认文件名 `bge-m3-Q8_0.gguf`；名字或位置不同用 `model.embedPath` 指定，`model.dir` 可整体指定目录。**模型不包含在安装包内，需自行下载。**
 
 | 文件 | 用途 | 大小 | 国内（ModelScope） | 海外（Hugging Face） |
 |---|---|---|---|---|
-| `bge-m3-FP16.gguf` | 向量检索 | 约 1.2 GB | [下载](https://modelscope.cn/models/gpustack/bge-m3-GGUF/resolve/main/bge-m3-FP16.gguf) | [下载](https://huggingface.co/gpustack/bge-m3-GGUF/resolve/main/bge-m3-FP16.gguf) |
-| `bge-m3-Q8_0.gguf` | 向量检索（压缩版，效果与 FP16 基本一致） | 约 635 MB | [下载](https://modelscope.cn/models/gpustack/bge-m3-GGUF/resolve/main/bge-m3-Q8_0.gguf) | [下载](https://huggingface.co/gpustack/bge-m3-GGUF/resolve/main/bge-m3-Q8_0.gguf) |
+| `bge-m3-Q8_0.gguf` | 向量检索 | 约 635 MB | [下载](https://modelscope.cn/models/gpustack/bge-m3-GGUF/resolve/main/bge-m3-Q8_0.gguf) | [下载](https://huggingface.co/gpustack/bge-m3-GGUF/resolve/main/bge-m3-Q8_0.gguf) |
 
-两个文件是同一模型的两种精度。换用其中一个后（改 `model.embedPath` 或改默认名），要执行一次
-「重建并嵌入」——向量是按文件整套算的，不能新旧混用。
+模型文件更新后（换了文件、换了位置、或换了别的模型），要执行一次
+「重建并嵌入」——向量按当时的文件整套重算，不与之前的文件混用。
 
 必须是带 embedding 头的模型，否则生成不出向量。**要求显卡，不使用 CPU 推理**：无可用 GPU 时推理服务拒绝启动，日志记录 `gpu backend unavailable; service will not start`。AMD 与 Intel 的独显走 vulkan，`model.gpu` 保持 `auto` 即可，取 `discrete` 会漏掉它们。
 
@@ -177,7 +176,7 @@ memory_reindex { "embed": true }
 |---|---|---|
 | `model.hostedModel` | — | OpenCode 侧使用的模型，格式 `providerID/modelID` |
 | `model.dir` | 插件目录下 `models/`，不存在时回落 `~/.config/opencode/mem-plus/models` | GGUF 所在目录 |
-| `model.embedPath` | `<模型目录>/bge-m3-FP16.gguf` | 向量模型文件路径 |
+| `model.embedPath` | `<模型目录>/bge-m3-Q8_0.gguf` | 向量模型文件路径 |
 | `model.embed` | `true` | `false` 时只用全文检索 |
 | `model.gpu` | `"auto"` | GPU 后端：`auto` / `discrete` / `integrated` |
 | `model.gpuLayers` | `"auto"` | 分配至显存的层数，`"auto"` 按当前显存计算，也可填 0–999 |

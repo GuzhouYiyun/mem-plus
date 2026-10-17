@@ -291,7 +291,7 @@ export function readModelConfig(options: unknown): ModelConfig {
     hostedModel: readHostedModel(nested["hostedModel"]),
     gpu: readGpu(nested["gpu"] ?? root["gpu"]),
     modelDir,
-    embedModelPath: readString(nested["embedPath"]) ?? path.join(modelDir, "bge-m3-FP16.gguf"),
+    embedModelPath: readString(nested["embedPath"]) ?? path.join(modelDir, "bge-m3-Q8_0.gguf"),
     embedEnabled: nested["embed"] !== false,
     embedPathExplicit: readString(nested["embedPath"]) !== undefined,
     threads: readNumber(nested["threads"], 0, 0, 128),
