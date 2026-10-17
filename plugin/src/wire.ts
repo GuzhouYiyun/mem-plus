@@ -19,8 +19,15 @@
 //   module mints those three things and sends the same body straight at the gateway.
 //
 //   The client also sends generation parameters (`temperature`, `top_p`,
-//   `max_tokens`) when the user configured them, and omits the `tools` field entirely
-//   when the call has no tools. This module mirrors that shape on the wire.
+//   `max_tokens`) when the user configured them. This module mirrors that shape on
+//   the wire.
+//
+//   0.3.1 note: mirroring the client's "omit `tools` when the call has none" was
+//   tried and measured to fail -- the client never actually sends a tool-less
+//   request (its agent always carries tools), while the gate refuses every
+//   tool-less request (lines 10-12). A day of instant `403 FreeTierError` on every
+//   wire call ended that experiment (2026-10-17); a call without tools carries one
+//   placeholder tool again, the same trick 0.3.0 shipped.
 //
 // WHEN IT RUNS
 //   Only after the host path has already been refused, and only when the target model
@@ -90,15 +97,34 @@ function mintSessionId(): string {
 }
 
 /**
- * One tool definition, mirroring OpenCode's client shape. Only sent when the call
- * actually has tools; a call with no tools omits the `tools` field entirely, same as
- * the official client.
+ * One tool definition, mirroring OpenCode's client shape. A call with tools of its
+ * own sends those; a call without any sends `PLACEHOLDER_TOOL`, because the gate
+ * refuses every tool-less request (measured 2026-10-16, header comment above).
  */
 export type WireTool = {
   readonly name: string;
   readonly description: string;
   readonly parameters?: unknown;
 };
+
+/**
+ * Stands in for the tools the official client always carries. The gate reads
+ * `tools` as "this request can be a conversation"; one legal function satisfies
+ * that check, and nothing else -- it is never named in a reply because the
+ * tool-less calls this stands in for never ask the model to act.
+ */
+const PLACEHOLDER_TOOL = {
+  type: "function",
+  function: {
+    name: "read",
+    description: "Read a file.",
+    parameters: {
+      type: "object",
+      properties: { filePath: { type: "string" } },
+      required: ["filePath"],
+    },
+  },
+} as const;
 
 type WireEndpoint = {
   readonly providerID: string;
@@ -224,9 +250,10 @@ function buildWireBody(endpoint: WireEndpoint, request: WireRequest): string {
     stream: true,
     stream_options: { include_usage: true },
   };
-  // Mirror OpenCode's client: send `tools` only when the call has tools, paired with
-  // `tool_choice: "auto"`. A call with no tools omits `tools` entirely -- a lone
-  // placeholder tool satisfies nothing the gate checks and can only confuse the model.
+  // The gate reads `tools` as "this request can be a conversation" and refuses every
+  // tool-less one (measured 2026-10-16, header above; 0.3.1 omitted the field and
+  // every wire call took an instant 403 until this was restored on 2026-10-17). A
+  // call with its own tools sends those, paired with `tool_choice: "auto"`.
   if (request.tools?.length) {
     body.tools = request.tools.map((tool) => ({
       type: "function",
@@ -237,6 +264,10 @@ function buildWireBody(endpoint: WireEndpoint, request: WireRequest): string {
       },
     }));
     body.tool_choice = "auto";
+  } else {
+    // The measured-working shape, verbatim from 0.3.0: one placeholder tool, no
+    // `tool_choice` -- the three successes on 2026-10-16 all carried exactly this.
+    body.tools = [PLACEHOLDER_TOOL];
   }
   if (request.temperature !== undefined) body.temperature = request.temperature;
   if (request.topP !== undefined) body.top_p = request.topP;
