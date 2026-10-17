@@ -66,12 +66,10 @@ export type ConfigResponse = {
 
 /** One entry of `GET /api/model-files`: a GGUF in the resolved models directory. */
 export type ModelFileEntries = {
-  /** The directory the list came from, resolved the way the runtime resolves it. */
+  /** The directory the list came from; shown under the box, folder only. */
   dir: string;
   /** Eligible files sorted by name; `path` is the absolute path to write. */
   entries: { name: string; path: string }[];
-  /** What the plugin would actually read right now -- configured path or resolved default. */
-  effectivePath: string;
   /** `false` = the directory is missing or unreadable; the form falls back to typing. */
   available: boolean;
 };
@@ -552,7 +550,7 @@ function FieldRow({
   // it cannot know which ones the form manages -- absence is no longer the signal.
   const effective = value === undefined ? field.defaultValue : value;
   const isDefault = effective === field.defaultValue;
-  const helpLine = field.kind === "modelFile" && modelFiles ? modelFiles.effectivePath : field.help;
+  const helpLine = field.kind === "modelFile" && modelFiles ? modelFiles.dir : field.help;
 
   return (
     <div className="grid gap-1.5 sm:grid-cols-[minmax(0,15rem)_minmax(0,1fr)] sm:items-start sm:gap-4">
@@ -599,10 +597,9 @@ function FieldRow({
             </Button>
           ) : null}
         </div>
-        {/* A modelFile row shows the path it will actually read, not advice about
-            it: the resolved path is the fact users compare against Explorer, and
-            it answers "留空以后到底会读哪个文件" without a sentence around it.
-            `field.help` stays as the line for every other kind, and as the
+        {/* A modelFile row shows the FOLDER the listing came from, not advice:
+            it is where the dropdown gets its names and where a replacement file
+            goes. `field.help` stays as the line for every other kind, and as the
             fallback for a modelFile row when the listing never arrived. */}
         {helpLine ? renderHelpLine(helpLine, helpLine === field.help) : null}
       </div>
@@ -697,11 +694,19 @@ function Control({
   if (field.kind === "modelFile") {
     const current = typeof value === "string" ? value : "";
     if (modelFiles?.available && modelFiles.entries.length > 0) {
+      // The config holds a path (`C:/...` and `C:\...` are the same file), the
+      // listing holds the server's `path.join` form. The box should show the
+      // file NAME either way, so the current value is matched against the
+      // listing with separators and case normalised; a path that matches
+      // nothing -- a file outside the folder -- keeps the raw display, which
+      // is then the honest answer.
+      const norm = (s: string) => s.trim().replace(/\//g, "\\").toLowerCase();
+      const picked = modelFiles.entries.find((entry) => norm(entry.path) === norm(current));
       return (
         <Picker
           id={id}
           disabled={disabled}
-          value={current}
+          value={picked ? picked.path : current}
           onChange={onChange}
           searchable
           className="sm:max-w-md"
@@ -709,8 +714,8 @@ function Control({
             value: entry.path,
             label: entry.name,
           }))}
-          // The empty value is the absent key, which is the resolved default
-          // file inside `models/`; its muted line below already shows that path.
+          // The empty value is the absent key, which resolves to the default
+          // file inside the folder named below.
           emptyLabel={t("cfg-embedpath-follow-default")}
         />
       );

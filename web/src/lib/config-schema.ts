@@ -141,8 +141,8 @@ export const CONFIG_SECTIONS: readonly ConfigSection[] = [
         // A dropdown over the files the resolved models directory actually holds,
         // not a free-text path: the file has to exist for vectors to work, so
         // picking one that is really there beats typing a path from memory.
-        // The muted line under the box is what `/api/model-files` reports as the
-        // path the plugin would read right now -- the bare path, no advice.
+        // The box shows the file NAME; the muted line under it is the FOLDER
+        // `/api/model-files` listed -- the bare path, no advice.
         kind: "modelFile",
         defaultValue: "",
         // Only reached when the directory listing is unavailable (old server,

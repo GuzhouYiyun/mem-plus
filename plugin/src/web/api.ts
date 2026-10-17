@@ -416,10 +416,8 @@ export async function handlePluginConfig(): Promise<Response> {
  * that is missing or unreadable comes back `available: false` and the page
  * falls back to a plain path box, the same trade `handleModelList` makes.
  *
- * `effectivePath` is what the plugin would actually read right now: the
- * configured path, or the resolved default when the key is absent. The page
- * shows it under the box as the bare path, with no words around it -- the one
- * fact about loading that never varies with advice.
+ * `dir` is also what the page shows under the box: the folder the names come
+ * from, as the bare path with no words around it.
  */
 export async function handleModelFiles(): Promise<Response> {
   const settings = readPluginConfig();
@@ -437,7 +435,7 @@ export async function handleModelFiles(): Promise<Response> {
     // Missing or unreadable directory: stay quiet and let the page fall back
     // to the path box, the same degraded-but-honest shape the other picker uses.
   }
-  return ok({ dir: model.modelDir, entries, effectivePath: model.embedModelPath, available });
+  return ok({ dir: model.modelDir, entries, available });
 }
 
 /**
