@@ -294,18 +294,16 @@ function groupFields(items: readonly ConfigItem[]): ConfigGroup[] {
  * The form: every field the schema knows, in the order the schema gives, in the
  * groups the schema's headings cut.
  *
- * The body is three levels, outermost first: the sections the schema declares,
- * the groups a section's headings produce, and the rows of a group. Spacing at
- * every level is the same `space-y-3`, and the heading carries the asymmetric
- * padding that dies the rhythm in -- which lands on exactly the gaps the old
- * flat list produced (12px between siblings, 8px more above a heading, 2px
- * more below it: 20px above a heading, 14px under it). The refactor changes the
- * shape of the layout logic, not the shape of the page: a heading is now a
- * child of the group it introduces, where before it was merely the next item in
- * a flat run with padding to fake the difference.
+ * Each labelled group renders as its own bounded block -- rounded, bordered, on
+ * the muted tint -- because with forty fields in one card the heading alone no
+ * longer carries the grouping: a label floating between two walls of rows is a
+ * hint, while a bounded block is a fact. The blocks speak the same language as
+ * the card they sit in, one nesting step quieter (`bg-card rounded-xl` outside,
+ * `bg-muted/40 rounded-lg` inside), so the outline of the whole page comes from
+ * the card and the outline of each group comes from its block.
  *
- * There is no section header and no collapse. Each namespace's fields sit under
- * one 抽取/文件/运行/服务/网页/文档语料 heading, which is what actually carries
+ * There is no section header and no collapse. Each namespace's fields sit in
+ * one 抽取/文件/运行/服务/网页/文档语料 block, which is what actually carries
  * the grouping -- a header above the whole list bought a click and bought
  * nothing. A collapsible would also teach the reader that sections here are
  * optional, which is the opposite of true.
@@ -326,53 +324,94 @@ export function ConfigFormFields({
   onChange: (key: string, value: unknown) => void;
 }) {
   return (
-    <div className="space-y-3 pb-2">
+    <div className="space-y-4 pb-2">
       {CONFIG_SECTIONS.map((section) => (
-        <div key={section.id} className="space-y-3">
+        <div key={section.id} className="space-y-4">
           {groupFields(section.fields).map((group, index) => (
-            <div key={`${section.id}:g:${group.heading ?? `lead:${index}`}`} className="space-y-3">
-              {group.heading ? (
-                // A divider, not a setting. `text-sm` rather than smaller: the
-                // file header above is `text-base`, and a heading two steps
-                // below that is all the weight it needs without going quiet.
-                // Spacing is asymmetric on purpose -- more room above than
-                // below, so the group it introduces reads as belonging to what
-                // follows.
-                <h4
-                  className="pt-2 pb-0.5 text-sm font-medium text-muted-foreground"
-                >
-                  {group.heading}
-                </h4>
-              ) : null}
-              {group.rows.map((row) =>
-                isAction(row) ? (
-                  row.action === "forgetSessions" ? (
-                    <ForgetRow key={`${section.id}:${row.action}`} />
-                  ) : (
-                    <ReindexRow
-                      key={`${section.id}:${row.action}`}
-                      embedEnabled={readPath(draft, "model.embed") !== false}
-                    />
-                  )
-                ) : (
-                  <FieldRow
-                    key={`${section.id}:${row.key}`}
-                    field={row}
-                    value={readPath(draft, row.key)}
-                    secretSet={secrets[row.key] === true}
-                    models={models}
-                    modelsAvailable={modelsAvailable}
-                    disabled={disabled}
-                    onChange={(next) => onChange(row.key, next)}
-                    onReset={() => onChange(row.key, row.defaultValue)}
-                  />
-                )
-              )}
-            </div>
+            <GroupBlock
+              key={`${section.id}:g:${group.heading ?? `lead:${index}`}`}
+              group={group}
+              sectionId={section.id}
+              draft={draft}
+              secrets={secrets}
+              models={models}
+              modelsAvailable={modelsAvailable}
+              disabled={disabled}
+              onChange={onChange}
+            />
           ))}
         </div>
       ))}
     </div>
+  );
+}
+
+/**
+ * One group of the form, rendered as the block it is.
+ *
+ * A headed group gets the block treatment; the lead group (fields before a
+ * section's first heading -- none today, the schema always opens with a
+ * heading) stays bare, because without a title there is nothing to draw a box
+ * around. `border-border/60` and `bg-muted/40` are the same tokens as the
+ * surrounding card dialed down one step: present enough to bound the group at
+ * a glance, quiet enough that nine of them in one card do not read as nine
+ * cards.
+ */
+function GroupBlock({
+  group,
+  sectionId,
+  draft,
+  secrets,
+  models,
+  modelsAvailable,
+  disabled,
+  onChange,
+}: {
+  group: ConfigGroup;
+  sectionId: string;
+  draft: Record<string, unknown>;
+  secrets: Record<string, boolean>;
+  models: ModelOption[] | null;
+  modelsAvailable: boolean;
+  disabled: boolean;
+  onChange: (key: string, value: unknown) => void;
+}) {
+  const rows = group.rows.map((row) =>
+    isAction(row) ? (
+      row.action === "forgetSessions" ? (
+        <ForgetRow key={`${sectionId}:${row.action}`} />
+      ) : (
+        <ReindexRow
+          key={`${sectionId}:${row.action}`}
+          embedEnabled={readPath(draft, "model.embed") !== false}
+        />
+      )
+    ) : (
+      <FieldRow
+        key={`${sectionId}:${row.key}`}
+        field={row}
+        value={readPath(draft, row.key)}
+        secretSet={secrets[row.key] === true}
+        models={models}
+        modelsAvailable={modelsAvailable}
+        disabled={disabled}
+        onChange={(next) => onChange(row.key, next)}
+        onReset={() => onChange(row.key, row.defaultValue)}
+      />
+    ),
+  );
+
+  if (!group.heading) {
+    return <div className="space-y-3">{rows}</div>;
+  }
+  return (
+    <section className="rounded-lg border border-border/60 bg-muted/40 px-4 py-3.5">
+      {/* The block's title, not a divider: it names the unit the border draws.
+          Foreground weight, not muted -- the heading now belongs to a block of
+          its own, and muted text inside a quiet box disappears into it. */}
+      <h4 className="text-sm font-medium">{group.heading}</h4>
+      <div className="mt-3 space-y-3">{rows}</div>
+    </section>
   );
 }
 
