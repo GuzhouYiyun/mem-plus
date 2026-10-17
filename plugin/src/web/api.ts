@@ -16,9 +16,10 @@
 //   raw capture snapshots, which openclaw never intends to expose.
 import type { DatabaseSync } from "node:sqlite";
 import { createHash } from "node:crypto";
-import { open, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { open, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { indexDocument, indexStats } from "../memory-index.js";
+import { readModelConfig } from "../model/config.js";
 import { readPluginConfig, savePluginConfig } from "./config-file.js";
 import { DREAMS_FILE_NAME, MEMORY_FILE_NAME, memoryHomeDir, projectSlug } from "../paths.js";
 
@@ -404,6 +405,39 @@ export async function handleModelList(
  */
 export async function handlePluginConfig(): Promise<Response> {
   return ok(readPluginConfig());
+}
+
+/**
+ * The model files the settings page offers for `model.embedPath`.
+ *
+ * The list is the resolved models directory -- `readModelConfig` answers for the
+ * same precedence the runtime uses (`model.dir`, else the default) -- filtered to
+ * `.gguf` and sorted by name. The page renders it as a dropdown; a directory
+ * that is missing or unreadable comes back `available: false` and the page
+ * falls back to a plain path box, the same trade `handleModelList` makes.
+ *
+ * `effectivePath` is what the plugin would actually read right now: the
+ * configured path, or the resolved default when the key is absent. The page
+ * shows it under the box as the bare path, with no words around it -- the one
+ * fact about loading that never varies with advice.
+ */
+export async function handleModelFiles(): Promise<Response> {
+  const settings = readPluginConfig();
+  const model = readModelConfig(settings.options ?? {});
+  let entries: { name: string; path: string }[] = [];
+  let available = false;
+  try {
+    const dirents = await readdir(model.modelDir, { withFileTypes: true });
+    available = true;
+    entries = dirents
+      .filter((d) => d.isFile() && d.name.toLowerCase().endsWith(".gguf"))
+      .map((d) => ({ name: d.name, path: path.join(model.modelDir, d.name) }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  } catch {
+    // Missing or unreadable directory: stay quiet and let the page fall back
+    // to the path box, the same degraded-but-honest shape the other picker uses.
+  }
+  return ok({ dir: model.modelDir, entries, effectivePath: model.embedModelPath, available });
 }
 
 /**

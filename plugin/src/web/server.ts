@@ -39,6 +39,7 @@ import {
   handleDreams,
   handleMemoryApi,
   handleMemoryStats,
+  handleModelFiles,
   handleModelList,
   handlePluginConfig,
   handlePromptFiles,
@@ -400,6 +401,7 @@ export async function startWebServer(
         if (pathname === "/api/prompt-files") return handlePromptFiles(api.workspaceDir);
         if (pathname === "/api/dreams") return handleDreams();
         if (pathname === "/api/config") return handlePluginConfig();
+        if (pathname === "/api/model-files") return handleModelFiles();
         if (pathname === "/api/models") return handleModelList(api.listModels);
         const routed = await handleMemoryApi(request, { ...api, authEnabled: auth.isEnabled() });
         if (routed) return routed;

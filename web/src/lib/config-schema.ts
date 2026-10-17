@@ -21,7 +21,15 @@
 //   explicitly, and "恢复默认" deletes the key again. So the file stays as small
 //   as the user keeps it.
 
-export type FieldKind = "boolean" | "number" | "text" | "secret" | "enum" | "modelRef";
+export type FieldKind =
+  | "boolean"
+  | "number"
+  | "text"
+  | "secret"
+  | "enum"
+  | "modelRef"
+  /** A dropdown over the model files the resolved directory actually holds. */
+  | "modelFile";
 
 export type ConfigField = {
   /** Path inside the options object, e.g. `web.port`. */
@@ -130,8 +138,16 @@ export const CONFIG_SECTIONS: readonly ConfigSection[] = [
       {
         key: "model.embedPath",
         label: "嵌入模型",
-        kind: "text",
+        // A dropdown over the files the resolved models directory actually holds,
+        // not a free-text path: the file has to exist for vectors to work, so
+        // picking one that is really there beats typing a path from memory.
+        // The muted line under the box is what `/api/model-files` reports as the
+        // path the plugin would read right now -- the bare path, no advice.
+        kind: "modelFile",
         defaultValue: "",
+        // Only reached when the directory listing is unavailable (old server,
+        // missing folder): the fallback is typing, and this line then explains
+        // what the box takes.
         help: "留空 = 模型目录下的 bge-m3-Q8_0.gguf。写了路径又找不到 = 明确的坏配置。",
       },
       {

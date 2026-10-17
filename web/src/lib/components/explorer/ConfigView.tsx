@@ -67,6 +67,7 @@ export function ConfigView() {
               secrets={cfg.secrets}
               models={cfg.models}
               modelsAvailable={cfg.modelsAvailable}
+              modelFiles={cfg.modelFiles}
               disabled={blocked}
               onChange={cfg.setField}
             />

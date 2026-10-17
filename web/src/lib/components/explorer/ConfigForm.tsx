@@ -64,6 +64,18 @@ export type ConfigResponse = {
   error?: string;
 };
 
+/** One entry of `GET /api/model-files`: a GGUF in the resolved models directory. */
+export type ModelFileEntries = {
+  /** The directory the list came from, resolved the way the runtime resolves it. */
+  dir: string;
+  /** Eligible files sorted by name; `path` is the absolute path to write. */
+  entries: { name: string; path: string }[];
+  /** What the plugin would actually read right now -- configured path or resolved default. */
+  effectivePath: string;
+  /** `false` = the directory is missing or unreadable; the form falls back to typing. */
+  available: boolean;
+};
+
 /**
  * Everything a page needs to read and save the settings file.
  *
@@ -81,6 +93,7 @@ export function useConfigFile() {
   const [saved, setSaved] = useState<string | null>(null);
   const [models, setModels] = useState<ModelOption[] | null>(null);
   const [modelsAvailable, setModelsAvailable] = useState(true);
+  const [modelFiles, setModelFiles] = useState<ModelFileEntries | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -116,6 +129,22 @@ export function useConfigFile() {
         setModels(null);
         setModelsAvailable(false);
       }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // The model files for the embedPath dropdown: one fetch per mount, same shape
+  // as the OpenCode model list above. A refusal (old server, unreadable folder)
+  // leaves `null`, and the field falls back to typing a path -- worse but not
+  // broken, never an empty dropdown that reads as "you have no models".
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      const result = await fetchAPI<ModelFileEntries>("/api/model-files");
+      if (cancelled) return;
+      setModelFiles(result.success && result.data ? result.data : null);
     })();
     return () => {
       cancelled = true;
@@ -168,6 +197,7 @@ export function useConfigFile() {
     saved,
     models,
     modelsAvailable,
+    modelFiles,
     exists,
     parseErrors,
     secrets,
@@ -313,6 +343,7 @@ export function ConfigFormFields({
   secrets,
   models,
   modelsAvailable,
+  modelFiles,
   disabled,
   onChange,
 }: {
@@ -320,6 +351,7 @@ export function ConfigFormFields({
   secrets: Record<string, boolean>;
   models: ModelOption[] | null;
   modelsAvailable: boolean;
+  modelFiles: ModelFileEntries | null;
   disabled: boolean;
   onChange: (key: string, value: unknown) => void;
 }) {
@@ -336,6 +368,7 @@ export function ConfigFormFields({
               secrets={secrets}
               models={models}
               modelsAvailable={modelsAvailable}
+              modelFiles={modelFiles}
               disabled={disabled}
               onChange={onChange}
             />
@@ -364,6 +397,7 @@ function GroupBlock({
   secrets,
   models,
   modelsAvailable,
+  modelFiles,
   disabled,
   onChange,
 }: {
@@ -373,6 +407,7 @@ function GroupBlock({
   secrets: Record<string, boolean>;
   models: ModelOption[] | null;
   modelsAvailable: boolean;
+  modelFiles: ModelFileEntries | null;
   disabled: boolean;
   onChange: (key: string, value: unknown) => void;
 }) {
@@ -394,6 +429,7 @@ function GroupBlock({
         secretSet={secrets[row.key] === true}
         models={models}
         modelsAvailable={modelsAvailable}
+        modelFiles={modelFiles}
         disabled={disabled}
         onChange={(next) => onChange(row.key, next)}
         // A null default is the absent key, so reset deletes rather than writes
@@ -495,6 +531,7 @@ function FieldRow({
   secretSet,
   models,
   modelsAvailable,
+  modelFiles,
   disabled,
   onChange,
   onReset,
@@ -504,6 +541,7 @@ function FieldRow({
   secretSet: boolean;
   models: ModelOption[] | null;
   modelsAvailable: boolean;
+  modelFiles: ModelFileEntries | null;
   disabled: boolean;
   onChange: (next: unknown) => void;
   onReset: () => void;
@@ -514,6 +552,7 @@ function FieldRow({
   // it cannot know which ones the form manages -- absence is no longer the signal.
   const effective = value === undefined ? field.defaultValue : value;
   const isDefault = effective === field.defaultValue;
+  const helpLine = field.kind === "modelFile" && modelFiles ? modelFiles.effectivePath : field.help;
 
   return (
     <div className="grid gap-1.5 sm:grid-cols-[minmax(0,15rem)_minmax(0,1fr)] sm:items-start sm:gap-4">
@@ -543,6 +582,7 @@ function FieldRow({
             secretSet={secretSet}
             models={models}
             modelsAvailable={modelsAvailable}
+            modelFiles={modelFiles}
             disabled={disabled}
             onChange={onChange}
           />
@@ -559,10 +599,23 @@ function FieldRow({
             </Button>
           ) : null}
         </div>
-        {field.help ? <p className="text-sm leading-relaxed text-muted-foreground">{field.help}</p> : null}
+        {/* A modelFile row shows the path it will actually read, not advice about
+            it: the resolved path is the fact users compare against Explorer, and
+            it answers "留空以后到底会读哪个文件" without a sentence around it.
+            `field.help` stays as the line for every other kind, and as the
+            fallback for a modelFile row when the listing never arrived. */}
+        {helpLine ? renderHelpLine(helpLine, helpLine === field.help) : null}
       </div>
     </div>
   );
+}
+
+/** Help text is a sentence; a resolved path is data, and data reads best as code. */
+function renderHelpLine(line: string, asText: boolean) {
+  if (asText) {
+    return <p className="text-sm leading-relaxed text-muted-foreground">{line}</p>;
+  }
+  return <code className="block break-all text-xs leading-relaxed text-muted-foreground">{line}</code>;
 }
 
 function Control({
@@ -572,6 +625,7 @@ function Control({
   secretSet,
   models,
   modelsAvailable,
+  modelFiles,
   disabled,
   onChange,
 }: {
@@ -581,6 +635,7 @@ function Control({
   secretSet: boolean;
   models: ModelOption[] | null;
   modelsAvailable: boolean;
+  modelFiles: ModelFileEntries | null;
   disabled: boolean;
   onChange: (next: unknown) => void;
 }) {
@@ -636,6 +691,42 @@ function Control({
           <p className="text-sm text-muted-foreground">{t("cfg-model-empty")}</p>
         ) : null}
       </div>
+    );
+  }
+
+  if (field.kind === "modelFile") {
+    const current = typeof value === "string" ? value : "";
+    if (modelFiles?.available && modelFiles.entries.length > 0) {
+      return (
+        <Picker
+          id={id}
+          disabled={disabled}
+          value={current}
+          onChange={onChange}
+          searchable
+          className="sm:max-w-md"
+          options={modelFiles.entries.map((entry) => ({
+            value: entry.path,
+            label: entry.name,
+          }))}
+          // The empty value is the absent key, which is the resolved default
+          // file inside `models/`; its muted line below already shows that path.
+          emptyLabel={t("cfg-embedpath-follow-default")}
+        />
+      );
+    }
+    // No listing (endpoint gone, folder missing): a typed path is the worse but
+    // unbroken shape, the same trade the modelRef picker makes above. The fallback
+    // input is as wide as the text-kind rows are -- a truncated path cannot be
+    // read back off the screen.
+    return (
+      <Input
+        id={id}
+        disabled={disabled}
+        className="sm:max-w-md"
+        value={current}
+        onChange={(event) => onChange(event.target.value)}
+      />
     );
   }
 
