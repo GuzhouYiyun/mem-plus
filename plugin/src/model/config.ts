@@ -100,6 +100,15 @@ export type ModelConfig = {
    * iGPU whose shared memory is already partly claimed by the desktop.
    */
   readonly gpuLayers: number | "auto";
+  /**
+   * 显存预留（GB），透传给 node-llama-cpp `getLlama` 的 `vramPadding`。引擎的
+   * `"auto"` 本身是逐层模拟试装，但按的是**当刻**的空闲显存：这张卡同时跑着
+   * 别的程序时，算出到真正加载之间挤进来的显存需求，就是
+   * withcatai/node-llama-cpp#551 里那种整进程撞 CUDA SIGABRT 的死法——JS 层
+   * 接不住，memory search 直接拖着 OpenCode 一起没。`null` = 不传该参数，引擎
+   * 用自己的默认（3.22.1 为总显存的 8%、上限 1.6GB，`defaultLlamaVramPadding`）。
+   */
+  readonly vramPadding: number | null;
   readonly logLevel: "silent" | "warn" | "info" | "debug";
 };
 
@@ -222,6 +231,14 @@ function readGpuLayers(value: unknown): number | "auto" {
   return "auto";
 }
 
+/** 显存预留（GB）：有限数字才收，钳在 0–64；null = 引擎自己的默认。 */
+function readVramPadding(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return Math.min(64, Math.max(0, value));
+  }
+  return null;
+}
+
 /**
  * Embedding requirement, ported from openclaw's
  * `MemoryEmbeddingProviderRequirement` (extensions/memory-core/src/memory/
@@ -279,6 +296,7 @@ export function readModelConfig(options: unknown): ModelConfig {
     embedPathExplicit: readString(nested["embedPath"]) !== undefined,
     threads: readNumber(nested["threads"], 0, 0, 128),
     gpuLayers: readGpuLayers(nested["gpuLayers"]),
+    vramPadding: readVramPadding(nested["vramPadding"]),
     logLevel: readLogLevel(nested["logLevel"]),
   };
 }

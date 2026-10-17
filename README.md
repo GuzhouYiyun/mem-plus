@@ -177,6 +177,7 @@ memory_reindex { "embed": true }
 | `model.embed` | `true` | `false` 时只用全文检索 |
 | `model.gpu` | `"auto"` | GPU 后端：`auto` / `discrete` / `integrated` |
 | `model.gpuLayers` | `"auto"` | 分配至显存的层数，`"auto"` 按当前显存计算，也可填 0–999 |
+| `model.vramPadding` | 引擎默认 | 额外预留的显存（GB），0–64。显卡同时跑游戏等程序时调大，防止向量模型把显存挤爆 |
 | `model.threads` | `0` | 宿主侧运算的 CPU 线程数，`0` 为运行时决定 |
 | `model.logLevel` | `"warn"` | 本地推理日志：`silent` / `warn` / `info` / `debug` |
 

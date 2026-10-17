@@ -33,8 +33,8 @@ export type ConfigField = {
    */
   label: string;
   kind: FieldKind;
-  /** The plugin's own default, as its reader spells it. */
-  defaultValue: string | number | boolean;
+  /** The plugin's own default, as its reader spells it. `null` names a field whose default is the absent key: the file may omit it, and the reader falls back to what the engine does on its own. */
+  defaultValue: string | number | boolean | null;
   /** One line on what it does and why it exists. Long is fine here. */
   help?: string;
   choices?: readonly string[];
@@ -186,6 +186,22 @@ export const CONFIG_SECTIONS: readonly ConfigSection[] = [
         min: 0,
         max: 999,
         help: "留空 = auto（按当前显存算）。也可以直接写 0–999 的整数。",
+      },
+      {
+        key: "model.vramPadding",
+        label: "显存预留",
+        // `null` is the first defaultValue of its kind: the default here is not a
+        // value the file can hold, it is "the key is absent and the engine does
+        // what it always does" (8% of total VRAM, capped at 1.6GB, in
+        // node-llama-cpp 3.22.1). The number box renders that as an empty box and
+        // an 恢复默认 press deletes the key rather than writing `null` into it.
+        // 0 remains its own value -- "reserve nothing" is a real setting, and the
+        // cheapest way to reintroduce the crash this knob exists to prevent.
+        kind: "number",
+        defaultValue: null,
+        min: 0,
+        max: 64,
+        help: "额外预留的显存（GB）。显卡同时跑游戏等程序时调大，防止向量模型算好比预留多、一加载就把显存挤爆（引擎自身的 auto 只看打分那一刻的空闲量）。",
       },
       {
         key: "model.contextSize",

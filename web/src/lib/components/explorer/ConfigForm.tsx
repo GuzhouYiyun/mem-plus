@@ -396,7 +396,9 @@ function GroupBlock({
         modelsAvailable={modelsAvailable}
         disabled={disabled}
         onChange={(next) => onChange(row.key, next)}
-        onReset={() => onChange(row.key, row.defaultValue)}
+        // A null default is the absent key, so reset deletes rather than writes
+        // `null` into the file.
+        onReset={() => onChange(row.key, row.defaultValue === null ? undefined : row.defaultValue)}
       />
     ),
   );
@@ -716,7 +718,13 @@ function Control({
     // browser treats a non-numeric value as invalid -- but relying on that makes
     // the display an accident of the browser instead of a decision.
     const sentinel = typeof field.defaultValue === "string" ? field.defaultValue : undefined;
-    const text = value === undefined || value === "" || value === sentinel ? "" : String(value);
+    // `null` means the same thing `undefined` does here -- the key is absent and
+    // the engine decides (it is what a null-default field resets to when it
+    // cannot be deleted outright). Rendering it through `String(value)` would put
+    // the literal word `null` into a number box, so it joins the absent family.
+    const absent =
+      value === undefined || value === null || value === "" || value === sentinel;
+    const text = absent ? "" : String(value);
     return (
       <Input
         id={id}
@@ -727,7 +735,7 @@ function Control({
         min={field.min}
         max={field.max}
         value={text}
-        placeholder={String(field.defaultValue)}
+        placeholder={field.defaultValue === null ? "" : String(field.defaultValue)}
         onChange={(event) => {
           const raw = event.target.value;
           if (raw === "") return onChange(field.allowZero ? 0 : undefined);

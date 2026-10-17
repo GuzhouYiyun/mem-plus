@@ -274,6 +274,7 @@ export function createServiceClient(
         "--embed", models.embedModelPath,
         ...(models.threads > 0 ? ["--threads", String(models.threads)] : []),
         ...(models.gpuLayers !== "auto" ? ["--gpu-layers", String(models.gpuLayers)] : []),
+        ...(models.vramPadding !== null ? ["--vram-padding", String(models.vramPadding)] : []),
         "--log-level", models.logLevel,
       ],
       {

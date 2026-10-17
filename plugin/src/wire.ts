@@ -353,6 +353,16 @@ async function runWireAttempt(
     }
     if (!text) throw new Error("empty completion");
     return text;
+  } catch (error) {
+    // The abort the timer issued is a timeout, not a network failure: name it as
+    // the contract above promises (`timed out after Nms`), so the caller's labels
+    // distinguish "the model was slow" from "the gateway fell over". A caller
+    // abort of its own is passed through untouched -- that is why the flag exists
+    // rather than testing the error's name.
+    if (timedOut && !request.signal?.aborted) {
+      throw new Error(`timed out after ${String(timeoutMs)}ms`);
+    }
+    throw error;
   } finally {
     clearTimeout(timer);
     request.signal?.removeEventListener("abort", forwardAbort);

@@ -83,8 +83,9 @@ export async function completeThroughHost(
       const data = (def as {
         data?: { providerID?: string; modelID?: string; id?: string } | null;
       }).data;
-      if (data?.providerID && (data.modelID || data.id)) {
-        modelRef = { providerID: data.providerID, id: data.modelID ?? data.id };
+      if (data?.providerID) {
+        const id = data.modelID ?? data.id;
+        if (id) modelRef = { providerID: data.providerID, id };
       }
     } catch {
       // 保持 modelRef 为 undefined，由 OpenCode 内部自行选择默认模型

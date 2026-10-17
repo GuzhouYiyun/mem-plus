@@ -78,7 +78,7 @@ function log(message, detail) {
 // ---------------------------------------------------------------- 配置
 
 function readArgs(argv) {
-  const args = { port: 4748, idleMinutes: 10, gpu: "auto", threads: 0, gpuLayers: "auto", logLevel: "warn" };
+  const args = { port: 4748, idleMinutes: 10, gpu: "auto", threads: 0, gpuLayers: "auto", vramPadding: null, logLevel: "warn" };
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i];
     const value = argv[i + 1];
@@ -88,6 +88,13 @@ function readArgs(argv) {
       case "--gpu": args.gpu = value; i++; break;
       case "--threads": args.threads = Number(value); i++; break;
       case "--gpu-layers": args.gpuLayers = value === "auto" ? "auto" : Number(value); i++; break;
+      // 显存预留来自 client.ts，单位 GB；钳在 0–64，与插件侧 readVramPadding 同一收口。
+      case "--vram-padding": {
+        const gigabytes = Number(value);
+        args.vramPadding = Number.isFinite(gigabytes) ? Math.min(64, Math.max(0, gigabytes)) : null;
+        i++;
+        break;
+      }
       case "--log-level": args.logLevel = value; i++; break;
       case "--embed": args.embedPath = path.resolve(value); i++; break;
     }
@@ -161,6 +168,11 @@ async function openLlama() {
         gpu,
         logLevel: levels[config.logLevel],
         ...(config.threads > 0 ? { maxThreads: config.threads } : {}),
+        // 引擎按字节收这个预留；不传就是引擎自己的 8%/1.6GB 默认（getLlama.js
+        // 的 defaultLlamaVramPadding）。
+        ...(config.vramPadding != null
+          ? { vramPadding: Math.round(config.vramPadding * 1024 ** 3) }
+          : {}),
       });
       state.llama = llama;
       state.backend = describeGpu(llama.gpu);
