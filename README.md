@@ -151,6 +151,10 @@ New-Item -ItemType Directory -Force "$env:USERPROFILE\.config\opencode\mem-plus\
 | 文件 | 用途 | 大小 | 国内（ModelScope） | 海外（Hugging Face） |
 |---|---|---|---|---|
 | `bge-m3-FP16.gguf` | 向量检索 | 约 1.2 GB | [下载](https://modelscope.cn/models/gpustack/bge-m3-GGUF/resolve/main/bge-m3-FP16.gguf) | [下载](https://huggingface.co/gpustack/bge-m3-GGUF/resolve/main/bge-m3-FP16.gguf) |
+| `bge-m3-Q8_0.gguf` | 向量检索（压缩版，效果与 FP16 基本一致） | 约 635 MB | [下载](https://modelscope.cn/models/gpustack/bge-m3-GGUF/resolve/main/bge-m3-Q8_0.gguf) | [下载](https://huggingface.co/gpustack/bge-m3-GGUF/resolve/main/bge-m3-Q8_0.gguf) |
+
+两个文件是同一模型的两种精度。换用其中一个后（改 `model.embedPath` 或改默认名），要执行一次
+「重建并嵌入」——向量是按文件整套算的，不能新旧混用。
 
 必须是带 embedding 头的模型，否则生成不出向量。**要求显卡，不使用 CPU 推理**：无可用 GPU 时推理服务拒绝启动，日志记录 `gpu backend unavailable; service will not start`。AMD 与 Intel 的独显走 vulkan，`model.gpu` 保持 `auto` 即可，取 `discrete` 会漏掉它们。
 
