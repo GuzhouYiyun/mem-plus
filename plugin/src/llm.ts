@@ -72,13 +72,32 @@ export async function completeThroughHost(
   const prompt = request.systemPrompt
     ? `${request.systemPrompt}\n\n${request.prompt}`
     : request.prompt;
+
+  // 用户未显式指定 model.hostedModel 时，每次调用前都读 OpenCode 当前的默认模型，
+  // 而不是沿用插件进程启动时锁死的值。这样用户在 OpenCode 里切换默认模型后，
+  // 无需重启插件即可生效；读取失败则回落到让 OpenCode 内部自行决定。
+  let modelRef = request.model;
+  if (!modelRef) {
+    try {
+      const def = await ctx.model.default();
+      const data = (def as {
+        data?: { providerID?: string; modelID?: string; id?: string } | null;
+      }).data;
+      if (data?.providerID && (data.modelID || data.id)) {
+        modelRef = { providerID: data.providerID, id: data.modelID ?? data.id };
+      }
+    } catch {
+      // 保持 modelRef 为 undefined，由 OpenCode 内部自行选择默认模型
+    }
+  }
+
   try {
     // `ctx.generate.text` takes no signal, so the timeout races the call rather than
     // aborting it. An abandoned call still costs the provider the tokens; what the timeout
     // buys is that the hook's own deadline is not blown while we wait.
     const call = ctx.generate.text({
       prompt,
-      ...(request.model ? { model: request.model } : {}),
+      ...(modelRef ? { model: modelRef } : {}),
     });
     const result = request.timeoutMs
       ? await Promise.race([
@@ -105,7 +124,7 @@ export async function completeThroughHost(
         const text = await wireText({
           ctx,
           prompt,
-          ...(request.model ? { ref: request.model } : {}),
+          ...(modelRef ? { ref: modelRef } : {}),
           ...(request.timeoutMs ? { timeoutMs: request.timeoutMs } : {}),
           ...(request.signal ? { signal: request.signal } : {}),
           ...(request.temperature !== undefined ? { temperature: request.temperature } : {}),
