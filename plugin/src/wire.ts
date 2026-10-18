@@ -29,6 +29,31 @@
 //   wire call ended that experiment (2026-10-17); a call without tools carries one
 //   placeholder tool again, the same trick 0.3.0 shipped.
 //
+//   2026-10-18 probe (temp plugin in a temp config dir, six live-gateway requests,
+//   one variable in each; full matrix in `docs/port-plan.md`): the production
+//   four-part UA -- rendered that day as `opencode/latest/2.0.32/cli` from the real
+//   `ctx.app` -- and the official two-part `opencode/<version>` BOTH pass, so the
+//   payload below is unchanged. What the gate actually checks about User-Agent is
+//   that the string contains a semver-parsable version at least 1.18.0
+//   (`opencode/0.1.0` -> `426 UpgradeRequired: OpenCode 1.18.0 or newer is required
+//   to use the free tier`; a git-described `2.0.32-1-g1234abc` parses as semver and
+//   passed, so the Issue-sourced claim that git descriptions are rejected does not
+//   hold for anything semver-shaped). The session-header FORMAT is still enforced
+//   -- a 29-character id took `403 FreeTierError` verbatim -- but the embedded
+//   timestamp is no longer: the same 45-day-old shape that took a 403 on 2026-10-16
+//   passed on 2026-10-18. The host-path refusal matcher (`isFreeTierRejection`)
+//   deliberately does not claim the 426 spelling: an old client version is not
+//   something a re-shaped request can fix, so it must surface as an error instead
+//   of triggering the fallback.
+//
+//   Streaming shape, same probe: today's default free models are reasoning models
+//   and the stream carries `delta.reasoning_content` first; with a 16-token budget
+//   it is reasoning all the way to `finish_reason: "length"` and `delta.content`
+//   never appears. Production callers set no token cap, so the assembler's
+//   content-only accumulation still gets text once reasoning finishes -- but a
+//   call whose whole token budget burns on reasoning ends in `empty completion`,
+//   and that failure mode is now a recorded risk (docs/port-plan.md, 2026-10-18).
+//
 // WHEN IT RUNS
 //   Only after the host path has already been refused, and only when the target model
 //   resolves to the OpenCode gateway. `completeThroughHost` always tries
@@ -64,11 +89,19 @@ let mintMillisecond = 0;
 let mintCounter = 0;
 
 /**
- * A fresh session-shaped id. The gate decodes the timestamp out of this string and
- * refuses stale ones, so a constant cannot be configured; each call mints its own.
+ * A fresh session-shaped id. The FORMAT of this string is load-bearing and was
+ * enforced at both measurements: `ses_` + 12 lowercase hex + 14 base62 characters.
+ * A truncated (29-character) id took `403 FreeTierError` on 2026-10-18.
  *
- * Recovered from the client binary and confirmed against the live gateway (a minted id
- * is accepted, a 45-day-old one is not):
+ * The timestamp inside is minted fresh per call and each call mints its own -- but
+ * the two dated measurements diverge on whether the gate still checks it: on
+ * 2026-10-16 a 45-day-old id was refused and a fresh one accepted; on 2026-10-18
+ * the identical stale shape passed, so freshness is not currently enforced. The
+ * per-call mint stays anyway -- it costs nothing, it matched the day the
+ * freshness check was real, and it tracks whatever the gate restores next.
+ *
+ * Format historically recovered from the client binary and confirmed against the
+ * live gateway (a minted id is accepted, a truncated one is not):
  *
  *   r = BigInt(now) * 0x1000n + per-millisecond counter
  *   a = ~r                       (the `ses_` form is the inverted one)

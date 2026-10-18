@@ -2282,3 +2282,50 @@ vector 结果(7.8s)。发布状态不变:仍未发布,本地领先远端 6 笔(�
 顺带发现、未改:`installer/nsis/installer.nsi:112-115` 的注释仍在描述旧设计
 (「安装器自己先 `stop` 再 `start`」),与实现不符 —— `RestartOpenCode` 只查状态、只
 `restart`;欢迎页文案与实现一致。
+
+## 免费档闸门复测:UA 版本下限是硬门,会话新鲜度不是(2026-10-18)
+
+上游 Issue 里的完整请求逆向(用户带来)说免费档校验是两道门:`User-Agent` 必须是
+`opencode/<较新版本号>`(semver 之外的写法被拒),`x-opencode-session` 必须是官方格式
+(`ses_` + 12 hex + 14 base62)且时间戳「合理」。今天用六发探针把这两条逐变量钉死,
+**结论:线级 payload 一字不改,注释与台账落事实**。探针法与 10-16 相同:临时
+config 目录(`OPENCODE_CONFIG_DIR`)+ 零依赖探针插件(`define` 只是恒等,
+`{id, setup}` 裸对象即可;temp 下无 `@opencode/plugin` 也照样装);`opencode serve`
+空转**不**装插件 —— 插件加载挂在项目/会话上,`opencode run` 必创会话才把钩子装进
+来,首测因此扑空。真 `ctx` 当值:`ctx.app = {name:"cli", version:"2.0.32",
+channel:"latest"}`,`ctx.model.default()` 解析出 `opencode/nemotron-3.5-super-vl-free`,
+baseURL `https://opencode.ai/inference/openai/v1`(本机默认免费模型已不是 glm)。
+
+| # | 请求(六发各只改一个变量,形状同 0.3.0 兜底) | 结果 |
+|---|---|---|
+| V0 | 生产四段式 `opencode/latest/2.0.32/cli`,现铸 id | 200 |
+| V1 | 两段官方 `opencode/2.0.32`,现铸 id | 200 |
+| V2 | git 描述串 `opencode/2.0.32-1-g1234abc`,现铸 id | 200(带预版本后缀,解析为合法 semver) |
+| V3 | `opencode/0.1.0`,现铸 id | **426**:`OpenCode 1.18.0 or newer is required to use the free tier` |
+| V4 | 生产四段式,id 的 hex 部分铸成 **45 天前**的时间戳 | 200(与 10-16 相反,见下) |
+| V5 | 生产四段式,id 少一位(全长 29 字符) | **403**:`FreeTierError` 原文,拼写未变 |
+
+两道门的今天读法:
+
+1. **UA 之门 = 字符串里得有可解析 semver,且 ≥ 1.18.0(426 给出地板数字)。** 两段、四段
+   皆过;"git 描述串被拒"的说法只对完全 parse 不了的串成立,`2.0.32-1-g1234abc` 这种
+   带预版本的 describe 是合法 semver,今天过。426 是门拒绝的第三种拼写,
+   `isFreeTierRejection` 有意不认 —— 客户端太旧不是改形请求能修的事,必须暴露为错误。
+2. **会话 id 之门 = 只验格式,时间戳今天不验。** 少一位 → 403;45 天前 → 200,
+   而 10-16 的探针是 45 天前 → 403。`wire.ts` 每调用现铸的作法不变:零成本,
+   两边实测各占一半,对齐 gate 哪天恢复检查的那一侧。
+3. **流形状(新增知识):默认免费模型已是推理模型。** SSE 先出 `delta.reasoning_content`
+   后出 `delta.content`;`max_tokens:16` 的探针全程只有推理、`finish_reason:"length"`、
+   content 一次不出。生产调用方(capture 抽取、deep recall、promotion、本地化)都不设
+   `max_tokens`,装配器只装 content,所以额度若在推理阶段被默认上限烧尽,即以
+   `empty completion` 收场 —— 新记录的风险,不是当天修的;官方客户端同样不关推理,
+   本模按「照官方形状」不开旁门参数。
+
+瞬态两次 500(`application/json` 空体,`x-request-id` 已记)后,同形状连发 200/200
+(1935ms/1384ms)—— `wireText` 的三次退避重试在挣饭。
+
+**改动**:`plugin/src/wire.ts` 只动注释 + 恢复 `runWireAttempt` 里被上个会话误删的
+`timed out after Nms` catch(头注释第 242 行承诺的契约,catch 正文逐字取自 HEAD);
+请求体、UA 模板、铸造算法全部未动。AGENTS.md 陷阱清单同步补「agent 配置 deny
+bash/read 被误杀」一条(上游报、非本仓测,归在网关缺陷,防止将来本仓 403 波被错归因)。
+
