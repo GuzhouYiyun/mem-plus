@@ -2329,3 +2329,23 @@ baseURL `https://opencode.ai/inference/openai/v1`(本机默认免费模型已不
 请求体、UA 模板、铸造算法全部未动。AGENTS.md 陷阱清单同步补「agent 配置 deny
 bash/read 被误杀」一条(上游报、非本仓测,归在网关缺陷,防止将来本仓 403 波被错归因)。
 
+## 本地打包 0.3.1(2026-10-18)
+
+打包前先清树:工作树躺着一笔未提交的 `config-schema.ts` 回退(把 10-17 的下拉框
+打回文本框、帮助文案回到 FP16),用户判定是**没改完的半成品**,目标形态就是 
+c12e2642 已提交的「下拉显示文件名 + 浅字行显示模型文件夹路径」,遂 `checkout HEAD`
+还原;用户随后在浏览器里补了要求——**下拉不要「跟随模型目录的默认文件」伪选项,
+未选显示「无」**。实现:`picker.tsx` 新增 `emptyDisplay`(仅关闭态替换空值显示,
+不往列表塞行),嵌入模型行改用之,恢复默认语义仍走行侧按钮(460bc356)。
+
+| | 实测 |
+|---|---|
+| 浏览器验证 | preview-web 起真服务(仓库 models/ 有 FP16+Qwen 两个 gguf 可列),chrome 实看:未选框内「无」、展开仅两个真文件、选中显文件名、浅字行 = 目录裸路径;选中只进本地态,不保存、不留痕 |
+| web/dist 发现 | 打包前现用的 dist(10-17 18:43 构建)是**陈货**——页面仍显示 HEAD schema 已删的 `model.contextSize` 行;删除后按当前源码重建,页面与 schema 一致。`build-web.mjs` 的跳过设计(「ship what you tested」)这次差点把陈货带上车 |
+| 门 | 插件 4240 / capture 331(与基线逐数字一致)、`node --check serve/server.mjs` 过、`audit-npm-pack --check` no drift |
+| payload | **2540 文件、18.5 MB**,对工作树(== HEAD,commit 后状态干净)全量逐字节 MD5 比对:**missing 0、diff 0** |
+| exe | `mem-plus-installer-0.3.1.exe` 3,313,888 字节(3.16 MB),sha256 `67D581442083111B69480BB45D5818066A8E5D84EFA0B40889CB256EC4FE5315` |
+| tgz | `mem-plus-0.3.1.tgz` 4,548,332 字节,sha256 `2301BE183CEDAB78F8A325BAF013D956737AC8D90D7A0184598482C000B77B32` |
+| 探针残迹 | preview 进程泄漏两回(`Select-Object -First 5` 截断管道没杀掉 bun、4747 被孤儿 bun 占用),补杀后清理;preview 生成的 `~/.config/opencode/mem-plus/`(config.jsonc、.auth-token、index.db*)整目录删除,还原会话开始时的「记忆目录不存在」状态;真实安装未跑(机主自己双击装) |
+
+
