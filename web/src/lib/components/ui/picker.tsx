@@ -56,8 +56,21 @@ type Props = {
   disabled?: boolean;
   /** Show a filter box. Worth it past about six options. */
   searchable?: boolean;
-  /** Offer an empty value as a real choice (the "follow the default" entry). */
+  /**
+   * Offer an empty value as a real choice (the "follow the default" entry): the
+   * row appears in the list AND the closed control shows it while the value is
+   * empty. The reset button beside the field is the other way back to a field's
+   * default, so a field that does not want the pseudo-row passes `emptyDisplay`
+   * below instead.
+   */
   emptyLabel?: string;
+  /**
+   * What the closed control shows when the value is empty, WITHOUT adding a row
+   * to the list: the default is reachable through the reset button, not through
+   * a list entry that reads like a file you could serve. A non-empty value that
+   * matches no option still shows the raw value -- an honest answer.
+   */
+  emptyDisplay?: string;
   /** What the closed control shows when nothing matches / no value is set. */
   placeholder?: string;
   /** Shown when the filter matches nothing. */
@@ -73,6 +86,7 @@ export function Picker({
   disabled,
   searchable = false,
   emptyLabel,
+  emptyDisplay,
   placeholder,
   emptyResult,
   className,
@@ -196,7 +210,7 @@ export function Picker({
         )}
       >
         <span className={cn("min-w-0 flex-1 truncate", !selectedKnown && "text-muted-foreground")}>
-          {selectedKnown ? selected?.label : (placeholder ?? (value || "—"))}
+          {selectedKnown ? selected?.label : (value ? value : (emptyDisplay ?? placeholder ?? "—"))}
           {selectedKnown && selected?.sublabel ? (
             <span className="ms-1.5 text-muted-foreground">{selected.sublabel}</span>
           ) : null}

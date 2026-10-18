@@ -715,8 +715,9 @@ function Control({
             label: entry.name,
           }))}
           // The empty value is the absent key, which resolves to the default
-          // file inside the folder named below.
-          emptyLabel={t("cfg-embedpath-follow-default")}
+          // file inside the folder named below. It is not offered as a list row
+          // -- the reset button writes it back -- so the list names files only.
+          emptyDisplay={t("cfg-embedpath-none")}
         />
       );
     }
