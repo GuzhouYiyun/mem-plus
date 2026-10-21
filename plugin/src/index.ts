@@ -51,7 +51,7 @@ import { forget as forgetHost } from "./forget.js";
 import { createServiceClient, type MemPlusService } from "./model/client.js";
 import { createLogger } from "./log.js";
 import { indexPath, openIndex } from "./memory-index.js";
-import { indexWrittenFile, indexTail } from "./memory-scan.js";
+import { indexWrittenFile } from "./memory-scan.js";
 import { buildMemoryTools } from "./memory-tools.js";
 import { completeThroughHost } from "./llm.js";
 import { buildStandingIntentTool } from "./standing-intents.js";
@@ -371,12 +371,14 @@ export default Plugin.define({
     }
 
     /**
-     * Index a file the write path just replaced in full.
+     * Index files the write path rewrote in full: a session snapshot every turn,
+     * and `MEMORY.md` after a promotion round.
      *
-     * Snapshots rewrite their whole file every turn, so the cheap tail path would
-     * leave last turn's turns behind as duplicate search hits. Never throws: the
-     * index is derived data, and a failed update is repaired by
-     * `memory_reindex` without the user needing to know it happened.
+     * A snapshot rewrites its whole file every turn, so the previous turn's units
+     * must go; re-reading and re-chunking is also what an appended daily file
+     * needs (see `indexAppended`). Never throws: the index is derived data, and a
+     * failed update is repaired by `memory_reindex` without the user needing to
+     * know it happened.
      */
     const indexReplaced = async (files: readonly string[]): Promise<void> => {
       if (!index) return;
@@ -394,6 +396,10 @@ export default Plugin.define({
           // is stored with a NULL provenance class and the trigger-injection gate
           // (`isPromotedTrustedMemoryEntry`) rejects all of them.
           memoryHome: memoryHomeDir(),
+          // The chunks are only eligible for vectors if they carry the same model
+          // string the embed/search passes use; `indexWrittenFile` defaults to
+          // fts-only when this is omitted.
+          model: modelConfig.embedModelPath,
           log,
         });
         if (written > 0) log(`indexed ${written} unit(s) from ${file}`);
@@ -401,20 +407,36 @@ export default Plugin.define({
     };
 
     /**
-     * Index the tail of a file the write path just appended to.
+     * Index a file the write path just appended to.
      *
-     * The daily entry file only ever grows, so only its new block needs parsing.
-     * Units already in the index are recognised by provenance marker, which is
-     * the same idempotency openclaw's write path uses -- so a re-run costs one
-     * read and inserts nothing.
+     * This used to take a tail-only path (`indexTail` -> `indexAppendedTail`), and
+     * that path never classified provenance: `indexDocument` then stored the
+     * document as `untrusted` (`upstreamProvenance(undefined)`), which the
+     * promotion gate rejects. Every captured daily entry was therefore ineligible
+     * the moment it was written, and `MEMORY.md` could never be produced no matter
+     * how often an entry was recalled.
+     *
+     * It now goes through the same full re-index as a replaced file, which is
+     * upstream's shape anyway: a chunk's identity is a hash over its text and
+     * span, so there is no stable way to add only the new fragments, and upstream
+     * clears `(path, source)` and re-chunks the whole file for an append too. One
+     * capture re-chunks its whole day file; that file is a day, not `MEMORY.md`.
      */
     const indexAppended = async (file: string): Promise<void> => {
       if (!index) return;
-      const written = await indexTail({
+      const written = await indexWrittenFile({
         db: index,
         file,
         root: "home",
         project: homeProjectSlug(file),
+        // The write path records provenance for every artifact it writes; without
+        // the home the classifier is never consulted and the document is stored
+        // with no provenance at all.
+        memoryHome: memoryHomeDir(),
+        // Same reason as `indexReplaced`: without the model the chunks are written
+        // fts-only and no embed pass will ever select them.
+        model: modelConfig.embedModelPath,
+        log,
       });
       if (written > 0) log(`indexed ${written} new unit(s) from ${file}`);
     };
@@ -767,6 +789,12 @@ export default Plugin.define({
             `promotion: applied ${promotion.applied}/${promotion.candidates} candidate(s) ` +
               `into MEMORY.md (${promotion.rejected} rejected)`,
           );
+          // Promotion rewrites MEMORY.md in place, and nothing re-indexed it: the
+          // file is only discovered by a full scan, so lane 1c
+          // (`listTriggerCandidates`) and `memory_search` kept serving the
+          // pre-promotion text until the next `memory_reindex`. Index it here,
+          // through the same path as every other full-file write.
+          await indexReplaced([path.join(memoryHomeDir(), DEFAULT_MEMORY_FILENAME)]);
         }
       } catch (error) {
         log("dreaming sweep failed", error);

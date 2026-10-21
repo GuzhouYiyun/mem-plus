@@ -10,7 +10,7 @@ mem-plus 是 OpenCode 的持久记忆插件。记忆跨会话、跨项目保留�
 
 **你的记忆就是 markdown 文件。** 全部记忆以 `MEMORY.md`、`DREAMS.md` 和 `memory/<项目名>--<哈希>/<日期>-<标题>.md` 的形式落在 `~/.config/opencode/mem-plus/`，可以直接打开、修改、删除、用 git 管起来。检索索引由这些文件生成，删掉索引不会丢记忆，`memory_reindex` 就能重建。项目目录里一个文件都不写。
 
-**出机的只有对话本身。** 条目抽取、整合与每日睡眠整理跑在你在 OpenCode 里已经配好的模型上，不额外要 API key、provider 或 endpoint，认证和计费都由 OpenCode 负责。语义检索需要本机放一个向量模型（约 1.2 GB，`bge-m3`），不装就退化成关键词检索，其余功能不受影响——它不会把记忆发给 OpenCode 之外的任何地方。
+**出机的只有对话本身。** 条目抽取、整合与每日睡眠整理跑在你在 OpenCode 里已经配好的模型上，不额外要 API key、provider 或 endpoint，认证和计费都由 OpenCode 负责。语义检索需要本机放一个向量模型（约 635 MB，`bge-m3`），不装就退化成关键词检索，其余功能不受影响——它不会把记忆发给 OpenCode 之外的任何地方。
 
 记忆浏览器在 `http://127.0.0.1:4747`：读写注入文件、看梦境日记、改设置、重建向量索引、删除某次会话产生的长期记忆。与 agent 无关，纯供人工查看。
 
@@ -23,7 +23,7 @@ mem-plus 是 OpenCode 的持久记忆插件。记忆跨会话、跨项目保留�
 | OpenCode | V2，`@opencode/plugin` 2.0.20 及以上。不支持 V1，`opencode --version` 查看 |
 | Node.js | 22.5 以上。低于此版本检索工具不注册，会话快照与条目抽取仍正常 |
 | GPU | 只有语义检索需要。条目抽取用 OpenCode 侧的模型 |
-| 磁盘 | 安装包约 4.5 MB；`npm install` 后的依赖树约 858 MB；向量模型约 1.2 GB（自行下载） |
+| 磁盘 | 安装包约 4.5 MB；`npm install` 后的依赖树约 858 MB；向量模型约 635 MB（自行下载） |
 
 ## 安装
 
@@ -347,7 +347,7 @@ opencode service restart
 
 记忆、索引与日志在 `~/.config/opencode/mem-plus/`，不在插件目录里，两种更新方式都不碰它们。各版本号与安装包见 [Releases](https://github.com/GuzhouYiyun/mem-plus/releases)。
 
-向量**模型**仍然要自己下载放置，约 1.2 GB，见[向量模型](#向量模型可选)。
+向量**模型**仍然要自己下载放置，约 635 MB，见[向量模型](#向量模型可选)。
 
 > 早期版本的安装器在不勾选「本地向量检索依赖」时会传入 `--omit=optional`，npm 会顺带把已装好的 `node-llama-cpp` 剪掉，于是更新后向量检索静默失效——日志只提示显卡不可用，与真实原因无关。该分支现已不可达：运行库每次都装，且报错会直接说明是包缺失而非显卡问题。
 

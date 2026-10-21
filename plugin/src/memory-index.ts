@@ -314,7 +314,8 @@ export function indexDocument(params: {
   /**
    * The embedding model whose vectors these chunks may carry. Part of the row identity
    * upstream (`manager-source-index-kernel.ts:72`), so it must be the same string the embed
-   * and search passes use. Omitted means `""`, which is what a keyword-only install uses.
+   * and search passes use. Omitted means `fts-only` (`memory-index-write.ts` NO_MODEL), which
+   * is what a keyword-only install uses.
    */
   model?: string;
 }): DocumentIndex {
@@ -369,43 +370,6 @@ export function pruneMissing(params: {
     removed.push(row.path);
   }
   return removed;
-}
-
-/**
- * Index a file the plugin just appended to.
- *
- * THIS IS NOW THE SAME CALL AS A FULL RE-INDEX, and that is upstream's behaviour rather than
- * a simplification. There is no tail path in upstream's index: `replaceRows` clears
- * `(path, source)` and re-chunks the whole file, because a chunk's identity is a hash over
- * its text and line span, so there is no stable way to add only the new fragments without
- * re-deriving the ones before them.
- *
- * mem-plus's own `indexAppendedTail` existed to skip re-reading a day file that had grown
- * from fifty entries to fifty-one, using `units.marker` to recognise what was already there.
- * `marker` retired with the rest of the mem-plus index (see `memory-index-write.ts`), so the
- * optimisation had nothing left to key on and was reimplementing the wrong half of the write.
- *
- * The cost is real and worth stating: one appended capture re-chunks its whole day file.
- * Upstream pays it too, and the file that grows is a day file, not `MEMORY.md`.
- */
-export function indexAppendedTail(params: {
-  db: DatabaseSync;
-  file: string;
-  root: IndexRoot;
-  project: string;
-  text: string;
-  bytes: number;
-  mtime: number;
-}): number {
-  return indexDocument({
-    db: params.db,
-    file: params.file,
-    root: params.root,
-    project: params.project,
-    text: params.text,
-    bytes: params.bytes,
-    mtime: params.mtime,
-  }).written;
 }
 
 // --- FTS query construction ------------------------------------------------

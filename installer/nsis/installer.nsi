@@ -107,7 +107,7 @@ VIAddVersionKey /LANG=2052 "LegalCopyright"  "MIT"
 ; "mem-plus 已安装。" to pair with the uninstaller's "mem-plus 已卸载。"; that was
 ; solving for symmetry nobody asked for, and "口语化严重" was about the welcome
 ; page's opening, not this one.
-!define MUI_FINISHPAGE_TEXT "安装成功。$\r$\n$\r$\n向量模型未随本安装包分发。请另行下载 bge-m3（约 1.2 GB），并放置于：$\r$\n$PROFILE\.config\opencode\mem-plus\models\"
+!define MUI_FINISHPAGE_TEXT "安装成功。$\r$\n$\r$\n向量模型未随本安装包分发。请另行下载 bge-m3（约 635 MB），并放置于：$\r$\n$PROFILE\.config\opencode\mem-plus\models\"
 
 ; Not an instruction any more. The installer stops OpenCode itself with
 ; `opencode service stop` before writing and starts it again afterwards, so the
@@ -447,7 +447,7 @@ SectionEnd
 ; turn on vector search; it removes one of two prerequisites. Calling it
 ; "本地向量检索" promised a feature the box does not deliver.
 ;
-; The model is not bundled because it is ~1.2 GB against a 3 MB installer, and
+; The model is not bundled because it is ~635 MB against a 3 MB installer, and
 ; most installs never need it -- full-text search is a complete mode, not a
 ; degraded one. See the description below for where to put it.
 ; Always installed. The last optional component was removed on 2026-10-12 at the
@@ -625,7 +625,7 @@ Section "Uninstall"
   ;
   ; That is not hypothetical here. `defaultModelDir()`
   ; (plugin/src/model/config.ts:121) resolves `<plugin root>/models` before falling
-  ; back to the state root, so bge-m3 (~1.2 GB) can legitimately sit inside the
+  ; back to the state root, so bge-m3 (~635 MB) can legitimately sit inside the
   ; directory being uninstalled. The payload ships no models/ at all, so anything
   ; named that is the user's, and deleting by name leaves it untouched -- in place,
   ; not moved.
@@ -742,7 +742,7 @@ LangString DESC_SecReload  ${LANG_SIMPCHINESE} \
 ; fourth paragraph. If this ever needs to grow, MUI2's default template has a
 ; full-height description pane on the right (see the layout comment above).
 LangString DESC_SecVectors ${LANG_SIMPCHINESE} \
-  "GPU 运行库。还需要另行下载 bge-m3 模型（约 1.2 GB）才能开启向量检索。"
+  "GPU 运行库。还需要另行下载 bge-m3 模型（约 635 MB）才能开启向量检索。"
 
 ; These four strings were shown on the components page, which no longer exists.
 ; Kept as a record of what each section is, because the wiring that displayed them

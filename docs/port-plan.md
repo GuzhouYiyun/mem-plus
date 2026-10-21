@@ -2348,4 +2348,103 @@ c12e2642 已提交的「下拉显示文件名 + 浅字行显示模型文件夹�
 | tgz | `mem-plus-0.3.1.tgz` 4,548,332 字节,sha256 `2301BE183CEDAB78F8A325BAF013D956737AC8D90D7A0184598482C000B77B32` |
 | 探针残迹 | preview 进程泄漏两回(`Select-Object -First 5` 截断管道没杀掉 bun、4747 被孤儿 bun 占用),补杀后清理;preview 生成的 `~/.config/opencode/mem-plus/`(config.jsonc、.auth-token、index.db*)整目录删除,还原会话开始时的「记忆目录不存在」状态;真实安装未跑(机主自己双击装) |
 
+## Q8_0 成为唯一向量模型 + 两处索引修复(2026-10-21)
 
+**模型。** `bge-m3-Q8_0.gguf` 从 `gpustack/bge-m3-GGUF` 经 `hf-mirror.com` 下载(HF 直连
+curl 28 超时),634,553,760 B。落位前解析 GGUF 元数据核对身份,不是把 FP16 改名:
+`general.architecture=bert`、`general.file_type=7 (Q8_0)`、24 层、embedding 1024、
+ctx 8192、MIT、389 tensors。三处同一硬链接(仓库 `models/`、活区
+`plugins/mem-plus/models/`、state root `models/`),`fsutil hardlink list` 确认同一文件,
+磁盘只多一份文件(634,553,760 B)。`readModelConfig({})` 在仓库与活区都解析到该文件,
+`resolveEmbedAvailability` = `{"mode":"optional"}`、`missingModelPaths` = `[]`;活区
+`server.mjs --embed <live>\models\bge-m3-Q8_0.gguf` 实起 vulkan,`POST /embed`
+返回 1024 维(首次 6.9 s)。
+
+FP16 删除:仓库与活区各 1,157,671,200 B 已删,profile 深度 5 无 `*FP16*`;索引侧本来
+就没有它的痕迹(chunks.model 全 `fts-only`、embedding 0 行、embedding cache 0 行),
+因此不需要重建向量。README 三处与安装器四处的「约 1.2 GB」改为「约 635 MB」。
+
+**修复 1:追加写入的索引没有 provenance。** `indexAppended` → `indexTail` →
+`indexAppendedTail` → `indexDocument` 一路不带 `provenance`,于是
+`upstreamProvenance(undefined)` 落成 `untrusted`(§8 的 file-write 规则只允许
+agent/untrusted);§4 的 `isPromotionOriginBlocked` 把 untrusted 全拒,每日条目
+再被召回也进不了 `MEMORY.md`。修法是让追加路径走已经带 `classify` 的
+`indexWrittenFile`(与快照同一条),删除 `indexTail` / `indexAppendedTail` 两条已无
+marker 语义的旧路。上游本来就没有 tail 索引(§2:chunk 身份是文本+跨度的哈希,
+`replaceRows` 整文件重切),这次只是把 mem-plus 自己的旁路收掉。
+
+**修复 2:晋升写完 `MEMORY.md` 后没有索引。** `runPromotionRound` 返回
+`applied > 0` 时,文件已由 `applyShortTermPromotions` 重写,但索引只在全量扫描时
+发现它;§5 的 curated 读侧(`isPromotedTrustedMemoryEntry`、lane 1c 的
+`listTriggerCandidates` 与 `memory_search`)因此一直读到晋升前的旧文本,直到下一次
+`memory_reindex`。现在在同一个 `applied > 0` 分支里 `indexReplaced([MEMORY.md])`,
+与快照走同一条完整重索引。
+
+| | 实测 |
+|---|---|
+| 真实路径探针(临时 `XDG_CONFIG_HOME` + 临时 index + 真函数) | 新追加路径:每日文件 1 chunk,`origin_class=agent`;旧的「不传 memoryHome」对照:同一形状文件 `origin_class=untrusted`;`MEMORY.md` 2 chunks,`origin_class=agent`;FTS 能命中 curated 文本 |
+| 门 | 插件 4240(plugin/extensions/bootstrap 0)、capture 331(同上 0)、`node --check serve/server.mjs` 过、`audit-npm-pack --check` no drift |
+| 未做 | 活区仍是 0.3.1,两处修复未部署;0.3.2 打包见下节,发布未做。`AGENTS.md` 与本文 10-15/10-18 的 FP16 历史记录(日期明确)保留,未改 |
+
+## 本地打包 0.3.2 首版(2026-10-21)
+
+> 首版产物已在同日被“0.3.2 重打”覆盖;下表的 exe/tgz 哈希是首版的历史记录,
+> 最终产物与哈希见下一节。
+
+版本号只动 `package.json`(0.3.1 → 0.3.2):`package-lock.json` 从 0.2.1 起就没跟着
+升级,0.3.0 与 0.3.1 两次 bump 也只改 `package.json`(`git show --stat` 实测),这次
+照旧。`installer/nsis/build.ps1` 按四步跑完:prepack(web 构建 + 打包审计)→
+`npm pack` → 解包成 payload → makensis;版本从 `package.json` 读,`version.nsh`
+与 tarball 内 `package.json` 都实测为 `0.3.2`,exe 的 FileVersion/ProductVersion
+也是 `0.3.2`。
+
+| | 实测 |
+|---|---|
+| payload | **2540 文件、18.5 MB**;manifest 2685 条(2540 文件 + 145 目录),运行时清单 2540 文件 / 145 目录,LF-only 检查通过。对工作树全量 SHA256 比对:**same 2540、diff 0、missing 0** |
+| exe | `mem-plus-installer-0.3.2.exe` 3,313,700 字节(3.16 MB,首版,已被覆盖),sha256 `45D07998EC7FBA57C1862BE4A1098F260B2FA60D017C457CD4C56180E6451326`;makensis 输出 4 页、4 段(4 required),install data 19,537,961 B 压到 3,261,472 B |
+| tgz | `mem-plus-0.3.2.tgz` 4,548,353 字节(4.34 MB,首版,已被覆盖),sha256 `B20452F273804C15036114259284DF8CBDF8848143EE6ABB84C9F90F87724010` |
+| FP16 残迹 | payload 里唯一大小写不敏感的 `fp16` 命中是 vendored `packages/llm-core/src/types.ts` 的量化级别注释,与模型无关;`README.md` 与 `installer.nsi` 无 `1.2 GB`,模型文案全是 `bge-m3-Q8_0.gguf` / 约 635 MB |
+| 当时未做 | 安装器未由本会话运行(机主自己双击);未打 tag、未 push、未发 Release。活区当时仍是 0.3.1,两处索引修复要装 0.3.2 才生效;模型文件已在活区就位,向量检索不受版本影响 |
+
+后续(机主同日安装首版 0.3.2):活区 `package.json` 0.3.2、payload 2540/2540 逐字节
+一致、四个 workspace 均 `plugin loaded`、4747 HTTP 200、`node_modules` 322 项含
+`node-llama-cpp`,模型两处均在。安装验证通过了“插件能加载”,但没有验证向量:索引里
+6 个 source / 150 个 chunk 全是 `fts-only`、0 条向量,`memory_reindex {"embed":true}`
+只报 `Reindexed 1 of 6 (5 unchanged)` / `Embedded 0`。根因与重打见下节。
+
+## 0.3.2 重打:向量索引的 model 断链(2026-10-21 晚)
+
+三条代码连成一条断链,模型文件和 GPU 服务都没问题:
+
+1. `indexWrittenFile` 没有 `model` 参数,快照、日文件、`MEMORY.md` 三条写入路径
+   都把 chunk 写成 `fts-only`;
+2. `unchangedSources` 只比 bytes+mtime,不看 chunk 的 model,于是 fts-only 的旧
+   source 在文件没变时永远被跳过,`memory_reindex` 也修不了;
+3. `chunksMissingVectors` 只选 `model = 嵌入模型路径` 且 `length(embedding)=0`
+   的 chunk,前两条叠加后它一条也选不到。
+
+修法按上游的 chunk 身份语义(`docs/memory-chain.md` §2;混合召回 §5):
+
+- `indexWrittenFile` 增加可选 `model`,透传给 `indexDocument`;
+- `indexReplaced` / `indexAppended` 传 `model: modelConfig.embedModelPath`;
+- `unchangedSources` 返回每个 source 的 chunk model 与是否混合,跳过条件增加
+  “全部 chunk 的 model 等于目标 model”;混合 model 视为已变。目标 model 在
+  `reindexFiles` 里取 `params.model ?? "fts-only"`,与 `memory-index-write.ts`
+  的 `NO_MODEL` 对齐,所以没有 model 的 wiki 重索引仍按 fts-only 跳过;
+- 网页“重建并嵌入”请求体从 `{embed:true}` 改为 `{embed:true, embedBudget:500}`:
+  工具默认 64 是为单次 agent 调用设的上限,网页按钮是一次 30 分钟超时的批量修复,
+  150 chunk 的库用 64 只会嵌一部分;500 是工具上限;
+- `memory-index.ts` 里 `indexDocument` 的注释从“省略是空串”改成“省略是 fts-only”,
+  与 `writeSourceChunks` 的实际默认值一致。
+
+验证(临时 `XDG_CONFIG_HOME` + 临时 index,不碰活区):
+
+| | 实测 |
+|---|---|
+| 修复前对照 | 同一 source 先无 model 索引 → `fts-only`;文件 bytes/mtime 不变,带 model 重索引 → `{"scanned":1,"indexed":0,"skipped":1}`;`chunksMissingVectors` 0;`embedMissing` 0;`indexWrittenFile` 即使传 model 仍写 `fts-only` |
+| 修复后 | 同一路径 → `{"scanned":1,"indexed":1,"skipped":0}`;chunk model = `C:/models/bge-m3-Q8_0.gguf`;`chunksMissingVectors` 1;假 1024 维 embed 服务 → `embedded 1 / vectors 1`;再跑一次同 model 重索引 → `skipped:1`(不churn);`indexWrittenFile` 与 `MEMORY.md` 均带 model,provenance 均 `agent` |
+| 门 | 插件 4240(plugin/extensions/bootstrap 0)、capture 331(同上 0)、`node --check serve/server.mjs` 过、`audit-npm-pack --check` no drift、web build 后 bundle 含 `embedBudget:500` |
+| 重打 | payload 2540 文件 / 18.5 MB,manifest 2685(2540+145),运行时清单 2540/145;对工作树 SHA256:same 2540、diff 0、missing 0 |
+| exe | `mem-plus-installer-0.3.2.exe` 3,314,196 字节(3.16 MB),sha256 `ECED33B33BFC0E8387ADF778275D7B8B7D5E0C47EC5BBC0EE4CBF732038BF55B`;makensis 4 页、4 段(4 required),install data 19,540,706 B 压到 3,261,968 B |
+| tgz | `mem-plus-0.3.2.tgz` 4,549,161 字节(4.34 MB),sha256 `BC765EFBA27F8206A0160197C479EE379C5E864387BE2B976BA1C3AE4A4DE99A` |
+| 未做 | 新 exe 未由本会话运行(机主自己双击);未打 tag、未 push、未发 Release。重装后需在网页点一次“重建并嵌入”(或跑 `memory_reindex {"embed":true,"embedBudget":500}`),把现有 150 个 fts-only chunk 重写并嵌入;旧 0.3.2 exe 同名,必须用新哈希确认替换 |

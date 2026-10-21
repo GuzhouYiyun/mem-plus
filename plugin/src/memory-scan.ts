@@ -19,7 +19,7 @@ import type { Dirent } from "node:fs";
 import path from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { homeProjectSlug, memoryFile, MEMORY_DIR_NAME, memoryHomeDir } from "./paths.js";
-import { indexDocument, indexAppendedTail, memoryRelativePath, pruneMissing, type DocumentProvenance, type IndexRoot } from "./memory-index.js";
+import { indexDocument, memoryRelativePath, pruneMissing, type DocumentProvenance, type IndexRoot } from "./memory-index.js";
 import {
   clearMemoryArtifactProvenance,
   readMemoryArtifactProvenance,
@@ -169,31 +169,55 @@ export type ReindexReport = {
  *
  * A source with no chunks at all counts as unclassified, so an empty row is repaired rather
  * than skipped forever.
+ *
+ * `model` is the other half of the skip test, and it is not cosmetic. A chunk row's
+ * identity includes the embedding model it was written under
+ * (`manager-source-index-kernel.ts:72`; `docs/memory-chain.md` §2), and `embedMissing`
+ * only fills rows whose model already equals the target (`chunksMissingVectors`). So an
+ * fts-only source whose bytes and mtime did not change is still not up to date once a
+ * model is configured: skipping it would leave a first-time `memory_reindex --embed`
+ * with nothing to embed, and no repair short of deleting the index. Mixed models in
+ * one source count as changed too, because no single row set matches the requested
+ * identity.
  */
 function unchangedSources(
   db: DatabaseSync,
   root: IndexRoot,
-): Map<string, { bytes: number; mtime: number; classified: boolean }> {
+): Map<
+  string,
+  { bytes: number; mtime: number; classified: boolean; model: string | null; mixed: boolean }
+> {
   const rows = db
     .prepare(
       `SELECT s.path AS path, s.size AS size, s.mtime AS mtime,
-              EXISTS (SELECT 1
-                        FROM memory_index_chunks c
-                        JOIN memory_index_chunk_provenance p ON p.chunk_id = c.id
-                       WHERE c.path = s.path AND c.source = s.source) AS classified
+              MAX(CASE WHEN p.chunk_id IS NOT NULL THEN 1 ELSE 0 END) AS classified,
+              COUNT(DISTINCT c.model) AS models,
+              MIN(c.model) AS model
          FROM memory_index_sources s
-        WHERE s.source = ?`,
+         LEFT JOIN memory_index_chunks c
+                ON c.path = s.path AND c.source = s.source
+         LEFT JOIN memory_index_chunk_provenance p ON p.chunk_id = c.id
+        WHERE s.source = ?
+        GROUP BY s.path, s.size, s.mtime`,
     )
     .all(sourceOf(root)) as {
     path: string;
     size: number;
     mtime: number;
     classified: number;
+    models: number;
+    model: string | null;
   }[];
   return new Map(
     rows.map((row) => [
       row.path,
-      { bytes: row.size, mtime: row.mtime, classified: row.classified === 1 },
+      {
+        bytes: row.size,
+        mtime: row.mtime,
+        classified: row.classified === 1,
+        model: row.model,
+        mixed: row.models > 1,
+      },
     ]),
   );
 }
@@ -278,6 +302,10 @@ export async function reindexFiles(params: {
    */
   model?: string;
 }): Promise<ReindexReport> {
+  // `indexDocument` stores `fts-only` when no model is supplied
+  // (`memory-index-write.ts` NO_MODEL); comparing against that same literal keeps the
+  // no-model path consistent with what was actually written.
+  const targetModel = params.model ?? "fts-only";
   const known = unchangedSources(params.db, params.root);
   const seen = new Set<string>();
   let indexed = 0;
@@ -296,7 +324,13 @@ export async function reindexFiles(params: {
       previous &&
       previous.bytes === entry.bytes &&
       previous.mtime === entry.mtime &&
-      previous.classified
+      previous.classified &&
+      // A chunk's identity includes its model, and `embedMissing` only fills rows
+      // already carrying the target model. Skipping an fts-only source because its
+      // bytes did not change would make the first embed a no-op; see
+      // `unchangedSources`.
+      !previous.mixed &&
+      previous.model === targetModel
     ) {
       skipped += 1;
       continue;
@@ -334,41 +368,21 @@ export async function reindexFiles(params: {
 }
 
 /**
- * Index the new tail of a file the plugin just appended to.
+ * Index one file the write path just wrote, replacing whatever the index held for it.
  *
- * The daily entry file is append-only, so a capture that adds one block does not
- * need the file's other fifty blocks re-read. Units already present are skipped
- * by provenance marker, which is the same idempotency the write path uses.
- */
-export async function indexTail(params: {
-  db: DatabaseSync;
-  file: string;
-  root: IndexRoot;
-  project: string;
-}): Promise<number> {
-  try {
-    const info = await stat(params.file);
-    const text = await readFile(params.file, "utf-8");
-    return indexAppendedTail({
-      db: params.db,
-      file: params.file,
-      root: params.root,
-      project: params.project,
-      text,
-      bytes: info.size,
-      mtime: Math.trunc(info.mtimeMs),
-    });
-  } catch {
-    return 0;
-  }
-}
-
-/**
- * Index one file that was just rewritten in full.
+ * Both write shapes come through here: the session snapshot is rewritten in full every
+ * turn, and the daily entry file is appended to. Re-reading and re-parsing the whole file
+ * is the only correct move for the first (the previous turn's units must go), and
+ * upstream's shape for the second (a chunk's identity is a hash over its text and span,
+ * so there is no stable way to add only the new fragments).
  *
- * Snapshots replace their whole file every turn, so the tail path would leave
- * stale units from the previous turn behind. This re-reads and re-parses, which
- * is what a replaced file requires.
+ * `memoryHome` is what lets `classify` record provenance. Omit it and the document is
+ * indexed as `untrusted`, which the promotion gate rejects.
+ *
+ * `model` is what lets the embed pass find the chunks later. Omit it and they are
+ * written as `fts-only`; `chunksMissingVectors` only selects rows carrying the
+ * embedding model, so the omission is not repaired by a later `memory_reindex --embed`
+ * unless the source is re-indexed as well.
  *
  * Failures are logged and swallowed: the index is derived data, so a failed
  * update is recoverable with `memory_reindex` and must never fail the turn that
@@ -380,6 +394,12 @@ export async function indexWrittenFile(params: {
   root: IndexRoot;
   project: string;
   memoryHome?: string;
+  /**
+   * The embedding model to record on every chunk. Must be the same string the embed
+   * and search passes use -- it is part of a chunk's row identity, and the embed pass
+   * only fills rows whose model matches.
+   */
+  model?: string;
   log: (message: string, detail?: unknown) => void;
 }): Promise<number> {
   try {
@@ -405,6 +425,7 @@ export async function indexWrittenFile(params: {
         { file: params.file, root: params.root, project: params.project, bytes: info.size, mtime },
         text,
       ),
+      ...(params.model ? { model: params.model } : {}),
     }).written;
   } catch (error) {
     params.log(`index update skipped for ${params.file}`, error);

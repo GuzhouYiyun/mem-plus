@@ -70,7 +70,12 @@ export function ReindexRow({ embedEnabled }: { embedEnabled: boolean }) {
       const result = await fetchAPI<{ content: string; metadata?: ReindexCounts }>("/api/reindex", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ embed: true }),
+        // The tool defaults to 64 vectors per call to bound an agent's turn. This is
+        // one explicit, user-initiated bulk repair with a 30-minute timeout, and a
+        // first-time embed on a real store has more than 64 chunks -- at the default
+        // it would reindex everything, embed 64, and report a partial success that
+        // reads like the rest were impossible. 500 is the tool's cap.
+        body: JSON.stringify({ embed: true, embedBudget: 500 }),
         // The walk plus embedding is minutes of work on a real memory store, well
         // past the 30s default -- and the request must not be cut off halfway,
         // because a half-embedded index is the confusing outcome.
