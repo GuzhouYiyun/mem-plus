@@ -172,9 +172,11 @@ Var RemovedPayloadFiles
 ; An env var is read at install time, not compile time, so this has to be runtime
 ; code: `!ifenv` would test the build machine, which is the wrong machine.
 ; ---------------------------------------------------------------- upgrade --
-; Delete every path the PREVIOUS install recorded, then let the payload rewrite
-; what is still current. See the call site in SecMain for why this is not a
-; comparison against the new list.
+; Fallback upgrade path: delete every path the PREVIOUS install recorded, then
+; let the payload rewrite what is still current. The normal path is
+; sync-payload.mjs + SetOverwrite off (see SecMain); this function runs only
+; when Node and bun are both unavailable, or the helper fails, and is kept as
+; the no-helper contract that does not depend on either runtime.
 ;
 ; NSIS *does* have loops and string functions -- the older comment in build.ps1 said
 ; otherwise and was wrong -- so this is a plain FileOpen/FileRead loop with no plugin,
@@ -363,7 +365,8 @@ FunctionEnd
 ; SecReload, and every install then skipped `npm install`.
 Section "mem-plus 记忆插件" SecMain
 SectionIn RO
-  ; Straight overwrite into $INSTDIR, which is how every other installer works.
+  ; Hash-aware update into $INSTDIR: the helper removes only changed and extra
+  ; files, and the SetOverwrite-off pass below writes only what is missing.
   ;
   ; `opencode service stop` was tried here first and is worse than useless: measured
   ; on 2026-10-11, `service stop` returned and 0.1 s later a new `opencode serve
@@ -378,26 +381,63 @@ SectionIn RO
   RMDir /r "$INSTDIR\..\..\mem-plus.__stage"
   RMDir /r "$INSTDIR\..\..\mem-plus.__old"
 
-  ; Before the payload, not after: this is what makes an upgrade an upgrade. A plain
-  ; overwrite leaves every file the OLD release wrote that the NEW release dropped, and
-  ; a stale module is not inert -- Node's resolver will load `plugin/src/memory-parse.js`
-  ; from a release that deleted `memory-parse.ts` exactly as if it were current. Silent,
-  ; and only visible as behaviour that does not match the version you installed.
-  ;
-  ; The old release recorded what it wrote; delete exactly that, then write the whole
-  ; payload. Deliberately NOT a comparison against the new list: anything still current
-  ; is rewritten a moment later, so the answer cannot drift from what was actually
-  ; installed, and there is no "is this still ours?" test to get wrong.
-  Call RemoveStalePayload
+  ; The update comparison needs the helper and this payload's SHA-256 manifest. Both
+  ; live in $PLUGINSDIR, NSIS's own temporary directory, and are removed when the
+  ; wizard exits -- they are inputs to the install, not installed files.
+  InitPluginsDir
+  SetOutPath "$PLUGINSDIR"
+  File "sync-payload.mjs"
+  File "payload-hashes.txt"
+  File "payload-dirs.txt"
 
-  SetOutPath "$INSTDIR"
-  ; Recursive: the package is ~2550 files (the vendored openclaw tree) and every
-  ; one of them is loaded at runtime.
-  File /r "payload\*"
+  ; sync-payload.mjs only DELETES. Identical files stay on disk; changed files are
+  ; removed so the File pass below rewrites them; paths the previous install owned
+  ; but this payload no longer ships are deleted. It runs before the payload because
+  ; the old manifests in $INSTDIR are still readable at that point.
+  ;
+  ; Node is the hash implementation because NSIS 3.13 has no SHA-256 primitive and
+  ; spawning certutil once per file would cost about 2,500 processes. Node (or bun)
+  ; is already a prerequisite for the dependency section below; if neither is
+  ; available, the fallback is the previous delete-all-then-write update, which
+  ; needs no helper at all.
+  DetailPrint "对比已安装文件与本次 payload 的哈希……"
+  nsExec::ExecToLog 'cmd /c node "$PLUGINSDIR\sync-payload.mjs" --target "$INSTDIR" --hashes "$PLUGINSDIR\payload-hashes.txt" --new-dirs "$PLUGINSDIR\payload-dirs.txt"'
+  Pop $0
+  ${If} $0 != 0
+    DetailPrint "node 不可用或对比失败，尝试 bun……"
+    nsExec::ExecToLog 'cmd /c bun "$PLUGINSDIR\sync-payload.mjs" --target "$INSTDIR" --hashes "$PLUGINSDIR\payload-hashes.txt" --new-dirs "$PLUGINSDIR\payload-dirs.txt"'
+    Pop $0
+  ${EndIf}
+
+  ${If} $0 == 0
+    ; The helper removed every file whose hash differs and left every identical
+    ; file in place. SetOverwrite off makes File leave those identical files
+    ; untouched (including their timestamps) while still writing the missing and
+    ; changed paths. A stale module is not inert: Node's resolver would load
+    ; `plugin/src/memory-parse.js` from a release that deleted `memory-parse.ts`
+    ; exactly as if it were current -- which is why extras are deleted by the
+    ; helper rather than merely left behind.
+    DetailPrint "增量更新：保留未变文件，只覆盖有变化的文件。"
+    SetOverwrite off
+    SetOutPath "$INSTDIR"
+    ; Recursive: the package is ~2550 files (the vendored openclaw tree) and every
+    ; one of them is loaded at runtime.
+    File /r "payload\*"
+    SetOverwrite on
+  ${Else}
+    ; Same failure contract as the old installer: a helper that cannot run means
+    ; a complete replacement, not a half-updated tree.
+    DetailPrint "增量更新不可用，回退到完整覆盖……"
+    Call RemoveStalePayload
+    SetOutPath "$INSTDIR"
+    SetOverwrite on
+    File /r "payload\*"
+  ${EndIf}
 
   ; Record what THIS install wrote, so the next one can do the same. Written after the
   ; payload, and the lists are in $INSTDIR because that is where the next install reads
   ; them from -- /oname with SetOutPath "$INSTDIR" puts them there directly.
+  SetOutPath "$INSTDIR"
   File /oname=.mem-plus-payload-files.txt "payload-files.txt"
   File /oname=.mem-plus-payload-dirs.txt "payload-dirs.txt"
 

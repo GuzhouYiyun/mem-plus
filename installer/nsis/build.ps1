@@ -3,7 +3,10 @@
 # Order matters: `npm pack` runs prepack (audit + web build), the tarball is
 # unpacked into payload\, and only then does makensis run. The payload is embedded
 # rather than unpacked at install time -- an installer that depends on tar.exe or
-# PowerShell being present is not worth the few hundred KB it would save.
+# PowerShell being present is not worth the few hundred KB it would save. The
+# hash-aware update helper is a Node script instead, because Node is already
+# required for `npm install`; installer.nsi falls back to the old full-replace
+# path when Node/bun is unavailable.
 #
 #   .\build.ps1
 #     -> installer\nsis\dist\mem-plus-installer-<version>.exe
@@ -111,7 +114,7 @@ $rootLen = $payload.Length + 1
 
 foreach ($f in (Get-ChildItem $payload -Recurse -File | Sort-Object FullName)) {
   $rel = $f.FullName.Substring($rootLen)
-  if ($rel -match '[$"]') { throw "payload path needs NSIS escaping: $rel" }
+  if ($rel -match '[$"|]') { throw "payload path needs NSIS/hash escaping: $rel" }
   if ($rel -match '[^\x20-\x7E]') { throw "payload path is not plain ASCII: $rel" }
   $manifest.Add('Delete "$INSTDIR\' + $rel.Replace('/', '\') + '"')
 }
@@ -134,21 +137,23 @@ Write-Output "    manifest $($manifest.Count - 3) paths ($files files, $($dirs.C
 # a stale copy of any of them is loaded by Node's resolver exactly as if it were current --
 # silent, and only visible as behaviour that does not match the version you installed.
 #
-# The mechanism is the one every installer in this class uses, and it deliberately does NOT
-# compare old against new: each install first deletes every path the PREVIOUS install recorded,
-# then writes the whole payload. Files that still exist are immediately rewritten; files that
-# no longer exist are simply gone. There is no "is this still ours?" test to get wrong, and the
-# answer cannot drift from what was actually written.
+# The upgrade path now compares content instead of deleting the whole tree first:
+# sync-payload.mjs reads these two lists as the previous install's ownership record, hashes the
+# file currently on disk against payload-hashes.txt, leaves identical files untouched, deletes
+# changed files for installer.nsi's SetOverwrite-off pass to rewrite, deletes paths this payload
+# no longer ships, and writes nothing that is already current. The old delete-everything-then-
+# write path remains only as the fallback when Node or the helper is unavailable.
 #
 # Two files rather than one tagged file: at read time NSIS cannot tell a path from a directory
 # without touching the disk, and a wrong guess here deletes or skips the wrong thing.
 #
-# Both are plain ASCII with no quotes or dollars, same as payload-manifest.nsh, and the same two
-# checks enforce it.
+# Both are plain ASCII with no quotes, dollars, or pipes, same as payload-manifest.nsh. The pipe
+# is also the separator in payload-hashes.txt, so a payload path containing one must fail the
+# build rather than make the hash parser split in the wrong place.
 $fileList = New-Object System.Collections.Generic.List[string]
 foreach ($f in (Get-ChildItem $payload -Recurse -File | Sort-Object FullName)) {
   $rel = $f.FullName.Substring($rootLen)
-  if ($rel -match '[$"]') { throw "payload path needs NSIS escaping: $rel" }
+  if ($rel -match '[$"|]') { throw "payload path needs NSIS/hash escaping: $rel" }
   if ($rel -match '[^\x20-\x7E]') { throw "payload path is not plain ASCII: $rel" }
   $fileList.Add($rel.Replace('/', '\'))
 }
@@ -169,7 +174,7 @@ $nl = "`n"
 $fileList = New-Object System.Collections.Generic.List[string]
 foreach ($f in (Get-ChildItem $payload -Recurse -File | Sort-Object FullName)) {
   $rel = $f.FullName.Substring($rootLen)
-  if ($rel -match '[$"]') { throw "payload path needs NSIS escaping: $rel" }
+  if ($rel -match '[$"|]') { throw "payload path needs NSIS/hash escaping: $rel" }
   if ($rel -match '[^\x20-\x7E]') { throw "payload path is not plain ASCII: $rel" }
   $fileList.Add($rel.Replace('/', '\'))
 }
@@ -187,6 +192,23 @@ foreach ($pair in @(@("payload-files.txt", $filesTxt), @("payload-dirs.txt", $di
   Set-Content (Join-Path $nsisDir $pair[0]) -Value $pair[1] -Encoding ascii -NoNewline
 }
 Write-Output "    runtime lists $($fileList.Count) files, $($dirList.Count) dirs (LF-only, verified)"
+
+# payload-hashes.txt is the new side of the update comparison. It is generated here, from the
+# same staged tree, and embedded in the installer only -- it is never written into $INSTDIR.
+# The installed tree is hashed at update time by sync-payload.mjs, not by NSIS: NSIS 3.13 has
+# no SHA-256 primitive, and spawning certutil once per file (about 2,500 processes) is not an
+# installer. Node is already a prerequisite for npm install, and the helper falls back to the
+# old full-replace path when it is unavailable.
+$hashList = New-Object System.Collections.Generic.List[string]
+foreach ($rel in $fileList) {
+  $abs = Join-Path $payload $rel
+  $hash = (Get-FileHash -LiteralPath $abs -Algorithm SHA256).Hash.ToLowerInvariant()
+  $hashList.Add($rel + '|' + $hash)
+}
+$hashTxt = ($hashList -join $nl) + $nl
+if ($hashTxt.Contains("`r")) { throw "payload-hashes.txt must be LF-only" }
+Set-Content (Join-Path $nsisDir "payload-hashes.txt") -Value $hashTxt -Encoding ascii -NoNewline
+Write-Output "    hash manifest $($hashList.Count) files (LF-only, sha256)"
 
 # version.nsh is generated rather than committed: the version lives in
 # package.json and must not be duplicated by hand. Built with explicit newlines --

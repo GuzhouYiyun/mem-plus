@@ -76,6 +76,10 @@ VERIFY.md
 # copy would be a stale inventory of someone else's machine -- and a blanket rule that covers
 # them is one nobody will read before tightening it into a rule that starts tracking two 80 KB
 # build artifacts.
+#
+# payload-hashes.txt is the SHA-256 manifest generated from the same staged tree and embedded
+# in the installer only; it is never written into $INSTDIR. It is generated for the same reason
+# as the lists above.
 installer/nsis/dist/
 installer/nsis/payload/*
 # No `.gitkeep` exception: there is no `.gitkeep`, and `build.ps1` creates the
@@ -86,3 +90,4 @@ installer/nsis/nsis-paths.nsh
 installer/nsis/payload-manifest.nsh
 installer/nsis/payload-files.txt
 installer/nsis/payload-dirs.txt
+installer/nsis/payload-hashes.txt

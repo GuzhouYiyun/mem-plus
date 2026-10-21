@@ -2541,3 +2541,65 @@ embedding 随 DELETE 一起消失,于是下一次快照重写会把上一次人�
 
 版本仍是 `0.3.2`,四打 exe/tgz 覆盖三打;同名文件认上表哈希。三打的自动嵌入
 代码没有改动,四打只改 `writeSourceChunks` 的向量保留。
+
+## 0.3.2 五打:安装器按 SHA-256 增量更新(2026-10-21 深夜)
+
+机主要求更新语义改成:内容一致的文件不动,不一致的覆盖,旧 release 多出来的删掉,
+新 payload 有而目标没有的装上。这不是把旧 `RemoveStalePayload` 的“全删再写”换个
+说法,而是更新时真的以磁盘内容和本次 payload 的 SHA-256 做比较。
+
+实现分两段:
+
+- `build.ps1` 在生成 `payload-files.txt` / `payload-dirs.txt` 之后,对同一个 staged
+  tree 生成 `payload-hashes.txt`:`相对路径|sha256`,2541 行,ASCII、LF-only,路径
+  含 `|` 直接失败(它是分隔符,也是 NSIS 字符串安全边界)。哈希清单只嵌进 exe,
+  不写进 `$INSTDIR`;卸载器格式和运行时清单都没变。
+- 新增 `installer/nsis/sync-payload.mjs`。它读旧安装的 `.mem-plus-payload-files.txt`
+  作为“哪些文件归我们管”的清单(旧格式是纯路径,新格式 `path|hash` 也兼容),
+  逐个比较新 payload 哈希与磁盘文件:一致保留;不一致的删除;缺失的只计数、留给
+  NSIS 写;旧清单里多出来的文件删除;新目录创建,旧目录只在为空时 `rmdir`。它
+  不做任何复制。
+- `installer.nsi` 先用 `InitPluginsDir` 建 `$PLUGINSDIR`,把 helper、哈希清单、
+  新目录清单放进去,依次用 `node`、`bun` 运行 helper。成功时 `SetOverwrite off`
+  + `File /r "payload\*"`:被 helper 删掉的变更文件和本来缺失的文件由 NSIS 写入,
+  内容一致的文件因 `SetOverwrite off` 原样保留(时间戳也不变)。失败时回退到旧的
+  `RemoveStalePayload` + `SetOverwrite on` 全量覆盖,所以没有 Node/bun 的机器
+  仍然装得完,只是退回旧行为。
+
+为什么是 Node 而不是 NSIS 自己算:NSIS 3.13 没有 SHA-256 原语,`certutil -hashfile`
+一次只能算一个文件,2541 个进程不是安装器该做的事。Node 本来就是 `npm install`
+的前置条件;helper 用 `node:crypto` 和 `node:fs/promises`,Node 与 Bun 都实测通过。
+不把 payload 先解到 staging 再复制,是为了不再嵌一份 18.5 MB 的 payload,也不让
+安装多一次全量 I/O;helper 只删,`File /r` 负责写。
+
+验证用临时 `installer.test.nsi`:除 `SecDeps`(npm)和 `SecReload`(重启)置空外,
+与 `installer.nsi` 的 `SecMain` 相同;全程用 `/D=` 指向 temp,不运行真实 exe,避免
+重启会话、也不碰活区。
+
+| | 实测 |
+|---|---|
+| 直接 helper | 同文件 unchanged、改变 rewritten、缺失 missing、多余 removed 各一项;Node 与 Bun 输出一致 |
+| 首次安装 | 2541 payload 文件 + 2 个清单 + `Uninstall.exe` = 2544 文件;抽样 `memory-index-write.ts` SHA256 与 payload 一致 |
+| 再装同一版 | 2541 个 payload 文件时间戳 0 变化,`file count` 仍 2544;证明没有全量重写 |
+| 改变一个文件 | 本地追加内容后重装,文件 SHA256 恢复到 payload 值 |
+| 旧清单多一个文件 | 把 `stale-extra.txt` 写进旧 `.mem-plus-payload-files.txt` 后重装,文件被删除 |
+| 删掉一个文件 | 删 `auto-embed.ts` 后重装,文件恢复且 SHA256 与 payload 一致 |
+| 回退路径 | 把 PATH 收窄到不含 node/bun,重装后 extra 删除、changed/missing 恢复,仍为 2544 文件;走的是 `RemoveStalePayload` 全量覆盖 |
+| `InitPluginsDir` | 首次探针没有它,`$PLUGINSDIR\sync-payload.mjs` 不存在,helper 报 `MODULE_NOT_FOUND`;补上后同一探针通过。这是 `$PLUGINSDIR` 的初始化前提,不是 helper 的 bug |
+| 清理 | 测试结束后删除 temp、测试 exe、`installer.test.nsi`,并把被测试覆盖的 `HKCU\Software\mem-plus`、`HKCU\...\Uninstall\mem-plus` 与开始菜单快捷方式恢复到活区 `C:\Users\21991\.config\opencode\plugins\mem-plus` |
+
+重打:
+
+| | 实测 |
+|---|---|
+| payload | 2541 文件 / 18.5 MB;manifest 2686 条(2541 文件 + 145 目录);运行时清单 2541/145;哈希清单 2541 行 / 272,227 B / 无 CR |
+| exe | `mem-plus-installer-0.3.2.exe` 3,419,909 字节(3.26 MB),sha256 `8D0891E429C87E015304BEFC5311563FC72B48D00E63119FEEF7C8BC5F7305B4`;makensis 4 页、4 段(4 required),install data 19,831,679 B 压到 3,367,681 B |
+| tgz | `mem-plus-0.3.2.tgz` 4,551,661 字节(4.34 MB),sha256 `1CD48CD7FFE7C54B9ABAA8F91B1BDF331A8DA401E62432C586D31DEDAD9B99EF`(plugin 代码未变,与四打同一份) |
+| 未做 | 真实 exe 未由本会话运行(机主自己双击);未打 tag、未 push、未发 Release。活区仍是三打的安装;装完后先跑一次 `memory_reindex {"embed":true}` 恢复 40 条快照向量,之后等下一次捕获查 `auto-embed:` |
+
+最终重打把 README 的更新说明纳入 payload;重打后又用同一临时测试脚本跑了一遍
+首装、同版、改变、多余、缺失,结果与上表一致。回退路径没有因 README 文本变化
+重跑,`SecMain` 与 helper 未改。
+
+版本仍是 `0.3.2`,五打 exe/tgz 覆盖四打;同名文件认上表哈希。四打的插件代码
+未改,五打只动安装器的更新路径。
