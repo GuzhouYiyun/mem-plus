@@ -97,6 +97,26 @@ export function writeSourceChunks(params: {
   const { db, relativePath, source, provenance } = params;
   const model = params.model ?? NO_MODEL;
 
+  // A re-index must not erase vectors for chunks that did not change.
+  //
+  // Upstream computes embeddings inside the same reindex that replaces the rows
+  // (`manager-index-preparation.ts:79`), so it never has to carry them across a
+  // clear. mem-plus embeds in a separate pass (`embedMissing`); a re-index without
+  // that pass -- every session snapshot rewrite, per `index.ts` -- would otherwise
+  // leave the whole file fts-only. The row id already contains the source, path,
+  // span, text hash and model (`docs/memory-chain.md` §2), so an unchanged chunk has
+  // the same id and can keep its old blob. A changed chunk gets a new id and
+  // correctly starts with no vector.
+  const preserved = new Map<string, Uint8Array>();
+  {
+    const rows = db
+      .prepare(
+        "SELECT id, embedding FROM memory_index_chunks WHERE path = ? AND source = ? AND model = ? AND length(embedding) > 0",
+      )
+      .all(relativePath, source, model) as { id: string; embedding: Uint8Array }[];
+    for (const row of rows) preserved.set(row.id, row.embedding);
+  }
+
   // Upstream: `this.clear(entry.path, source)` -- the whole de-duplication story.
   const cleared = clearSource(db, relativePath, source);
 
@@ -167,7 +187,9 @@ export function writeSourceChunks(params: {
       const id = hashText(
         `${source}:${relativePath}:${chunk.startLine}:${chunk.endLine}:${chunk.hash}:${model}`,
       );
-      const embedding = params.embeddings?.get(id);
+      const fresh = params.embeddings?.get(id);
+      const embedding =
+        fresh !== undefined ? chunkEmbeddingColumn(fresh) : (preserved.get(id) ?? chunkEmbeddingColumn(undefined));
       insertChunk.run(
         id,
         relativePath,
@@ -177,7 +199,7 @@ export function writeSourceChunks(params: {
         chunk.hash,
         model,
         chunk.text,
-        chunkEmbeddingColumn(embedding),
+        embedding,
         now,
       );
       insertProvenance.run(

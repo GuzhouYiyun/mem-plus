@@ -2454,6 +2454,9 @@ marker 语义的旧路。上游本来就没有 tail 索引(§2:chunk 身份是�
 
 ## 0.3.2 三打:写入后的自动嵌入转接(2026-10-21 深夜)
 
+> 本节产物已被同日的“0.3.2 四打:快照重写保留未变向量”覆盖;下表 exe/tgz
+> 哈希是第三次重打的历史记录,最终产物与哈希见下节。
+
 这一版不是给 mem-plus 新增一个“自动嵌入”功能,而是把器官里原本接在索引准备
 上的那条血管,接到 OpenCode 的写入事件上。
 
@@ -2496,7 +2499,45 @@ embedding BLOB)与 §5(向量道只认当前 model 下已嵌入的 chunk),这两
 | 未做 | 安装器未由本会话运行(机主自己双击);未打 tag、未 push、未发 Release。活区仍是上一版 0.3.2(无本节代码),要重装才生效;重装后等下一次捕获,查 `mem-plus.log` 的 `plugin loaded` 与 `auto-embed:` 行 |
 
 版本按机主规则仍是 `0.3.2`,本节的 exe/tgz 直接覆盖同日旧产物;同名文件无法
-区分,认上表哈希。上一节“重装后手动重建并嵌入”只对旧索引的 fts-only 存量为真;
-活区已在 0.3.2 重打后完成 7 source / 111 chunk / 111 向量。本节的新写入路径从
-下一次捕获起自动嵌入;存量缺口仍走人工 `memory_reindex`(省略 `paths` 时覆盖
-全索引)。
+区分,认上表哈希。上一节“重装后手动重建并嵌入”只对旧索引的 fts-only 存量为真。
+活区在 0.3.2 重打后曾是 7 source / 111 chunk / 111 向量;18:19 的快照重写把
+`2026-10-20-记忆.md` 的 40 条向量清掉,19:11 复测为 7 source / 114 chunk / 74
+vectors。本节的新写入路径从下一次捕获起自动嵌入;存量缺口仍走人工
+`memory_reindex`(省略 `paths` 时覆盖全索引)。快照向量被清掉的修法见下节。
+
+## 0.3.2 四打:快照重写保留未变 chunk 的向量(2026-10-21 深夜)
+
+19:11 复测活区索引:7 source / 114 chunk / 74 vectors。缺的 40 条全在
+`memory/mem-plus--83e5df/2026-10-20-记忆.md`;日志 18:19 显示该快照被重写并
+`indexed 40 unit(s)`,而快照重写走 `indexReplaced([snapshot])`,不带
+`autoEmbed`。`writeSourceChunks` 先按 `(path, source)` 清空再写,旧 chunk 的
+embedding 随 DELETE 一起消失,于是下一次快照重写会把上一次人工重建的向量清掉。
+这不是三打引入的,是快照“按需嵌入”策略早就存在的缺口;三打只让日捕获和
+`MEMORY.md` 自动嵌入,没有覆盖它。
+
+修法仍是转接件,不改器官的 chunk 身份:
+
+- `writeSourceChunks` 在清空之前,按 `(path, source, model)` 读出仍带向量的旧行,
+  以 row id 建 map;写入新 chunk 时,若调用方没有给这个 id 的新向量,就复用旧
+  blob。变更过的 chunk 因 text/hash/span 变化得到新 id,仍然从空向量开始;
+  model 变化时旧行不匹配,也不会错误继承。
+- 这正是器官在 openclaw 里的结果:上游在重索引的同一趟算 embedding
+  (`manager-index-preparation.ts:79`),所以它不需要“跨清空保留”;mem-plus 把
+  嵌入拆成单独批次,才必须显式把未变 chunk 的向量带过去。chunk id 的六字段
+  身份见 `docs/memory-chain.md` §2。
+
+验证(临时内存 SQLite + 真 `writeSourceChunks`,不碰活区):
+
+| | 实测 |
+|---|---|
+| 同内容重写 | 10 chunk 全部有向量 → 不传 `embeddings` 再写一次 → 10/10 仍有向量,id 不变 |
+| 追加内容 | 12 chunk:9 条旧 chunk 保留向量,3 条新 chunk 为空;符合“只保留未变 chunk” |
+| 换 model | 同内容换 `other-model` 重写 → 0 条向量,不继承旧 model 的 blob |
+| 门 | 插件 4240(plugin/extensions/bootstrap 0)、capture 331(同上 0)、`node --check serve/server.mjs` 过、`audit-npm-pack --check` no drift |
+| 重打 | payload 2541 文件 / 18.5 MB,manifest 2686 条(2541 文件 + 145 目录),运行时清单 2541/145;`auto-embed.ts` 与 `memory-index-write.ts` 的 payload SHA256 均与工作树一致 |
+| exe | `mem-plus-installer-0.3.2.exe` 3,316,409 字节(3.16 MB),sha256 `D41DB6E966D2BD022E4CE20083BFACA98050D8F95465327CF6E27F97A76B9008`;makensis 4 页、4 段(4 required),install data 19,550,040 B 压到 3,264,181 B |
+| tgz | `mem-plus-0.3.2.tgz` 4,551,550 字节(4.34 MB),sha256 `0C24D68388F0E1DD11DB764A8C02DC041B2C3C685C8DE8E1B1E8DB7DEFCDE1FA` |
+| 未做 | 安装器未由本会话运行(机主自己双击);未打 tag、未 push、未发 Release。重装后先跑一次 `memory_reindex {"embed":true}` 恢复现有 40 条快照向量;此后快照重写只保留未变 chunk 的向量,新变化的部分仍按“快照按需嵌入”走人工重建。三打的自动嵌入 live 验证仍未完成:需等下一次捕获落盘,查 `auto-embed:` 行 |
+
+版本仍是 `0.3.2`,四打 exe/tgz 覆盖三打;同名文件认上表哈希。三打的自动嵌入
+代码没有改动,四打只改 `writeSourceChunks` 的向量保留。
