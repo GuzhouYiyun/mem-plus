@@ -2603,3 +2603,38 @@ embedding 随 DELETE 一起消失,于是下一次快照重写会把上一次人�
 
 版本仍是 `0.3.2`,五打 exe/tgz 覆盖四打;同名文件认上表哈希。四打的插件代码
 未改,五打只动安装器的更新路径。
+
+## 0.3.2 发布(2026-10-21 深夜)
+
+机主 22:58 双击安装了五打 exe。活区版本 `0.3.2`,2541 个 payload 文件与仓库
+`installer/nsis/payload` 逐文件 SHA-256 对比:**missing 0 / diff 0 / extras 0**
+(比较范围排除 `node_modules`、`models`、两个 payload 清单、`Uninstall.exe` 与
+npm 生成的 `package-lock.json`)。`README.md`、`memory-index-write.ts`、
+`auto-embed.ts` 的活区哈希均与仓库一致;`sync-payload.mjs` 与
+`payload-hashes.txt` 正确地没有装进 `$INSTDIR`。运行时清单 2541 文件 / 145 目录;
+`HKCU\Software\mem-plus`、卸载项和开始菜单快捷方式都指向活区。
+
+OpenCode 日志在 14:58:12-13 有 6 条 `failed to load plugin`,原因全部是
+`memory-index-write.ts` 暂时不存在;14:58:20 两个 workspace 都出现
+`plugin loaded`,之后没有再出现加载失败。这个窗口只指向被替换的那个文件,
+与增量路径一致,不是全量删除时的大批文件缺失。安装后服务重新拉起
+`bge-m3-Q8_0.gguf`,健康检查 `http://127.0.0.1:4747/api/health` 返回 200。
+
+活区索引检查(用 `VACUUM INTO` 快照读,不直接复制 WAL):
+
+| | 实测 |
+|---|---|
+| 重索引前 | 8 source / 204 chunk / 203 vector;唯一空向量是 15:07 快照新增的 1-51 行 chunk,快照按设计不自动嵌入 |
+| 手动补嵌 | `memory_reindex {"embed":true}` 返回 `Embedded 1 chunk(s)` |
+| 重索引后 | 8 source / 204 chunk / **204 vector**;`2026-10-20-记忆.md` 86/86 有向量,全部 2048 维 |
+| 捕获 | 15:12:59 一次 `capture extract` 失败,原因是免费档空 completion;与安装无关 |
+
+发布:
+
+| | 实测 |
+|---|---|
+| tag | `v0.3.2`(轻量)落在 `ca9f32d0`,已推送;`main` 与 `origin/main` 同步 |
+| Release | https://github.com/GuzhouYiyun/mem-plus/releases/tag/v0.3.2 ,2026-10-21T15:32:40Z 发布,标记 Latest |
+| 资产 | exe 3,419,909 B / sha256 `8D0891E429C87E015304BEFC5311563FC72B48D00E63119FEEF7C8BC5F7305B4`;tgz 4,551,661 B / sha256 `1CD48CD7FFE7C54B9ABAA8F91B1BDF331A8DA401E62432C586D31DEDAD9B99EF`;远端大小与本地一致 |
+| 文案 | `## 0.3.2` + Highlights / Changes / Fixes + 安装;覆盖 `v0.3.1..v0.3.2` 的 4 笔;正文 1165 字符,UTF-8 往返核对一致 |
+| 未做 | 发布后未改代码;文档这一节在 tag 之后提交,不改变 exe/tgz 的 payload |
