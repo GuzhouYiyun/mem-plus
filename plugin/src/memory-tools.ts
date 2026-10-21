@@ -97,8 +97,8 @@ const DEFAULT_LIMIT = 8;
 const MAX_LIMIT = 25;
 /** Characters of a hit quoted back. Enough to be useful, short enough to read. */
 const EXCERPT_CHARS = 700;
-/** Upper bound on embedding work per `memory_reindex` call. */
-const EMBED_BUDGET = 64;
+/** Upper bound on embedding work per `memory_reindex` call (and per automatic pass). */
+export const EMBED_BUDGET = 64;
 
 const SCOPE_ALL = "all";
 const SCOPE_PROJECT = "project";
@@ -314,6 +314,7 @@ export async function embedMissing(
   deps: RetrievalDeps,
   budget: number,
   signal: AbortSignal | undefined,
+  paths?: readonly string[],
 ): Promise<number> {
   const db = deps.db;
   if (!db || !deps.service || budget <= 0) return 0;
@@ -324,7 +325,7 @@ export async function embedMissing(
   if (!model) return 0;
   let written = 0;
   const rejected: { id: string; chars: number }[] = [];
-  for (const chunk of chunksMissingVectors(db, model, budget)) {
+  for (const chunk of chunksMissingVectors(db, model, budget, paths)) {
     // Checked before each chunk, not just once: this loop is the longest-running
     // thing a tool call can do here, so a stop request that arrives halfway
     // through must not be ignored until the whole budget is spent.
@@ -843,6 +844,24 @@ export type RetrievalTools = {
   readonly available: boolean;
   readonly reason?: string;
   readonly tools: readonly MemoryTool[];
+  /**
+   * Fill vectors for chunks written since the last pass.
+   *
+   * Exposed for the write path's background pass. openclaw computes embeddings
+   * inside its reindex (`manager-index-preparation.ts:79`), but mem-plus's
+   * embedding is a separate budgeted call; without this the chunks written by a
+   * capture would stay keyword-only until someone ran `memory_reindex`.
+   *
+   * `budget` bounds one pass; `signal` stops between chunks when the plugin
+   * unloads. `paths` limits the pass to those memory-home-relative documents;
+   * omit it to fill the whole index (the manual repair path). Returns how many
+   * vectors were stored.
+   */
+  readonly embedMissing: (
+    budget: number,
+    signal?: AbortSignal,
+    paths?: readonly string[],
+  ) => Promise<number>;
 };
 
 /**
@@ -859,7 +878,12 @@ export type RetrievalTools = {
 export function buildMemoryTools(deps: RetrievalDeps): RetrievalTools {
   if (!deps.db) {
     deps.log("retrieval tools not built: node:sqlite is unavailable in this runtime");
-    return { available: false, reason: "node:sqlite unavailable", tools: [] };
+    return {
+      available: false,
+      reason: "node:sqlite unavailable",
+      tools: [],
+      embedMissing: async () => 0,
+    };
   }
 
   // `input` arrives as `unknown` because the JSON Schema is OpenCode's to
@@ -960,7 +984,11 @@ export function buildMemoryTools(deps: RetrievalDeps): RetrievalTools {
     ? [search, get, reindex, wikiImport]
     : [search, get, reindex];
   deps.log(`retrieval tools ready: ${tools.map((tool) => tool.name).join(", ")}`);
-  return { available: true, tools };
+  return {
+    available: true,
+    tools,
+    embedMissing: (budget, signal, paths) => embedMissing(deps, budget, signal, paths),
+  };
 }
 
 async function runWikiImport(

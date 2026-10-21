@@ -33,6 +33,7 @@ import {
   createMemoryCapture,
   deleteCapturePrompt,
   listAllPendingCapturePrompts,
+  type CaptureOutcome,
 } from "../../extensions/memory-core/src/capture/index.js";
 import { configureMemoryCoreDreamingState } from "../../extensions/memory-core/src/dreaming-state.js";
 import { runDreamingSweepPhases } from "../../extensions/memory-core/src/dreaming-phases.js";
@@ -50,9 +51,10 @@ import { startWebServer } from "./web/server.js";
 import { forget as forgetHost } from "./forget.js";
 import { createServiceClient, type MemPlusService } from "./model/client.js";
 import { createLogger } from "./log.js";
-import { indexPath, openIndex } from "./memory-index.js";
+import { indexPath, memoryRelativePath, openIndex } from "./memory-index.js";
 import { indexWrittenFile } from "./memory-scan.js";
-import { buildMemoryTools } from "./memory-tools.js";
+import { buildMemoryTools, EMBED_BUDGET } from "./memory-tools.js";
+import { createAutoEmbedScheduler } from "./auto-embed.js";
 import { completeThroughHost } from "./llm.js";
 import { buildStandingIntentTool } from "./standing-intents.js";
 import { installMemoryInjection } from "./recall-inject.js";
@@ -222,6 +224,14 @@ export default Plugin.define({
 
     const localService = service;
 
+    /**
+     * Installed by the retrieval block when the index and vector lane are
+     * available. The write-path closures below also run when they are not, so
+     * they call these no-ops instead of branching on `index`/`retrieval`.
+     */
+    let scheduleAutoEmbed: (file: string) => void = () => {};
+    let disposeAutoEmbed: () => void = () => {};
+
     // The extraction transport. `model.content` decides this, and nothing else does.
     //
     // It used to be the other way round: the check was "does a service object
@@ -265,6 +275,20 @@ export default Plugin.define({
         options,
         log,
       });
+
+      // openclaw embeds inside its reindex (`manager-index-preparation.ts:79`);
+      // mem-plus has a separate budgeted pass, so the write path must schedule
+      // it. Only the documents that pass names are queued -- snapshots rewrite
+      // every turn and stay on-demand.
+      const autoEmbed = createAutoEmbedScheduler({
+        embedMissing: (budget, signal, paths) =>
+          retrieval.embedMissing(budget, signal, paths),
+        log,
+        enabled: retrieval.available && vectorsUsable,
+        budget: EMBED_BUDGET,
+      });
+      scheduleAutoEmbed = (file) => autoEmbed.schedule(memoryRelativePath(file));
+      disposeAutoEmbed = autoEmbed.dispose;
 
       // Lane one, upstream's way: the matched curated entries ride along as
       // request-scoped system context on every agent-loop model call. Registered
@@ -379,8 +403,15 @@ export default Plugin.define({
      * needs (see `indexAppended`). Never throws: the index is derived data, and a
      * failed update is repaired by `memory_reindex` without the user needing to
      * know it happened.
+     *
+     * `autoEmbed` is for the rare long-term write (`MEMORY.md` after promotion).
+     * Snapshots rewrite every turn and stay on-demand; auto-embedding them would
+     * re-embed the same transcript on every settle.
      */
-    const indexReplaced = async (files: readonly string[]): Promise<void> => {
+    const indexReplaced = async (
+      files: readonly string[],
+      options?: { readonly autoEmbed?: boolean },
+    ): Promise<void> => {
       if (!index) return;
       for (const file of files) {
         // Project identity comes from where the file sits under the home, not
@@ -402,7 +433,10 @@ export default Plugin.define({
           model: modelConfig.embedModelPath,
           log,
         });
-        if (written > 0) log(`indexed ${written} unit(s) from ${file}`);
+        if (written > 0) {
+          log(`indexed ${written} unit(s) from ${file}`);
+          if (options?.autoEmbed) scheduleAutoEmbed(file);
+        }
       }
     };
 
@@ -438,7 +472,33 @@ export default Plugin.define({
         model: modelConfig.embedModelPath,
         log,
       });
-      if (written > 0) log(`indexed ${written} new unit(s) from ${file}`);
+      if (written > 0) {
+        log(`indexed ${written} new unit(s) from ${file}`);
+        // The capture is searchable by keyword immediately; let the background
+        // pass make the same chunks searchable by meaning too.
+        scheduleAutoEmbed(file);
+      }
+    };
+
+    /**
+     * Index the daily files a capture sweep wrote.
+     *
+     * Both the per-turn sweep and the startup drain write through
+     * `capture.runSweep`; without this, a capture recovered at startup was
+     * written to disk but never indexed, so it stayed invisible until the next
+     * reindex -- and never reached the automatic embed pass either.
+     */
+    const indexCapturedOutcomes = async (
+      outcomes: readonly CaptureOutcome[],
+    ): Promise<void> => {
+      for (const outcome of outcomes) {
+        if (outcome.kind !== "captured" || !outcome.relativePath) continue;
+        // `relativePath` is the pipeline's own key (`memory/<day>.md`), relative
+        // to the project it came from. The file lives in this window's slice of
+        // the home, so use the key's day rather than today's date.
+        const day = path.basename(outcome.relativePath, ".md");
+        await indexAppended(path.join(homeProjectMemoryDir(workspaceDir), `${day}.md`));
+      }
     };
 
     const controller = new AbortController();
@@ -793,8 +853,12 @@ export default Plugin.define({
           // file is only discovered by a full scan, so lane 1c
           // (`listTriggerCandidates`) and `memory_search` kept serving the
           // pre-promotion text until the next `memory_reindex`. Index it here,
-          // through the same path as every other full-file write.
-          await indexReplaced([path.join(memoryHomeDir(), DEFAULT_MEMORY_FILENAME)]);
+          // through the same path as every other full-file write. This is a
+          // once-a-day long-term write, so let the background pass embed it too;
+          // per-turn snapshots stay on-demand.
+          await indexReplaced([path.join(memoryHomeDir(), DEFAULT_MEMORY_FILENAME)], {
+            autoEmbed: true,
+          });
         }
       } catch (error) {
         log("dreaming sweep failed", error);
@@ -839,19 +903,10 @@ export default Plugin.define({
 
       try {
         const outcomes = await capture.runSweep({ sessionId: sessionID });
+        await indexCapturedOutcomes(outcomes);
         for (const outcome of outcomes) {
           if (outcome.kind === "captured") {
             log(`captured ${outcome.promptId} -> ${outcome.relativePath ?? "?"}`);
-            // `relativePath` is the pipeline's own key -- `memory/<day>.md`,
-            // relative to the project it came from. The file itself lives in
-            // this window's slice of the home, so index that path; using the
-            // key rather than today's date keeps a capture written for
-            // another day (a pipeline clock change) indexing the file it
-            // actually wrote.
-            if (outcome.relativePath) {
-              const day = path.basename(outcome.relativePath, ".md");
-              await indexAppended(path.join(homeProjectMemoryDir(workspaceDir), `${day}.md`));
-            }
           } else if (outcome.kind === "failed" || outcome.kind === "exhausted") {
             log(`${outcome.kind} ${outcome.promptId}`, outcome.error);
           } else {
@@ -939,6 +994,7 @@ export default Plugin.define({
         if (pruned > 0) log(`pruned ${pruned} stale prompt(s)`);
         const outcomes = await capture.runSweep();
         if (outcomes.length > 0) log(`startup sweep processed ${outcomes.length} prompt(s)`);
+        await indexCapturedOutcomes(outcomes);
       } catch (error) {
         log("startup sweep failed", error);
       }
@@ -948,6 +1004,7 @@ export default Plugin.define({
 
     return () => {
       closed = true;
+      disposeAutoEmbed();
       controller.abort();
       for (const timer of settleTimers.values()) clearTimeout(timer);
       settleTimers.clear();

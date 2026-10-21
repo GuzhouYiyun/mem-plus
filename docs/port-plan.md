@@ -2414,6 +2414,9 @@ marker 语义的旧路。上游本来就没有 tail 索引(§2:chunk 身份是�
 
 ## 0.3.2 重打:向量索引的 model 断链(2026-10-21 晚)
 
+> 本节产物已被同日的“0.3.2 三打:写入后的自动嵌入转接”覆盖;下表 exe/tgz
+> 哈希是第二次重打的历史记录,最终产物与哈希见下节。
+
 三条代码连成一条断链,模型文件和 GPU 服务都没问题:
 
 1. `indexWrittenFile` 没有 `model` 参数,快照、日文件、`MEMORY.md` 三条写入路径
@@ -2448,3 +2451,52 @@ marker 语义的旧路。上游本来就没有 tail 索引(§2:chunk 身份是�
 | exe | `mem-plus-installer-0.3.2.exe` 3,314,196 字节(3.16 MB),sha256 `ECED33B33BFC0E8387ADF778275D7B8B7D5E0C47EC5BBC0EE4CBF732038BF55B`;makensis 4 页、4 段(4 required),install data 19,540,706 B 压到 3,261,968 B |
 | tgz | `mem-plus-0.3.2.tgz` 4,549,161 字节(4.34 MB),sha256 `BC765EFBA27F8206A0160197C479EE379C5E864387BE2B976BA1C3AE4A4DE99A` |
 | 未做 | 新 exe 未由本会话运行(机主自己双击);未打 tag、未 push、未发 Release。重装后需在网页点一次“重建并嵌入”(或跑 `memory_reindex {"embed":true,"embedBudget":500}`),把现有 150 个 fts-only chunk 重写并嵌入;旧 0.3.2 exe 同名,必须用新哈希确认替换 |
+
+## 0.3.2 三打:写入后的自动嵌入转接(2026-10-21 深夜)
+
+这一版不是给 mem-plus 新增一个“自动嵌入”功能,而是把器官里原本接在索引准备
+上的那条血管,接到 OpenCode 的写入事件上。
+
+上游在 `manager-index-preparation.ts:79` 把嵌入算在重索引同一趟里,文件同步完
+就能按语义搜到;mem-plus 的嵌入是单独预算批次(`memory-tools.ts` 的
+`embedMissing`),旧调用点只有 `memory_reindex` 工具和网页“重建并嵌入”。于是
+写入路径留下一个真实缺口:每日捕获与晋升后的 `MEMORY.md` 先被索引,chunk 的
+model 正确,但 embedding 为空,语义搜索要等下一次人工重建。启动冲刷
+(`capture.runSweep()`)捕获的 outcome 更早:文件写进每日记忆,却连索引都没有,
+要等下一次全量扫描才可见。按 `docs/memory-chain.md` §2(chunk 身份、model、
+embedding BLOB)与 §5(向量道只认当前 model 下已嵌入的 chunk),这两处都是
+断开的转接,不是器官本身的行为。
+
+修法是造转接件,不改器官:
+
+- 新增 `plugin/src/auto-embed.ts`:1500 ms 去抖、预算 `EMBED_BUDGET`(64)、每批
+  最多 64 个路径;装满预算就把整批放回,已完整文档在下一次只花一次索引查询;
+  `dispose()` 中止定时器与在飞批次。调度器只嵌入写入路径点名的文档,不扫全
+  索引。
+- `memory-tools.ts`:`RetrievalTools.embedMissing(budget, signal?, paths?)`;
+  `chunksMissingVectors` 增加可选 `paths`,SQL 过滤 `path IN (...)`;空数组一条
+  不嵌,省略 `paths` 仍是全索引 —— 人工 `memory_reindex` 的修复路径没有变。
+- `index.ts`:`indexAppended` 排入自动嵌入;`MEMORY.md` 晋升用
+  `indexReplaced([MEMORY.md], { autoEmbed: true })`;新增
+  `indexCapturedOutcomes` 在 startup 冲刷与 settle 后索引捕获 outcome 并排入
+  自动嵌入;`close` 调 `disposeAutoEmbed()`。
+- 每回合的 session 快照(`indexReplaced([snapshot])`)**不**自动嵌入:快照每
+  回合都在变,自动嵌入会把同一份 transcript 反复重嵌;上游也没有每回合重索引。
+  快照仍由人工 `memory_reindex` 覆盖。这是有意的移植差异,记录在此。
+
+验证(临时 `XDG_CONFIG_HOME` + 临时 index + 假 1024 维嵌入服务,不碰活区):
+
+| | 实测 |
+|---|---|
+| 真实路径探针 | 只嵌入路径 A;B、C 不动;空路径表一条不嵌;人工不传路径的批次能嵌入 C;调度器把 A+B 并成一批,装满预算后重新排队,`dispose()` 后不再跑 |
+| 门 | 插件 4240(plugin/extensions/bootstrap 0)、capture 331(同上 0)、`node --check serve/server.mjs` 过、`audit-npm-pack --check` no drift |
+| 重打 | payload 2541 文件 / 18.5 MB,manifest 2686 条(2541 文件 + 145 目录),运行时清单 2541 文件 / 145 目录(仅 LF,已校验);tarball 含 `package/plugin/src/auto-embed.ts`;payload 内 `auto-embed.ts` SHA256 与工作树一致(`C8491C1A…`) |
+| exe | `mem-plus-installer-0.3.2.exe` 3,316,128 字节(3.16 MB),sha256 `69CEEB2CC389C2476997C5271AD023AE69144048192B4EF23EB3D408BDBE27E1`;makensis 4 页、4 段(4 required),install data 19,548,854 B 压到 3,263,900 B |
+| tgz | `mem-plus-0.3.2.tgz` 4,551,226 字节(4.34 MB),sha256 `3613B89894E853B6C68DBA9F554614EB58F56D3DD399D1549EC06AC22858C10D` |
+| 未做 | 安装器未由本会话运行(机主自己双击);未打 tag、未 push、未发 Release。活区仍是上一版 0.3.2(无本节代码),要重装才生效;重装后等下一次捕获,查 `mem-plus.log` 的 `plugin loaded` 与 `auto-embed:` 行 |
+
+版本按机主规则仍是 `0.3.2`,本节的 exe/tgz 直接覆盖同日旧产物;同名文件无法
+区分,认上表哈希。上一节“重装后手动重建并嵌入”只对旧索引的 fts-only 存量为真;
+活区已在 0.3.2 重打后完成 7 source / 111 chunk / 111 向量。本节的新写入路径从
+下一次捕获起自动嵌入;存量缺口仍走人工 `memory_reindex`(省略 `paths` 时覆盖
+全索引)。

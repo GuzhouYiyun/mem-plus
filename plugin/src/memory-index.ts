@@ -905,16 +905,22 @@ export function chunksMissingVectors(
   db: DatabaseSync,
   model: string,
   limit: number,
+  paths?: readonly string[],
 ): { id: string; text: string }[] {
+  if (paths && paths.length === 0) return [];
+  const pathFilter =
+    paths && paths.length > 0
+      ? ` AND path IN (${paths.map(() => "?").join(", ")})`
+      : "";
   return db
     .prepare(
       `SELECT id, text
          FROM memory_index_chunks
-        WHERE length(embedding) = 0 AND model = ?
+        WHERE length(embedding) = 0 AND model = ?${pathFilter}
         ORDER BY id
         LIMIT ?`,
     )
-    .all(model, limit) as { id: string; text: string }[];
+    .all(model, ...(paths ?? []), limit) as { id: string; text: string }[];
 }
 
 /**
