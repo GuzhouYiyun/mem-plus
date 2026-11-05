@@ -31,7 +31,7 @@ mem-plus 是 OpenCode 的持久记忆插件。记忆跨会话、跨项目保留�
 
 在 [Releases](https://github.com/GuzhouYiyun/mem-plus/releases) 下载 `mem-plus-installer-<版本号>.exe`（x64），双击，按提示走完四页。安装位置默认取 OpenCode 实际扫描的插件目录，通常不用改；装完会自动 `opencode reload`，不用手动重启。
 
-安装器内嵌整个包，约 20 秒完成，不需要联网或任何辅助工具。它每次都会装上向量检索需要的 GPU 运行库。
+安装器内嵌整个包与钉死的 llama.cpp 运行时 zip（约 37 MB），约 20 秒完成，不需要联网或任何辅助工具。运行时在装机时放进记忆数据目录，首次启动只做本地校验与解压。
 
 **升级就是再双击一次新版安装器。** 新版安装器会逐文件比较 SHA-256：内容一致的文件原样保留，不一致的覆盖，上一版写过而这一版不再携带的删掉，新包有而目录里没有的装上——否则残留的旧模块会被 Node 照常加载（它并不知道 `.ts` 已经不存在了），症状是行为对不上你装的版本。哈希比较使用已有的 Node，缺少 Node/bun 时退回全量覆盖。你自己放在插件目录里的东西不在删除范围内，`models/` 和 `node_modules/` 也不在。
 
@@ -120,7 +120,7 @@ New-Item -ItemType Directory -Force "$env:USERPROFILE\.config\opencode\mem-plus\
 |---|---|---|
 | `model.*` | — | 模型相关，见[模型](#模型) |
 | `service.port` | `4748` | 推理服务起始端口，被占用时递增 |
-| `service.idleMinutes` | `10` | 推理服务空闲退出时间，`0` 为不退出 |
+| `service.idleMinutes` | `5` | 推理服务空闲退出时间，`0` 为不退出 |
 | `web.port` | `4747` | 记忆浏览器端口，被占用时递增 |
 | `wiki.dir` | `~/.config/opencode/mem-plus/wiki` | 文档语料目录，递归读取其中的 markdown |
 | `wiki.enabled` | `true` | `false` 时文档语料不进入索引，`memory_wiki_import` 不再注册 |
@@ -155,7 +155,9 @@ New-Item -ItemType Directory -Force "$env:USERPROFILE\.config\opencode\mem-plus\
 模型文件更新后（换了文件、换了位置、或换了别的模型），要执行一次
 「重建并嵌入」——向量按当时的文件整套重算，不与之前的文件混用。
 
-必须是带 embedding 头的模型，否则生成不出向量。**要求显卡，不使用 CPU 推理**：无可用 GPU 时推理服务拒绝启动，日志记录 `gpu backend unavailable; service will not start`。AMD 与 Intel 的独显走 vulkan，`model.gpu` 保持 `auto` 即可，取 `discrete` 会漏掉它们。
+必须是带 embedding 头的模型，否则生成不出向量。**引擎决定跑在哪**：GPU 变体（vulkan / cuda）在无可用设备的机器上拒绝启动，日志记录 `gpu backend unavailable; service will not start`——不回落；无显卡的机器在 Runtime 页选 `CPU` 引擎（约 24 MB，需行内下载），那是正门不是降级。AMD 与 Intel 的独显走 vulkan，`model.gpu` 保持 `auto` 即可，取 `discrete` 会漏掉它们。
+
+**引擎与更新（侧栏 Runtime 页，LM Studio 式布局）**：运行时选择卡里，GGUF 引擎下拉可选 `Vulkan`（默认，AMD/Intel/NVIDIA 通吃，安装器预下载）、`CUDA`（需 NVIDIA 驱动；安装包不带，选中后由服务现下双包约 593 MB，**本机未测**——风险自担，无驱动时下拉里禁用）或 `CPU`（无需显卡，包约 24 MB，已实测：下载校验、起服务、嵌入全通过）；同行的「自动更新选中运行环境扩展包」开关开启时**一直保持最新**——每次启动后台对齐 GitHub 最新 nightly 并写回 `runtime.json`（实查上游：Windows 二进制只有 nightly 一种，正式版不带），缺失/损坏也自动补下；关闭则只能用行内按钮手动取。**切换引擎选中即生效**：下拉一选，写完配置立即重启推理服务，不必重启 OpenCode（若服务由别的实例持有或目标引擎还没下载，弹提示说明原因）。更新通道卡保留「检查更新」（只读对比当前与上游最新）。引擎列表三行（CPU / Vulkan / CUDA，带搜索/兼容/类型真过滤）：Vulkan、CUDA、CPU 可安装使用，CUDA 无驱动时禁用。行内按钮可直接安装、重新下载某个引擎（不依赖切换）；「删除已下载文件」点开弹出该引擎**已下载文件列表**（所有版本的解压目录与 zip 逐条列出，含旧版本残留），选哪条删哪条，不一键清空——当前生效引擎正在用的文件标出且不可删（先在下拉里切走）。行身份不随后端与版本走（实测同批向量），切换与自动更新都不触发重嵌。
 
 | 情况 | 行为 |
 |---|---|
@@ -329,9 +331,8 @@ markdown 是唯一数据源，索引是可再生数据。想备份就备份 `wor
 | `hybrid` / `vector` 返回 0 条 | 执行 `memory_reindex {"embed": true }` 并等它跑完 |
 | 导入后搜不到文档 | `memory_search` 默认只搜会话记忆，要指定 `corpus: "wiki"` 或 `"all"` |
 | `workspace/memory/` 下没有当日文件 | 要完成一次完整对话轮次，写入在结算约 2 秒后发生 |
-| `service did not become healthy ... within 30s` | 推理服务没起来。可手动跑 `node "<插件目录>/plugin/serve/server.mjs" --port 4748` 看日志 |
+| `service did not become healthy ... within 30s` | 推理服务没起来。用安装器装的版本自带运行时 zip，首跑只做本地校验解压，不联网；zip 不在时（手动部署、或校验失败被删）才会自动下载官方 llama.cpp 运行时（约 37 MB），30 秒内可能未就绪，稍候自动恢复；仍不行可手动跑 `node "<插件目录>/plugin/serve/server.mjs" --port 4748` 看日志 |
 | `gpu backend unavailable; service will not start` | 没有可用 GPU，推理服务不启动。出现可用 GPU 后自动恢复 |
-| `推理依赖未安装：找不到 node-llama-cpp` | 推理依赖缺失，与显卡无关。重新运行安装器即可补上；未装时全文检索不受影响，向量检索不可用 |
 
 ## 更新
 
@@ -349,9 +350,9 @@ opencode service restart
 
 向量**模型**仍然要自己下载放置，约 635 MB，见[向量模型](#向量模型可选)。
 
-> 早期版本的安装器在不勾选「本地向量检索依赖」时会传入 `--omit=optional`，npm 会顺带把已装好的 `node-llama-cpp` 剪掉，于是更新后向量检索静默失效——日志只提示显卡不可用，与真实原因无关。该分支现已不可达：运行库每次都装，且报错会直接说明是包缺失而非显卡问题。
+> 早期版本把向量运行时做成 npm 可选依赖（`node-llama-cpp`）：不勾选组件时安装器会传 `--omit=optional`，npm 会顺带把已装好的它剪掉，于是更新后向量检索静默失效。现版本已弃用该依赖——嵌入运行时改为官方 llama.cpp 的 `llama-server`，安装器把钉死的 zip 预下载到 `~/.config/opencode/mem-plus/runtime/`（首跑本地校验解压，zip 缺失才联网下载），与 npm 无关，这条风险整体消失；覆盖更新时 npm 还会顺带清掉旧版遗留的 `node-llama-cpp`。
 
-覆盖更新时 npm 也不会重装它：实测（2026-10-12，一次真实安装）`node-llama-cpp` 是 971 个文件 / 37.8 MB，整棵依赖树 29482 个文件 / 858.3 MB，它只占其中一小部分；在已装好的树上跑 `npm install --dry-run`，`node-llama-cpp` 没有任何动作。
+覆盖更新时 npm 不会重装整棵树：它按已装好的版本跳过。实测（2026-11-04）依赖树 27079 个文件 / 184.9 MB；旧版装的 `node-llama-cpp` 及其附带的各平台 GPU 二进制（当初占大头）在更新中由 npm 移除，无需手动清理。
 
 ## 卸载
 

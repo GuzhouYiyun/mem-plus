@@ -5,15 +5,18 @@ import { PromptFilesView } from "$lib/components/explorer/PromptFilesView";
 import { DreamsView } from "$lib/components/explorer/DreamsView";
 import { ConfigView } from "$lib/components/explorer/ConfigView";
 import { ConfigFileView } from "$lib/components/explorer/ConfigFileView";
+import { RuntimeView } from "$lib/components/explorer/RuntimeView";
 import { Button } from "$lib/components/ui/button";
 import { Toaster } from "$lib/components/ui/sonner";
 import { useI18n } from "$lib/i18n";
 import { initRouter, navigate, ROUTES, useAppView } from "$lib/router";
 
-// Four tabs: the two surfaces openclaw writes for a person to read (the injected
-// prompt files, the dream diary) and two takes on the plugin's own settings --
+// Five tabs: the two surfaces openclaw writes for a person to read (the injected
+// prompt files, the dream diary), two takes on the plugin's own settings --
 // 设置 is the form, 配置文件 is the same form beside a live preview of the JSON
-// it writes. The transcript view is gone -- openclaw has no browsable session
+// it writes -- and 运行时, the diagnostics page for the llama.cpp runtime and
+// the inference service (status rows plus download / restart / repair actions).
+// The transcript view is gone -- openclaw has no browsable session
 // record by design, and a page built on the capture snapshots was showing
 // something openclaw never meant to expose. The read-only status page went too:
 // it was four rows of counters, and the settings page is where a person goes
@@ -35,7 +38,9 @@ export default function App() {
         ? t("cfg-title")
         : currentView === "configFile"
           ? t("tab-config-file")
-          : t("tab-prompt-files");
+          : currentView === "runtime"
+            ? t("tab-runtime")
+            : t("tab-prompt-files");
 
   function onHomeClick(event: MouseEvent) {
     if (
@@ -72,6 +77,7 @@ export default function App() {
           dreamsLabel={t("tab-dreams")}
           configLabel={t("cfg-title")}
           configFileLabel={t("tab-config-file")}
+          runtimeLabel={t("tab-runtime")}
           themeLabel={t("nav-theme")}
           closeLabel={t("nav-close")}
         />
@@ -107,6 +113,8 @@ export default function App() {
                 <ConfigView />
               ) : currentView === "configFile" ? (
                 <ConfigFileView />
+              ) : currentView === "runtime" ? (
+                <RuntimeView />
               ) : (
                 <PromptFilesView />
               )}

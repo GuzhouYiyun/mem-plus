@@ -560,7 +560,7 @@ while (queue.length) {
 
     // Dynamic imports. Two different questions, and they had been answered as one.
     //
-    // Bare specifiers (`node-llama-cpp`, `esbuild`, `file-type`) stay out of the
+    // Bare specifiers (`esbuild`, `file-type`, `koffi`) stay out of the
     // closure and stay out of dependencies: they are lazily required dev tooling, and
     // the mem-plus use case never reaches most of them.
     //
@@ -805,13 +805,12 @@ for (const [k, v] of Object.entries(pluginPkg.dependencies ?? {})) {
     depNotes[k] = "plugin";
   }
 }
-// Optional dependencies are carried through, not promoted. `node-llama-cpp` is the
-// case that matters: it is a real external (the embedding service imports it) but
-// an *enhancement* -- without a usable GPU the service refuses to start and search
-// degrades to full text, so nothing breaks without it. It pulls 667 MB of
-// per-platform GPU binaries (win-x64, win-arm64, cuda, vulkan, cuda-ext all install
-// at once), which is why it has to stay optional: `npm install --omit=optional`
-// takes a fresh install from ~858 MB down to ~190 MB.
+// Optional dependencies are carried through, not promoted. This table is what
+// keeps a future optional dep out of `dependencies` on every `--write`; the one
+// that used to live here, `node-llama-cpp`, was removed on 2026-11-04 when the
+// embedding service switched to spawning the official llama.cpp `llama-server`
+// (see docs/port-plan.md). It pulled 667 MB of per-platform GPU binaries, which
+// is why it had to stay optional while it existed.
 //
 // Without this table the loop below would find the package in `externals`, resolve a
 // version, and write it straight back into `dependencies` -- undoing the split on
@@ -1014,8 +1013,54 @@ if (Object.keys(optionalDeps).length) {
   console.log("wrote package.json (files+dependencies) and plugin/scripts/openclaw-alias-spec.json");
 }
 
+// --- stale web bundle --------------------------------------------------------------
+// `web/dist` ships as a directory, so the file-set comparison above cannot see
+// inside it: a bundle built from older sources passes every check. It did on
+// 2026-11-04 -- `flush.model` was removed from web/src/lib/config-schema.ts,
+// prepack skipped the rebuild because web/dist/index.html existed, and 0.3.3
+// installed a settings page that still offered the deleted field. mtime is the
+// signal available without hashing build output, and it is enough: the bundle is
+// older than its sources exactly when someone edited web/src after the last build.
+function newestMtimeMs(target) {
+  let newest = 0;
+  const stack = [target];
+  while (stack.length > 0) {
+    const current = stack.pop();
+    let info;
+    try {
+      info = statSync(current);
+    } catch {
+      continue; // an optional source that does not exist cannot be stale
+    }
+    if (info.isDirectory()) {
+      for (const entry of readdirSync(current)) stack.push(path.join(current, entry));
+    } else if (info.mtimeMs > newest) {
+      newest = info.mtimeMs;
+    }
+  }
+  return newest;
+}
+const webRoot = path.join(ROOT, "web");
+const webBundle = path.join(webRoot, "dist", "index.html");
+const webSourceMtime = Math.max(
+  newestMtimeMs(path.join(webRoot, "src")),
+  ...["index.html", "vite.config.ts", "package.json", "package-lock.json", "tsconfig.json", "tsconfig.app.json", "tsconfig.node.json"].map(
+    (f) => newestMtimeMs(path.join(webRoot, f)),
+  ),
+);
+const staleWebBundle =
+  existsSync(webRoot) &&
+  (!existsSync(webBundle) || webSourceMtime > statSync(webBundle).mtimeMs);
+if (staleWebBundle) {
+  console.log(
+    existsSync(webBundle)
+      ? "web/dist is older than web/src -- run `npm --prefix web run build` (prepack would rebuild it)"
+      : "web/dist is missing -- run `npm --prefix web run build`",
+  );
+}
+
 const drift =
-  missingFiles.length || extraFiles.length || missingDeps.length || unresolvable.length || specDrift;
+  missingFiles.length || extraFiles.length || missingDeps.length || unresolvable.length || specDrift || staleWebBundle;
 if (checkMode) {
   if (drift) {
     console.error("DRIFT detected (run: node scripts/audit-npm-pack.mjs --write)");

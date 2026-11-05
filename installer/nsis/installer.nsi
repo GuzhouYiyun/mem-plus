@@ -19,6 +19,7 @@ Unicode true
 !include "MUI2.nsh"
 !include "FileFunc.nsh"
 !include "version.nsh"
+!include "runtime-zip.nsh"
 !include "nsis-paths.nsh"
 !include "LogicLib.nsh"
 
@@ -107,7 +108,18 @@ VIAddVersionKey /LANG=2052 "LegalCopyright"  "MIT"
 ; "mem-plus 已安装。" to pair with the uninstaller's "mem-plus 已卸载。"; that was
 ; solving for symmetry nobody asked for, and "口语化严重" was about the welcome
 ; page's opening, not this one.
-!define MUI_FINISHPAGE_TEXT "安装成功。$\r$\n$\r$\n向量模型未随本安装包分发。请另行下载 bge-m3（约 635 MB），并放置于：$\r$\n$PROFILE\.config\opencode\mem-plus\models\"
+; The model path in the text below is $INSTDIR, not a profile literal (changed
+; 2026-11-04). The old `$PROFILE\.config\opencode\mem-plus\models\` hard-coded
+; the `.config\opencode` segment at COMPILE time, so anyone with
+; XDG_CONFIG_HOME or OPENCODE_CONFIG_DIR set was pointed at a directory the
+; plugin never reads -- only machines with nothing set got a correct answer.
+; $INSTDIR is dynamic in both directions that matter: it is whatever the user
+; picked on the directory page (or /D=, or the registry), and it is the location
+; defaultModelDir() checks FIRST -- plugin-root models/ wins over the state
+; root -- so the path shown is both the user's own choice and a branch that is
+; guaranteed to be picked up. Expansion of $INSTDIR in page text is the same
+; runtime mechanism the welcome and uninstall-confirm pages already rely on.
+!define MUI_FINISHPAGE_TEXT "安装成功。$\r$\n$\r$\n向量模型未随本安装包分发。请另行下载 bge-m3（约 635 MB），放入安装目录下的 models 文件夹（没有就新建）：$\r$\n$INSTDIR\models\"
 
 ; Not an instruction any more. The installer stops OpenCode itself with
 ; `opencode service stop` before writing and starts it again afterwards, so the
@@ -137,18 +149,22 @@ VIAddVersionKey /LANG=2052 "LegalCopyright"  "MIT"
 
 Var Vectors
 ; Decided once in SecDeps and consumed by both the npm and the bun call, so the
-; "is the optional vector runtime already there" question is asked once instead
-; of being duplicated into a fallback that could answer it differently.
+; install-flags question is asked once instead of being duplicated into a
+; fallback that could answer it differently.
 Var InstallFlags
-; Set only on the preserve-an-existing-install path, so the finish page can say
-; so. See SecDeps and the Finish page section.
-Var KeptVectors
 
 ; Payload files this install removed because the previous one had written them and this
 ; one no longer ships them. Counted so the install log says how many, which is the only
 ; place it can be said: MUI2 offers no way to add a line to the finish page (see the
 ; MUI_FINISHPAGE_RUN note above), so it goes to the instfiles progress pane instead.
 Var RemovedPayloadFiles
+
+; State root (<config>\mem-plus), resolved at install time for the pre-downloaded
+; runtime zip. Deliberately separate from ResolveInstallDir: that function returns
+; early when /D= or the registry already supplied $INSTDIR, while this one must
+; always ask OpenCode -- a /D= test install has to redirect the runtime copy too,
+; or it writes 36 MB into the live state root. See ResolveStateDir.
+Var StateRoot
 
 ; ------------------------------------------------------------------- where --
 ; OpenCode discovers plugins by scanning <config>/plugins/*, and "config" is not
@@ -339,6 +355,55 @@ done:
   Delete "$TEMP\mp-oc-config.txt"
 FunctionEnd
 
+; The state root for the pre-downloaded runtime zip: <config>\mem-plus -- exactly
+; where paths.ts stateRoot() and server.mjs stateRoot() resolve, because both ask
+; the same question (XDG_CONFIG_HOME else ~/.config) and `opencode debug paths
+; config` already answers it with OpenCode's own rules.
+;
+; A deliberate SECOND copy of the ask-and-validate inside ResolveInstallDir rather
+; than a shared function: that one's first act is to return when $INSTDIR is not
+; the compile-time default, which is precisely the /D= test-install case this one
+; exists to serve. Re-opening the measured-working parse (2026-10-15, wrong twice
+; before it was right -- see its comment) to share 40 lines is the worse trade.
+; If `debug paths config` output ever changes, BOTH copies change together.
+;
+; Failure is not fatal and must not guess: an empty $StateRoot means "skip the
+; runtime copy", the plugin then downloads on first run (the pre-feature
+; behaviour), and nothing writes 36 MB to a path no reader will ever check.
+Function ResolveStateDir
+  StrCpy $StateRoot ""
+  nsExec::ExecToStack 'cmd /c opencode debug paths config > "$TEMP\mp-oc-config.txt" 2>&1'
+  Pop $0
+  Pop $9      ; the path also lands on stdout; the file is what gets read
+  FileOpen $1 "$TEMP\mp-oc-config.txt" r
+  ${If} $1 == ""
+    Return
+  ${EndIf}
+  FileRead $1 $2
+  FileClose $1
+  Delete "$TEMP\mp-oc-config.txt"
+  ; FileRead keeps the terminator; StrCpy -1 drops exactly that one byte (the
+  ; NSIS 3.13 behaviour behind the no-op upgrade delete -- see RemoveStalePayload).
+  StrCpy $2 "$2" -1
+  ${If} $2 == ""
+    Return
+  ${EndIf}
+  ; Rooted check by value, never by wildcard: LogicLib ${If} string equality has
+  ; no `?` (measured 2026-10-15 -- the wildcard form rejected every real path).
+  StrCpy $3 "$2" 1 1
+  StrCpy $4 "$2" 1 0
+  StrCpy $5 "\\"
+  ${If} $3 == ":"
+    StrCpy $StateRoot "$2\mem-plus"
+    Return
+  ${EndIf}
+  ${If} $4 == $5
+    StrCpy $StateRoot "$2\mem-plus"
+    Return
+  ${EndIf}
+  StrCpy $StateRoot ""
+FunctionEnd
+
 ; ------------------------------------------------------------------ sections --
 ; Four sections, all installed, in order. There is no component page (see the page
 ; list): the last optional component was removed on 2026-10-12, and with no choice
@@ -365,6 +430,11 @@ FunctionEnd
 ; SecReload, and every install then skipped `npm install`.
 Section "mem-plus 记忆插件" SecMain
 SectionIn RO
+  ; The pre-downloaded runtime zip rides along in this section: it is one File
+  ; into the state root, not a component, and there is no page to give it a row.
+  ; KB of the pinned zip (generated from runtime.json by build.ps1), rounded up
+  ; so the "所需空间" line never understates -- same rule as SecDeps' 189500.
+  AddSize ${RUNTIME_ZIP_SIZE_KB}
   ; Hash-aware update into $INSTDIR: the helper removes only changed and extra
   ; files, and the SetOverwrite-off pass below writes only what is missing.
   ;
@@ -478,14 +548,44 @@ SectionIn RO
   CreateDirectory "$SMPROGRAMS\mem-plus"
   CreateShortCut "$SMPROGRAMS\mem-plus\打开插件文件夹.lnk" "$INSTDIR"
   CreateShortCut "$SMPROGRAMS\mem-plus\卸载 mem-plus.lnk" "$INSTDIR\Uninstall.exe"
+
+  ; 轴二（2026-11-04）：把钉死的运行时 zip 放进 state root，首跑 server.mjs
+  ; ensureRuntime 走"zip 在位 → sha256 校验 → tar.exe 本地解压"分支，免网络。
+  ; 只写一个文件、不加新代码路径：解压与校验本来就是 ensureRuntime 的活，
+  ; 安装器不复刻（NSIS 没有内置 unzip，引 helper 违背本文件的取舍）。
+  ;
+  ; state root 是用户数据：卸载器只按 payload-manifest 删 $INSTDIR，从不碰它
+  ; （models\、index.db、记忆文件同此契约，见卸载确认页文案）。旧 tag 的 zip
+  ; 在 tag 升级后留着不删——36 MB 的死文件不值得让安装器伸手进用户数据目录。
+  ;
+  ; 跳过已存在而非覆盖：SHA-256 由首跑的 ensureRuntime 把关，半截 zip 会被它
+  ; 删掉重下，自愈；安装器在这里省一次 36 MB 的写盘。
+  Call ResolveStateDir
+  ${If} $StateRoot == ""
+    DetailPrint "未能向 OpenCode 解析 state root，跳过运行时预下载（插件首跑会自行下载）。"
+  ${Else}
+    ${If} ${FileExists} "$StateRoot\runtime\${RUNTIME_ZIP}"
+      DetailPrint "运行时已存在，跳过：$StateRoot\runtime\${RUNTIME_ZIP}"
+    ${Else}
+      DetailPrint "预下载运行时到 $StateRoot\runtime……"
+      CreateDirectory "$StateRoot\runtime"
+      SetOutPath "$StateRoot\runtime"
+      File /oname=${RUNTIME_ZIP} "runtime\${RUNTIME_ZIP}"
+      SetOutPath "$INSTDIR"
+    ${EndIf}
+  ${EndIf}
 SectionEnd
 
-; Named "依赖" on purpose. What this row installs is node-llama-cpp -- the GPU
-; runtime -- and NOT the embedding model: bge-m3-Q8_0.gguf lives in models/, which
-; is gitignored and never packed, and nothing in the plugin fetches it (there is
-; no download path in plugin/src/model at all). Ticking this row alone does not
-; turn on vector search; it removes one of two prerequisites. Calling it
-; "本地向量检索" promised a feature the box does not deliver.
+; Named "依赖" on purpose. What this row used to install was node-llama-cpp -- the
+; GPU runtime -- and NOT the embedding model: bge-m3-Q8_0.gguf lives in models/,
+; which is gitignored and never packed, and nothing in the plugin fetches it (there
+; is no download path in plugin/src/model at all). Since 2026-11-04 the row installs
+; the plain npm tree only: the embedding runtime is the official llama.cpp
+; llama-server, downloaded by serve/server.mjs into the state root's runtime/
+; directory on first start -- it is not an npm package and cannot live in $INSTDIR.
+; Ticking this row alone never turned on vector search; the model is still the
+; second prerequisite. Calling it "本地向量检索" promised a feature the box does
+; not deliver.
 ;
 ; The model is not bundled because it is ~635 MB against a 3 MB installer, and
 ; most installs never need it -- full-text search is a complete mode, not a
@@ -500,6 +600,11 @@ SectionEnd
 ; the component was optional, and it was never checked against what npm actually
 ; puts on disk. The bulk of an install is elsewhere: node_modules totals 29482
 ; files / 858.3 MB, of which node-llama-cpp is 37.8 MB.
+;
+; Re-measured after node-llama-cpp left package.json (2026-11-04): node_modules is
+; 27079 files / 184.9 MB. The drop is bigger than that package's own 37.8 MB -- npm
+; installs every platform's GPU binary for it (win-x64, win-arm64, cuda, vulkan,
+; cuda-ext), which is the ~667 MB of optional weight that went away with it.
 Section "本地向量检索依赖" SecVectors
 SectionIn RO
   ; /o is unchecked by default, so .onInit no longer has to clear it -- which
@@ -517,52 +622,50 @@ SectionEnd
 Section "安装依赖" SecDeps
 SectionIn RO
   ; Measured on this machine after a real install (2026-10-12): 29482 files /
-  ; 858.3 MB for the whole npm tree. That is the honest number for "所需空间" on a
+  ; 858.3 MB for the whole npm tree. That was the honest number for "所需空间" on a
   ; machine that has nothing yet -- the old 705000 AddSize (688 MB) was attached to
   ; the vector row and described neither this nor that.
+  ;
+  ; Re-measured 2026-11-04 after node-llama-cpp left package.json: 27079 files /
+  ; 184.9 MB = 189,338 KB, entered below as 189500 (rounded up, so the line never
+  ; understates). The npm tree lost the optional GPU binaries that came with
+  ; node-llama-cpp; the llama.cpp runtime is not npm's and lands in the state root
+  ; at first service start instead.
   ;
   ; An update over an existing install needs almost none of this: npm reconciles
   ; against what is already on disk and leaves satisfied packages alone. Measured
   ; with `npm install --dry-run` on the live install, the only changes npm planned
   ; were the nine generated @openclaw/* aliases, which postinstall rewrites anyway.
-  ; node-llama-cpp did not appear at all.
-  AddSize 879000
+  AddSize 189500
 
   DetailPrint "正在安装依赖，请稍候……"
   ; `--omit=optional` is the dangerous flag here, and not because of its size.
   ; npm reconciles $INSTDIR against an ideal tree built without optional deps, so
-  ; this flag PRUNES node-llama-cpp if it is already there. Measured 2026-10-11: an
-  ; install that had the vector component was updated with that row left unticked,
+  ; this flag PRUNES optional packages that are already there. Measured 2026-10-11:
+  ; an install that had node-llama-cpp was updated while that row was untickable,
   ; and node-llama-cpp was deleted -- vector search then refused to start, with
   ; nothing anywhere saying the feature had been removed. An update silently
   ; downgraded the product.
   ;
-  ; The flag is now unreachable: there is no row to leave unticked and $Vectors is
-  ; 1 unconditionally. The branch below is kept rather than deleted because it is
-  ; the only code that knows about this failure, and the failure is a property of
-  ; npm rather than of the choice that used to reach it.
+  ; The flag stays unreachable: there is no row to leave unticked and $Vectors is
+  ; 1 unconditionally. Since 2026-11-04 there are no optional dependencies left at
+  ; all -- node-llama-cpp left package.json with the switch to the official
+  ; llama.cpp runtime (docs/port-plan.md) -- so the flag would prune nothing today;
+  ; a plain `npm install` over an older install prunes the leftover node-llama-cpp
+  ; itself, which is wanted. The branch below is kept as the record of the 2026-10-11
+  ; failure, which is a property of npm rather than of a choice that can reach it now.
   ;
-  ; What an update does instead of reinstalling the runtime: nothing, on purpose.
-  ; npm skips packages already present at a satisfying version, so node-llama-cpp
-  ; is not fetched again -- measured with `npm install --dry-run` against the live
-  ; install, which planned no change to it at all. That is the behaviour the owner
-  ; asked for on 2026-10-12, and it is npm's own rather than something this script
-  ; performs. The already-installed branch exists to say so out loud, so the
-  ; DetailPrint does not read like a fresh download every time.
-  StrCpy $KeptVectors "0"
+  ; What an update does instead of reinstalling deps: nothing, on purpose. npm skips
+  ; packages already present at a satisfying version -- measured with
+  ; `npm install --dry-run` against the live install, the only planned changes were
+  ; the generated @openclaw/* aliases, which postinstall rewrites anyway. That is
+  ; npm's behaviour rather than something this script performs.
+  StrCpy $InstallFlags ""
   ${If} $Vectors == "1"
-    ${If} ${FileExists} "$INSTDIR\node_modules\node-llama-cpp\package.json"
-      DetailPrint "已装有向量检索运行库，本次跳过重装……"
-    ${Else}
-      DetailPrint "安装全部依赖（含向量检索组件）……"
-    ${EndIf}
-    StrCpy $InstallFlags ""
-  ${ElseIf} ${FileExists} "$INSTDIR\node_modules\node-llama-cpp\package.json"
-    DetailPrint "检测到已安装的向量检索组件，本次保留……"
-    StrCpy $InstallFlags ""
-    StrCpy $KeptVectors "1"
+    DetailPrint "安装全部依赖……"
   ${Else}
-    DetailPrint "安装依赖（不含向量检索组件）……"
+    ; Unreachable while $Vectors is assigned 1 in both SecVectors and .onInit.
+    DetailPrint "安装依赖（不含可选组件）……"
     StrCpy $InstallFlags "--omit=optional"
   ${EndIf}
 
@@ -751,7 +854,7 @@ not_mem_plus:
   MessageBox MB_OK|MB_ICONEXCLAMATION \
     "这个路径下没有找到 mem-plus：$\r$\n$\r$\n$INSTDIR$\r$\n$\r$\n\
      已经停止，没有删除任何东西。$\r$\n$\r$\n\
-     你的记忆数据（$PROFILE\.config\opencode\mem-plus）没有被触碰。"
+     你的记忆数据保存在另一个目录，没有被触碰。"
   Abort
 
 done:
@@ -816,7 +919,7 @@ Function DetectPackageManager
       MessageBox MB_OK|MB_ICONEXCLAMATION \
         "这台机器上找不到 npm 或 bun。$\r$\n$\r$\n\
          请先安装 Node.js（https://nodejs.org）或 bun（https://bun.sh），然后重新运行本安装程序。$\r$\n$\r$\n\
-         你也可以手动安装：把 mem-plus 的 tarball 解压到$\r$\n$PROFILE\.config\opencode\plugins\mem-plus$\r$\n\
+         你也可以手动安装：把 mem-plus 的 tarball 解压到$\r$\n$INSTDIR$\r$\n\
          然后在该目录里执行 npm install。"
       Abort
     ${EndIf}

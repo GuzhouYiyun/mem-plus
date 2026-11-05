@@ -2,11 +2,18 @@
 //
 // The tarball ships `web/dist` (audit-npm-pack.mjs treats a missing bundle as
 // drift), and the page is TSX, so packing without a build would produce an
-// install whose web server has nothing to serve. Skips the work when the bundle
-// is already there -- the point is to ship what you tested, not to rebuild it
-// behind your back.
+// install whose web server has nothing to serve. Skips the work only when the
+// bundle is already there AND not older than its sources -- the point is to
+// ship what you tested, not to rebuild it behind your back.
+//
+// The freshness check exists because the skip used to be unconditional, and on
+// 2026-11-04 that packed a stale bundle: `flush.model` had been removed from
+// `web/src/lib/config-schema.ts`, `npm pack` skipped the rebuild, and 0.3.3
+// installed a settings page that still offered the deleted field. An edit under
+// web/src without a manual `npm --prefix web run build` must rebuild here, not
+// pack the previous bundle.
 import { spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync, statSync } from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";

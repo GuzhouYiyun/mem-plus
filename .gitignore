@@ -91,3 +91,9 @@ installer/nsis/payload-manifest.nsh
 installer/nsis/payload-files.txt
 installer/nsis/payload-dirs.txt
 installer/nsis/payload-hashes.txt
+# The pinned runtime zip build.ps1 downloads (35.9 MiB, verified against
+# runtime.json's sha256) and the nsh it generates from that same JSON -- same
+# origin and same reason as version.nsh above. Neither is hand-maintained, and
+# committing a 36 MB binary that the build re-fetches would only ever go stale.
+installer/nsis/runtime/
+installer/nsis/runtime-zip.nsh

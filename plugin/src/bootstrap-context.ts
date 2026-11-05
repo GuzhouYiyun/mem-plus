@@ -1,5 +1,7 @@
-import { readFile } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
+import type { Stats } from "node:fs";
 import path from "node:path";
+import { readWorkspaceFileCache, writeWorkspaceFileCache } from "./workspace-file-cache.js";
 
 /**
  * Bootstrap context injection, local implementation.
@@ -89,9 +91,57 @@ export type ContextFile = {
 };
 
 /**
+ * Upstream's `workspaceFileIdentity` (`src/agents/workspace-file-read.ts:32`), verbatim.
+ *
+ * `ctimeMs` catches in-place edits that restore mtime (sync/restore/editor tooling);
+ * matches the freshness pattern in assistant-avatar-cache.ts and plugin-registry-snapshot.ts.
+ */
+function workspaceFileIdentity(stat: Stats, canonicalPath: string): string {
+  // ctimeMs catches in-place edits that restore mtime (sync/restore/editor tooling);
+  // matches the freshness pattern in assistant-avatar-cache.ts and plugin-registry-snapshot.ts.
+  return `${canonicalPath}|${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`;
+}
+
+/**
+ * Read one context file through upstream's identity cache
+ * (`workspace-file-cache.ts`, copied from `src/agents/workspace-file-cache.ts`).
+ *
+ * The upstream equivalent is `workspace-file-read.ts`'s fd dance: stat, build the
+ * identity, serve from cache on a hit, read and store on a miss. The path guards and
+ * fd pinning that surround it upstream are absent here for the reason this whole file
+ * exists (see the header: OpenCode's workspace is the trust boundary), so this is
+ * stat -> identity -> cache -> readFile. A missing file is a miss with no cache write,
+ * as upstream's ENOENT branch is.
+ *
+ * Why it matters: the context hook fires on every model request, and without this each
+ * request re-read AGENTS.md / SOUL.md / MEMORY.md from disk. An edit is picked up on
+ * the very next request -- identity includes size, mtime and ctime -- so freshness is
+ * unchanged from reading the file every time.
+ */
+export async function readContextFile(filePath: string): Promise<string | undefined> {
+  let info: Stats;
+  try {
+    info = await stat(filePath);
+  } catch {
+    return undefined;
+  }
+  const identity = workspaceFileIdentity(info, filePath);
+  const cached = readWorkspaceFileCache(filePath, identity);
+  if (cached !== undefined) return cached;
+  let content: string;
+  try {
+    content = await readFile(filePath, "utf8");
+  } catch {
+    return undefined;
+  }
+  writeWorkspaceFileCache({ filePath, content, identity });
+  return content;
+}
+
+/**
  * Read the bootstrap files that exist in `dir`, in prompt order, honouring both
  * character budgets. Missing files are skipped rather than rendered as empty
- * headings.
+ * headings. Reads go through `readContextFile` (upstream's identity cache).
  */
 export async function loadBootstrapContextFiles(
   dir: string,
@@ -103,17 +153,14 @@ export async function loadBootstrapContextFiles(
 
   for (const name of wanted) {
     if (remainingTotal <= 0) break;
-    let content: string;
-    try {
-      content = await readFile(path.join(dir, name), "utf8");
-    } catch {
-      continue; // absent, unreadable, or a directory: nothing to inject
-    }
+    const fullPath = path.join(dir, name);
+    const content = await readContextFile(fullPath);
+    if (content === undefined) continue; // absent, unreadable, or a directory: nothing to inject
     const truncated =
       content.length > MAX_CHARS_PER_FILE ? content.slice(0, MAX_CHARS_PER_FILE) : content;
     if (truncated.length === 0) continue;
     remainingTotal -= truncated.length;
-    result.push({ name, path: path.join(dir, name), content: truncated });
+    result.push({ name, path: fullPath, content: truncated });
   }
   return result;
 }

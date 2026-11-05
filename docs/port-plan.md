@@ -2638,3 +2638,869 @@ OpenCode 日志在 14:58:12-13 有 6 条 `failed to load plugin`,原因全部是
 | 资产 | exe 3,419,909 B / sha256 `8D0891E429C87E015304BEFC5311563FC72B48D00E63119FEEF7C8BC5F7305B4`;tgz 4,551,661 B / sha256 `1CD48CD7FFE7C54B9ABAA8F91B1BDF331A8DA401E62432C586D31DEDAD9B99EF`;远端大小与本地一致 |
 | 文案 | `## 0.3.2` + Highlights / Changes / Fixes + 安装;覆盖 `v0.3.1..v0.3.2` 的 4 笔;正文 1165 字符,UTF-8 往返核对一致 |
 | 未做 | 发布后未改代码;文档这一节在 tag 之后提交,不改变 exe/tgz 的 payload |
+
+## 设置页两个模型下拉合并成一个(2026-11-02)
+
+机主截图问「这为什么有两个」:设置页「抽取」段有 `model.hostedModel`,
+「压缩前落盘」段有 `flush.model`,帮助文案一字不差。
+
+查因:`readFlushConfig` 一直读 `flush.model` → `FlushConfig.hostedModel`
+(`flush-config.ts` 的 `...readHostedModel(nested["model"])`),但该字段**全仓 0 个
+使用点**。落盘走 `maybeFlush` → `runFlush({ deps: captureDeps })`(`index.ts:615`),
+而 `captureDeps` 由 `hostedComplete(ctx, modelConfig.hostedModel)` 建
+(`index.ts:200`)——落盘实际一直跑在 `model.hostedModel` 上。即上游
+`flush-plan.ts` 的 `model` 旋钮只移植了读取那一半,没移植消费那一半,UI 又把两个
+键都摆了出来,于是出现两个等效下拉。
+
+改法(机主定:两个合成一个,归一个管):
+
+- `web/src/lib/config-schema.ts`:删 `flush.model` 字段;`model.hostedModel` 的
+  help 注明「条目抽取与压缩前落盘共用」,并留注释指向 flush-config 头注。
+- `plugin/src/flush-config.ts`:删 `FlushConfig.hostedModel`、`readHostedModel`
+  与 `HostedModelRef` 导入;头注新增 `NOT PORTED: upstream's flush.model`,写明
+  上游有独立旋钮、mem-plus 一个 hosted 模型键管两处、旧字段 0 使用点。
+  `flush.enabled` / `flush.contextRatio` 不动。`config.jsonc` 里已写下的
+  `flush.model` 成为无害死键,JSON 仍可解析,只是没人读。
+
+行为差异:**零**。删掉的是从未被消费的读取路径,落盘模型前后都是
+`model.hostedModel`。
+
+门禁(2026-11-02 实测):`tsc -p tsconfig.plugin.json` 4240 = 基线
+(src 4097 + packages 143),`plugin/`+`extensions/`+`bootstrap` 0 错;
+`tsc -p tsconfig.capture.json` 331 = 基线,自有一路 0 错;`web` `tsc -b` 通过;
+`audit-npm-pack.mjs --check` `no drift`。未提交、未发版,活区未动(仍是机主
+双击装的 0.3.2)。
+
+## 长会话恢复/响应变慢:四条修复(2026-11-04)
+
+机主报:开插件后,聊很久的会话恢复、响应都比之前慢。日志+代码查因,三层,
+按对长会话的影响排序:
+
+1. **每条 prompt 前串行付一次模型调用**(`recall-inject.ts` 的 `prompt` hook,
+   宿主 await 完才送模型):中文消息必发 `localiseForRecall`(超时 8s),日志实测
+   每条 ~400ms 失败——`This model is not available in your country`,时间照花;
+   命中召回意图再进 `runDeepRecall`,4 轮 × 15s 各自独立超时、无总上限。
+2. **每次模型调用(每个 tool 轮)context hook 全量重做**:`readOccupancy` 每次
+   `ctx.session.context()` 拉整张消息表(长会话随消息数变重);AGENTS/MEMORY
+   每次重新 `readFile`。
+3. **后台模型调用与回合同抢一条网关通道**:capture extract 26s–177s 一次、
+   长会话 75% 占用触发 flush、启动时 startup sweep 补积压——免费档网关排队,
+   后台占通道,回合请求排后。
+
+上游对照(本地克隆 d1ebf36cd + codeload tarball `f38495f7d`,2026-11-04 拉取;
+github.com:443 经 Watt 隧道协商卡死,codeload 直连可用):
+
+- **escalation.ts**:最新 main 仍是纯正则跑原文,无任何翻译步骤(只加了法语、
+  德语组、放宽了英文 `what did we` 模式)。上游门控从不为非拉丁消息付模型调用。
+- **recall 超时**:`types.ts` 未变,`DEFAULT_TIMEOUT_MS = 15_000` 一个预算;
+  `recall.ts` 重构后仍是一个 `abortSignal`/controller 管整个 recall 过程,
+  工具轮共享它,从不逐轮重置。
+- **flush 门频**:上游门在 `reply-agent-turn-preparation.ts:568`——
+  `beforeCompaction` → `runMemoryFlushIfNeeded`,**每用户回合一次**、回复开跑前;
+  `shouldRunMemoryFlush` 已从 `memory-flush.ts` 删除,门语义并入
+  `runMemoryFlushIfNeeded`(`!entry || hasAlreadyFlushed` 跳过,
+  `flushThreshold = compactionThreshold - softThresholdTokens`)。没有任何
+  per-model-call 的占用检查。
+- **bootstrap 缓存**:`src/agents/bootstrap-cache.ts`(per-session 快照)在最新
+  main 已删除,换成 `src/agents/workspace-file-cache.ts`:按 path+identity
+  (`dev:ino:size:mtimeMs:ctimeMs`,ctime 抓「改内容但还原 mtime」)的 LRU,
+  64 条 / 6×2MB 字节上限;`workspace-file-read.ts:148` 在 stat 后查缓存,
+  miss 才读盘写入。`loadWorkspaceBootstrapFiles` 每轮照走,但未变文件只花一次
+  stat——编辑在下一次请求立即可见,不是「下一回合才新鲜」。
+
+改动(四条,全部照上游):
+
+1. **删 `plugin/src/recall-intent.ts`**(整文件)与 `deep-recall.ts` 里的
+   localize-first:门控与搜索 query 都用原文。这是本树自创能力(2026-10-11 为
+   zh-Hans 组 4/13 的召回率加的),上游没有;它把一次模型调用放进了每条消息的
+   关键路径,机主环境里还是必失败的 400ms 损耗。召回率差异照旧记录在
+   `memory-chain.md` 的 DIVERGENCE 节(见该节 2026-11-04 解决记录)。
+2. **深召回单预算**:`runDeepRecall` 工具轮循环改为 `startedAt` + 剩余时间作
+   每轮 `timeoutMs`,总上限 = `config.timeoutMs`(默认 15s),与上游「一个
+   deadline 管全程」对齐;预算耗尽 → `noteTimeout` + `unavailable`,与上游
+   超时结局一致。`ctx.generate.text` 无 abort(见 `llm.ts`),只能 race 不能
+   中断——宿主限制,已写在代码注释里。
+3. **flush 占用门移到 prompt hook**:`index.ts` 新注册一个 `prompt` hook
+   (宿主多注册可并存,与已有的两个 `context` hook 同机制),每条入站
+   用户消息跑一次 `readOccupancy` + `maybeFlush`,仍 `void` 不阻塞。context
+   hook 里的占用块删除。上游「每回合一次」的对应物在 OpenCode 上就是
+   prompt hook(reply prep 的对位)。
+4. **bootstrap/MEMORY 读走身份缓存**:照抄上游两个文件——`src/infra/lru-cache.ts`
+   (上游零依赖原文件,逐字)与 `plugin/src/workspace-file-cache.ts`(上游
+   `src/agents/workspace-file-cache.ts` 逐字,仅三条 import 路径改指本树副本);
+   `bootstrap-context.ts` 新增 `workspaceFileIdentity`(上游
+   `workspace-file-read.ts:32` 逐字)与 `readContextFile`(stat → identity →
+   cache → readFile,对应上游 fd 流程,去掉 fd/pin 因为该文件头注已写明本树
+   不带路径守卫)。`loadBootstrapContextFiles` 与 MEMORY.md 读都过它。
+   上游 per-turn 快照方案已被它自己在 main 上替换,故照「最新」不照计划稿。
+
+行为差异(相对上游):门控语义、超时值、flush 阈值、缓存键全部与上游一致;
+差异只有宿主形状——OpenCode 的 prompt/context hook 对位上游的 reply prep /
+before_prompt_build,`ctx.generate.text` 不能 abort 所以预算用 race 实现。
+第 3 条相对 mem-plus 旧版的行为变化:flush 触发检查从每模型调用降到每用户消息
+一次;compaction 事件兜底不变。
+
+第 3 层(后台抽取抢通道)是环境性的(慢模型+免费档网关排队),上游无不同设计,
+不改代码,只记录。
+
+门禁(2026-11-04 实测):`tsc -p tsconfig.plugin.json` 4240 = 基线,
+`plugin/`+`extensions/`+`bootstrap` 0 错;`tsc -p tsconfig.capture.json` 331 =
+基线,自有 0 错;`node --check plugin/serve/server.mjs` 过;`web` `tsc -b` 过;
+`audit-npm-pack.mjs --check` `no drift`(新增两文件后 `--write` 重生成清单)。
+未提交、未发版,活区未动。
+
+## 0.3.3 装出的设置页仍是两个下拉(2026-11-04)
+
+机主装 0.3.3 后设置页仍有「压缩前落盘 → 抽取模型 `flush.model`」与「抽取 →
+`model.hostedModel`」两个下拉,帮助文案还是旧的「留空 = 用 OpenCode 当前的
+默认模型。」——即 0.3.2 的页面。
+
+查因:`web/src/lib/config-schema.ts` 的合并在源码里(无 `flush.model`,帮助
+文案加了「条目抽取与压缩前落盘共用。」),但 `web/dist/assets/index-CwkRHooh.js`
+是 2026-10-21 15:28 的旧产物。`scripts/build-web.mjs` 的原有设计是
+「`web/dist/index.html` 存在就跳过构建」(注释:ship what you tested),于是
+`npm pack` 的 prepack 跳过了重建,0.3.3 的 tarball 里是旧 UI。活区与仓库的
+dist 同一文件哈希,证实打包链自己没重建——不是安装器没替换。
+
+修法(两处,都在打包链上):
+
+- `scripts/build-web.mjs`:跳过条件加新鲜度——`web/dist/index.html` 必须不旧
+  于 `web/src` 与 `web` 根下的 index.html / vite.config.ts / package*.json /
+  tsconfig*.json,否则重建。注释补上这次事故与理由。
+- `scripts/audit-npm-pack.mjs`:新增 stale-web-bundle 检查并入 drift,
+  `--check` 门禁现在直接抓旧产物。实测失败控制在前:改完先跑,报
+  `web/dist is older than web/src`,EXIT=1;重建后 `no drift`,EXIT=0。
+
+重建后产物 `index-a3SzUxTo.js`(旧包 `index-CwkRHooh.js` 已被 vite 清掉),
+`flush.model` 0 命中、新文案 1 命中。版本仍是 **0.3.3**(机主定:0.3.3 未发布,
+不另起版本号),用 0.3.3 重打安装包;0.3.4 的 exe 与 tgz 已删,避免装错。
+
+### 压缩前落盘的开关也删了(2026-11-04)
+
+机主:「这个本就是它的功能,为什么还留个开不开的?」`flush.enabled` 是上游
+`agents.defaults.compaction.memoryFlush.enabled` 的对位(`memory-flush-plan.ts:36`,
+`=== false` 整个 flush 不跑,默认开),mem-plus 忠实移植了它,设置页「压缩前落盘」
+段就剩这一个开关。机主定:压缩前落盘是记忆器官本职,不留关掉的入口。
+
+改动:`flush-config.ts` 删 `FlushConfig.enabled` 与读取(`config.jsonc` 里旧的
+`flush.enabled` 键从此被忽略);`index.ts` 删三处 `enabled` 判断与那条
+「pre-compaction flush off」日志;`web/src/lib/config-schema.ts` 删「压缩前落盘」
+整段(删掉开关后该段为空)。行为等于上游默认值,分歧仅在「不可关」;记录进
+`memory-chain.md` §1 的 DIVERGENCE。
+
+## 推理服务换官方 llama.cpp:server.mjs 改进程管理器(2026-11-04)
+
+机主拍板「整体切换成 LM Studio 式的官方 llama.cpp」:弃 node-llama-cpp,
+server.mjs 从「独立进程里跑 node-llama-cpp」改成「独立进程 spawn 官方
+`llama-server` 子进程 + 反向代理」。动机是跟着上游走(LM Studio 同款引擎),
+不是修 bug;node-llama-cpp 的 fork 自检问题(旧文件头)随引擎一起成为历史,
+文件头保留了这段沿革。
+
+**对外契约零改动**:`/health`、`/embed` 的请求与响应逐字段同旧版
+(`ok/service/port/backend/loaded/models/present/idleTimeoutMinutes/uptimeSeconds`;
+`{input}` → `{vector}`;超长 400 文案原样),`client.ts` 一行未动。
+`ok:true` 仍 = 后端可用,不是模型已加载;`loaded.embed` 读子进程
+`/health` 200(llama-server 装模型期间 503)。
+
+**运行时来源**:GitHub releases 的 nightly prerelease tag `b12098`
+(`latest` release 只有 nightly-tag.txt,二进制在 prerelease)。
+asset `llama-b12098-bin-win-vulkan-x64.zip`(37,660,090 B),sha256 钉死
+`3d8f6c95…42bac5e2a`(API `digest` 字段实测)。缓存于
+`~/.config/opencode/mem-plus/runtime/`:zip 一份 + 解压目录一份,
+解压走 `.tmp` 再改名,半截目录不冒充可用。解压用自带 tar.exe(bsdtar 认 zip),
+失败退 PowerShell `Expand-Archive` —— 不引解压库,安装器同款取舍。
+
+**本机实测的一道网络坎**(2026-11-04,是这台机器的环境,不是代码缺陷):
+
+1. Node 内置 fetch 下 github.com 直接 `UNABLE_TO_VERIFY_LEAF_SIGNATURE` ——
+   本机 SteamTools 假根证书(`CN=SteamTools Certificate, O=BeyondDimension`)
+   中间人 github.com,Windows 证书库信任它、Node 内置 CA 不信任。
+   下载改双路:fetch 先试(别的机器直接就过),失败换 `curl.exe`
+   (schannel 走系统证书库),curl 再加 `--ssl-no-revoke` —— 假证书没有
+   CRL/OCSP,吊销检查必然 `CRYPT_E_NO_REVOCATION_CHECK` 失败。
+   完整性不靠证书链:钉死的 sha256 过不了就是删掉重下,中间人改一个字节即出局。
+
+**GPU 检查**:官方 `--list-devices` 现成探针(打一行设备就退出),替换旧
+`getLlamaGpuTypes("supported")` 过滤 + getLlama() 逐个试的循环。无设备 →
+监听前退出 1,与旧「CPU is not an option」同一条硬规则。本机实测
+`Vulkan0: Intel(R) Arc(TM) Graphics (18383 MiB, 17615 MiB free)`。
+
+**记档的分歧**:
+
+- **gpu 三档偏好在 Windows 全部收敛到 vulkan 变体**。旧链
+  cuda→metal→vulkan 由 supported 集合过滤;官方 llama.cpp 的 Windows GPU
+  变体只有 vulkan 一家(覆盖 NVIDIA/AMD/Intel),`discrete` 旧语义
+  「只要 cuda/metal,两者皆无则拒绝」不再复现 —— 拒绝的只剩无 GPU 本身。
+  cuda 变体暂缓:169 MB 构建 + 最多 423 MB cudart,本机无 NVIDIA 卡可测。
+  换变体 = 改 `RUNTIME_ASSETS` + `GPU_VARIANTS` 两个表。
+- **`vramPadding`(GB) → `--fit-target`(MiB)**:官方 llama.cpp 无同名参数,
+  语义最近的是 fit 的每设备余量(缺省 1024 MiB)。数值同源但不逐字节等价。
+- **`--pooling` 不传**:用模型元数据的 CLS。spike(同日)实测双方都 CLS、
+  显式 `--pooling mean` 反而 cos 掉到 0.71–0.79。
+- **首跑下载撞 `startTimeoutMs`(默认 30s)**:下载发生在监听之前(与旧
+  「先开 GPU 再 listen」同序),慢于 30s 时 client 放弃本轮,本进程不退、
+  下载完照常监听,下一轮 `ready()` 扫到即自愈。发行版的解法是安装器预下载
+  (后续步骤),不在本步做。
+- `--log-level` → llama-server `-lv`(1/2/3/5),silent 只压子进程行;
+  `-c 2048 -np 1` 对齐旧 `createEmbeddingContext({contextSize:2048})` + 互斥链。
+
+**冒烟(2026-11-04,本机)**:下载→sha256→解压→list-devices→listen→spawn→
+子进程 `/health` 200 全链路通过;`/health` 字段与旧版逐一对上;
+`/embed` 返回 1024 维、419 ms、两次调用逐位相同(自比 cos=1);
+2100 CJK 超长输入 → 400 旧文案。子进程端口 4848 起顺延 11 个,与对外
+4747–4758 错开。门禁:plugin tsc 4240=基线/自有 0、capture 331=基线/自有 0、
+`audit-npm-pack --check` no drift、`node --check server.mjs` 过。
+
+**未完**(后续步骤):Runtime 网页、安装器预下载运行时、删 `node-llama-cpp`
+依赖(向量质量对比已在步骤3完成,见下节)。
+
+## 步骤3:embedder 身份切换 + 强制全重嵌 + 13 问质量对比(2026-11-04)
+
+**runtime.json 单一来源**:`plugin/serve/runtime.json`(tag + assets.vulkan
+的 sha256/sizeBytes)。两个读者——server.mjs `readRuntimeManifest()`(坏则
+exit 1)与 config.ts `runtimeTag()`(坏则退 `"unknown"`)。asset 文件名不进
+JSON:`llama-<tag>-bin-win-<variant>-x64.zip` 由 tag+变体拼,sha256 是
+防漂移锁。换版本只改这一个文件。
+
+**embedderId 行身份**:`embedderIdFor(path)` = `<embedModelPath>@llamacpp-<tag>`
+(ModelConfig 新字段 `embedderId`;runtime.json 坏时退 `"unknown"`,不含
+路径,防坏安装造出看着像真的串、防路径变化在 tag 未知时 re-id 抖动)。
+index.ts 三处写行的 `model:`(索引写、reindex 目标、append)全换它。
+换串后现有 model-keyed 机制自然完成全重嵌,零迁移 SQL:
+`unchangedSources` 的 skip 键聚合 chunk model(混模也算变)→ 旧行整文件
+重写;`writeSourceChunks` 的 preserved SELECT 只留 `model = 目标` 的向量;
+`searchVector` 只查当前串 → 旧行天然不可检索。Chain:`docs/memory-chain.md`
+§2(行身份含 model)、§5(向量 lane model 过滤)。
+
+**后台 repair**(index.ts `repairEmbedder`,模块 flag 每进程一次):门控
+`vectorsUsable && retrieval.available`,先查 `staleEmbedderModels` /
+`missingVectorCount` 有活才干(零活不碰 `ready()`,不白 spawn);走
+`memory_reindex` 工具 `execute`(embed:true, embedBudget 500)同一路径,
+无第二套写码。≤20 轮;进展判据 = stale 或 missing 至少一个下降(第一轮
+stale 换 missing,两计数分别比不相加);无进展即停并诚实报 stalled;
+超上下文被 `embedMissing` 跳过的 chunk 让 missing 到不了 0 → 停在
+incomplete,不假装修好。`memory-index.ts` 新增 `staleEmbedderModels`
+(`NOT IN (?, 'fts-only')`,`fts-only` 是合法无向量态不算 stale)与
+`missingVectorCount`(`length(embedding)=0`,同 `chunksMissingVectors` 判定)。
+
+**实测缺陷与修复——llama-server 物理批 512 帽**:E2E 第一轮 stale 清零后
+missing=360 卡死,全部报 500 `input (N tokens) is too large to process.
+increase the physical batch size (current batch size: 512)`。根因:
+llama-server 物理批默认 `n_ubatch=512`,embeddings 启动时
+`n_batch(2048) > n_ubatch(512)` 被降到 512(启动警告
+`setting n_batch = n_ubatch = 512` 自证),>512 token 输入直接 500;
+旧 node-llama-cpp 没有这道帽。探针复现:749 字符(514 tok)500、
+1599 字符 200,token 数是界不是字符数。修复:`childArgs` 加
+`-b 2048 -ub 2048` 与 `-c` 对齐,启动警告消失,1600 字符 200。
+
+**E2E 重跑(真实代码路径)**:`repair-e2e.mjs` 走 buildMemoryTools →
+`memory_reindex` execute → runReindex + embedMissing,快照副本
+(VACUUM INTO,旧库 533 chunks/5 源)。3 轮干净:round1 stale→missing
+重写 576 chunks、嵌 500;round2 补 76;round3 clean。终态
+`stale=[] missing=0 chunks=576 vectors=576`(576 因 memory home 在快照
+后新增 2 文件,7 源)。停机逻辑(stalled/incomplete 出口)在第一轮
+ubatch 缺陷下即按预期诚实报,非假绿。
+
+**13 问集对比**(rank.mjs,同一查询文本、旧引擎 4950 vs 新 4948;
+old 480 向量 / new 576,old 语料已含 mem-plus 文件故可比):
+
+- 旧引擎对 mem-plus 主题的问(promotion-threshold / installer-uninstall /
+  flush-precompaction / server-separate-process 等),top5 几乎全是
+  harmony_oldman 的 C 代码碎片 —— 排序性失败,不只是语料差;
+  13 问 top1 有 11 问落在同一 harmony 文件,cos 0.41–0.57。
+- 新引擎对应问的 top1/top5 落回 mem-plus 捕获与记忆文件,片段主题对得上
+  (安装验证、flush:compaction 捕获、reindex 记录),分数 0.50–0.65。
+  部分问 top5 集合不变(nsis-writeuninstaller / git-push-hang /
+  sqlite-torn-copy 等,新分数更高);余者新排序明显更相关。
+- 结论:新引擎检索质量优于旧引擎,不回退。残差:promotion-threshold
+  top1 是 reflection 行(confidence/evidence)而非 §3 阈值原文,属语料
+  组织问题非引擎问题;跨引擎 cos 绝对值不可比,判据用 top 命中主题。
+
+**门禁(改后复跑)**:plugin tsc 4240=基线/自有 0、capture 331=基线/
+自有 0、`audit-npm-pack --check` no drift、`node --check server.mjs` 过。
+
+**未完**(剩余步骤):Runtime 网页、安装器预下载运行时、活区重启验证
+`embedder repair` 真机日志、重打 0.3.3。
+
+## 步骤4:删 `node-llama-cpp` 依赖(2026-11-04)
+
+server.mjs 步骤1重写后已无一处 import 它,全仓 grep 只剩注释与文档——
+删依赖是收尾,不是改造。
+
+**改动**:
+
+- 根 `package.json` 与 `plugin/package.json` 的 `optionalDependencies`
+  整块删除;`npm install` 更新 lock(node-llama-cpp 及 @node-llama-cpp/*
+  平台二进制条目清零)并从 node_modules 移除 101 个包。
+- 实测 node_modules:`27079 文件 / 184.9 MB`(删前 29482 / 858.3 MB,
+  2026-10-12 装机实测)。省下的大头不是包本身 37.8 MB,而是 npm 一次装
+  全部平台的 GPU 二进制(win-x64/win-arm64/cuda/vulkan/cuda-ext ≈667 MB)。
+- `installer.nsi`:SecVectors 头注释改写(该行现在只装普通 npm 树,
+  llama.cpp 运行时由 server.mjs 首跑下载到 state root,不归 npm 管);
+  SecDeps 里按 `node-llama-cpp\package.json` 存在与否分支的 sentinel 与
+  DetailPrint 删除(`$Vectors` 恒为 1,该分支本就永不走 else),$KeptVectors`
+  Var 一并删(全仓只写不读);`--omit=optional` 分支保留为 2026-10-11
+  静默降级事故的记录,今天它剪不掉任何东西(已无 optional 依赖);
+  `AddSize 879000 → 189500`(上方注释记了实测)。
+- 注释/文档里断言现状的句子改写(历史记录保留):`config.ts` 头注释与
+  `vramPadding` 注释(映射 `--fit-target`,动机段保留 #551 历史)、
+  `client.ts` 头注释、`web/server.ts`、`web/api.ts`、`web/config-schema.ts`
+  vramPadding 默认值注释、`audit-npm-pack.mjs` 两处、`AGENTS.md` 两处。
+- `README.md`(机主手册,最小改动):删 `推理依赖未安装:找不到 node-llama-cpp`
+  死错误行(该字符串全仓已无出处);`service did not become healthy` 行补
+  「首跑自动下载约 37 MB 运行时,30 秒内可能未就绪,稍候自愈」;
+  `--omit=optional` 段与实测数字段改写为现状 + 新实测。
+- `docs/trim-plan.md` 的提及是历史计划,不改。
+
+**验证**:
+
+- 门禁:plugin tsc 4240=基线/自有 0、capture 331=基线/自有 0、
+  `audit-npm-pack --check` no drift、`node --check server.mjs` 过。
+  中途一次 drift 是 web/dist 落后于 web/src(config-schema.ts 注释改动
+  刷了 mtime),`npm --prefix web run build` 后消除——build-web 对
+  "index.html 已存在"的跳过判断不看 src 新旧,prepack 的 audit 才看。
+- 安装器:`build.ps1` 全绿(tarball 4.36 MB、payload 2548 文件/18.5 MB、
+  exe 3.28 MB);`/S /D=<temp>` 装机实测:29945 文件、`.mem-plus-payload-*`
+  清单在、卸载器在、`node_modules\node-llama-cpp` 不存在、注册表两键写入;
+  `Uninstall.exe /S` 后目录与两键全清。**`/D=` 毒两键的坑本轮无残留**
+  (卸载器连 InstallDir 键一起删了)。
+- 过程记录:两次前台 shell 被服务器重启掐断,装机本体不受影响
+  (NSIS 子进程独立存活),恢复后核对状态继续,未重复执行。
+
+## Runtime 网页(轴三):只读状态 + 三个动作(2026-11-04)
+
+计划 A 轴三(机主同日批准)。**结果**:第五个 tab 上线——状态只读 + 三个
+动作(下载/重下、重启服务、触发修复),不做版本/变体切换;E2E 37/37 PASS,
+门禁全绿(plugin tsc 4240=基线/自有 0、capture 331=基线/自有 0、
+audit no drift、`node --check server.mjs`、web build)。
+
+**设计理念(几处不显然的)**:
+
+- GET 状态绝不 autostart:`probeService` 只探不拉(配置了 url 直探,否则
+  扫 11 口 400 ms)。开一个网页 tab 就 spawn 4 GB 是不可接受的副作用。
+- 状态页 stale/missing 与 `repairEmbedder` 同源(同一对函数):页面与修复
+  对"有没有活"不可能给出两个答案。
+- 下载永远是 server.mjs `ensureRuntime` 的活,插件侧只做"force 先 dispose
+  再删目录+zip"——不复制下载逻辑,sha256 钉死与 fetch→curl 回退只许一份。
+- 手动 repair 与自动 repair 合流(模块级 in-flight flag):一次点击并入
+  正在跑的那轮,不双开。
+- restart 判定用 uptimeSeconds 前后比较:dispose 只回收本插件子进程,
+  uptime 不变 = 别的实例持有服务,不能谎报"已重启"。
+- 向量 lane 不存在时三动作答 503 中文文案:能力缺失要说清原因,不能装作
+  没这个按钮。
+
+**经验**:
+
+- 插件装载/端点 E2E 不得用 `opencode run`(与活 service 相撞,见 AGENTS
+  陷阱节)。bun 直驱可行且够真:temp `XDG_CONFIG_HOME` 隔离 stateRoot 全部
+  写入,`VACUUM INTO` 快照活区 index.db 当真 deps,真 probeService 探真起
+  的 server.mjs,动作用 stub 记调用。
+- stale 断言不能写死 `[]`:0.3.2 旧身份行(裸路径 model)必须被报出——这
+  正是步骤3"换 embedderId 即全重嵌、零迁移 SQL"的验证点。期望值应从快照
+  现算,与页面逐一对账,而不是拍一个空数组。
+
+## 安装器预下载运行时(轴二)(2026-11-04)
+
+机主批准的计划 A 轴二:build 时把钉死的 zip 下进包,装机放进 state root,
+首跑免网络。
+
+**设计(只写一个文件,零新代码路径)**:
+
+- 权威仍是 `plugin/serve/runtime.json`。`build.ps1` 新增 4/5 步:读
+  JSON 拼文件名(复刻 server.mjs `runtimeAssetFile` 规则)、
+  `curl.exe -fsSL --ssl-no-revoke --retry 3` 下载(本机 SteamTools 假根
+  证书使 Node fetch 失败,schannel 走系统证书库——与 server.mjs
+  `downloadTo` 同款取舍)、sha256+sizeBytes 双校验、缓存命中跳过、旧 tag
+  与半成品清出 `runtime\`;生成 `runtime-zip.nsh`(`RUNTIME_ZIP` +
+  `RUNTIME_ZIP_SIZE_KB`,与 version.nsh 同理,单一来源)。`.gitignore`
+  补 `installer/nsis/runtime/` 与 `runtime-zip.nsh`(files 白名单不含
+  installer/,zip 进不了 tarball)。
+- `installer.nsi`:新增 `ResolveStateDir`——**始终**问
+  `opencode debug paths config`(与 ResolveInstallDir 独立:后者 /D= 时
+  早退,而测试装机必须同时重定向 runtime 落点),拼 `<config>\mem-plus`。
+  解析失败**跳过不猜**(空 StateRoot → 不写,首跑退回自下载;写到没人
+  读的路径比不写更糟)。SecMain 末尾:`${FileExists}` 已在则跳过,否则
+  `File /oname=` 写这一个 zip;`AddSize ${RUNTIME_ZIP_SIZE_KB}`。
+  卸载器零改动——state root 是用户数据,payload-manifest 只覆盖 $INSTDIR
+  (models\、index.db、记忆文件同此契约)。旧 tag 残留**留**:每 tag 约
+  36 MB 死文件,不值得让安装器伸手进用户数据目录。
+- 首跑零改动:server.mjs `ensureRuntime` 本就是"exe 在位→返回;zip 在位
+  →sha256→tar.exe 本地解压",安装器只是把 zip 放对位置。
+
+**实测**:
+
+- exe **38.19 MB**(40,047,803 B;装机数据 58,272,742 B 压到
+  39,995,575 B——zip 已是压缩物,LZMA solid 压不动)。规划期"6.5 MB"
+  的说法不成立,勿引用。
+- `/S /D=<temp>` + `XDG_CONFIG_HOME=<temp>` 装机 **24/24 PASS**:zip 落
+  `<temp>\xdg\opencode\mem-plus\runtime\` 且 sha256=runtime.json、活区
+  runtime 目录前后逐字节不变、29945 文件、注册表 InstallDir 指 temp、
+  **二次装机跳过**(mtime 不变)、卸载后 INSTDIR+两注册表键全清而
+  **state root zip 保留**、活 service 全程 PID 不变。
+- **同日事故(v1→v2)**:PowerShell 变量大小写不敏感,`$shim`(正文)
+  覆盖 `$SHIM`(路径),Set-Content 写垃圾路径报错被
+  `ErrorActionPreference=Continue` 吞掉,shim 从未存在 → 装机 SecReload
+  的 `service status` 打到真 service → exit 0 → `service restart` 执行,
+  **新 service 继承装机进程 env(XDG=temp)** → 机主 service 配置指错、
+  mem-plus 未装载;20:11 用干净 env 重启恢复,插件重载(capture 正常)。
+  修法:不撞名变量 + 写入守卫 + **装机前预检**(先证明 service 被拦、
+  `debug paths config` 被转发,失败不跑安装)。v2 全绿,教训入 AGENTS。
+
+## 完成页模型指引跟随安装目录(2026-11-04)
+
+**结果**:完成页给出的模型放置路径是 `$INSTDIR\models\`——目录页所选
+路径,任何 env 配置下都正确,且必被 `defaultModelDir()` 识别(第一优先
+分支)。弹窗里不再有写死的 state-root 路径。未设 env 变量的机器最终显示
+与原先一致。exe 重打 38.19 MB。
+
+**设计理念**:
+
+- 指引用 `$INSTDIR` 而非 state root:`defaultModelDir()` 第一优先插件根
+  `models/`(目录存在即用),state root 只是回落;state root 跟 env 变量
+  走,任何写死 `.config\opencode` 的文本在设了 `XDG_CONFIG_HOME`/
+  `OPENCODE_CONFIG_DIR` 的机器上必错——而模型放插件目录升级不丢(不在
+  payload 清单,哈希同步与卸载 manifest 都按清单办事)、卸载不丢(结尾
+  `RMDir` 不带 `/r`,非空即留)。
+- 卸载器 not-found 弹窗只说「另一个目录」不给路径:卸载侧没有
+  ResolveStateDir,为一条边路弹窗引一整套解析不值,措辞与卸载确认页一致。
+- `InstallDir` 编译期默认与 ResolveInstallDir 的 use_default 回退保持
+  写死:opencode 问不到时 env 无从问起,默认值本就该是 profile 下的路径。
+
+**经验**:
+
+- NSIS 页面文本里的 `$` 常量编译期替换、显示时展开(`$$` 转义即为此
+  存在),`$INSTDIR`/`$PROFILE` 可直接用;但常量之外的段落是字面量——
+  动态与写死混在一句里,只有设了 env 变量的机器才看得出错,查这类问题
+  要按机器分支想,不能在默认机器上验过就算。
+- 完成页展示值属 GUI,未非静默实跑核对;依据是编译替换机制 + 欢迎页
+  `$INSTDIR` 既有先例,下次双击装机即目验。
+
+## Runtime 页二打:LM Studio 式引擎下拉 + CUDA 真可选(2026-11-04)
+
+机主指令原话「把 lm 的弄过来」——该指示**未入记忆**(memory 搜"反代/下拉框/
+LM Studio"零命中),靠重述找回;范围拍板「连 CUDA 一起做成真可选」,本机无
+NVIDIA 卡的风险机主自担。
+
+**结果**:
+
+- 页面三段上线:运行时选择(GGUF 行 + 引擎下拉,现成 Picker,不适配项禁用、
+  hint 带版本/体积/安装态)、版本检查(只读按钮)、引擎列表(两行 + 状态药丸 +
+  版本徽章 + 未测徽章);诊断行与三动作保留在下方,新增待重启横幅。
+- E2E 20/20 PASS:manifest cuda 块读出、真 server.mjs 起得来且启动日志带
+  `engine:` 行、`health.variant` 映射、select 400/409/200 与配置落盘、
+  pending 窗口(手写配置模拟已切换未重启)下 embedderId 仍按 active 不误报
+  stale、pending 时 download 409、updates 真打 GitHub 得
+  pinned=b12098 / latest=b12110 / newer=true。
+- CUDA 启动门单测:`--variant cuda` 本机 **exit 1、报 NVIDIA 门、runtime
+  目录零文件**——门确实在下载之前;nvidia-smi 本机确无(页面 409 同源)。
+- 门禁:插件 tsc 4240=基线/自有 0、web tsc+vite 绿、`node --check` 过。
+
+**设计理念**:
+
+- 切换 = 写 `service.runtimeVariant` + **重启 OpenCode 生效**:spawn
+  (`--variant`)与 embedderId 都在装载期定死,同一次重载一起翻——刻意的
+  原子性,杜绝"新后端写旧行身份"的混写窗(两后端向量是否同批,本机无卡
+  测不了)。状态页 variantSelected/variantActive/variantPending 如实报这个
+  窗口,窗口内下载按钮 409。
+- 行身份:vulkan 保持 `@llamacpp-<tag>`(已付出的重嵌不作废),cuda 加
+  `-cuda` 后缀——机主拍板宁全重嵌不可错认;将来实测 cos≈1.0 可去后缀
+  (注释里记了)。
+- NVIDIA 门两道同一证据(nvidia-smi):页面 select 409、server.mjs 下载前
+  拒——592 MB 不为跑不了的引擎白下;页面与服务不各说一套。
+- 安装器仍只预下载 vulkan(cuda 双包进 exe 体积爆炸,机主默认同意);CUDA
+  走首启现下。
+- pending 窗口的 stale/missing 按 **active** 行身份算:行是谁写的按谁算,
+  否则切而未重启时整库被误报 stale。
+- 版本检查只读:版本唯一来源 runtime.json(sha256 防漂移),不自动换版。
+- 砍三件(LM 有我们没有):自动更新开关(安装器预下载 + sha 自愈即真身)、
+  更新通道(钉死即无通道)、搜索与类型过滤(就两行引擎)。
+
+**经验**:
+
+- REA 对 36.9MB **单行** webpack 包 `parse_failures=1`、0 modules、0
+  findings——静态图分析对巨无霸单行文件无效,别再试;有效仪器是字符串定点
+  抽取(needle ±2KB 切片),LM 的组件结构(module 52762 RuntimeSettings、
+  34100 引擎选择、3174 更新行、26270 兼容状态枚举)由此挖出。REA 的
+  inventory/coverage 本身有效。
+- b12098 的 CUDA 是**双包**:官方把 cudart 拆独立 zip(llama 169,174,587 B
+  + cudart 423,535,356 B = 592,709,943 B)。文件名仍套 tag+变体规则,但变体
+  串带 CUDA 版本(`cuda-13.4`),所以 manifest 里键("cuda")与 variant 串分两层。
+- GitHub API asset 的 `digest` 字段就是 sha256——拿钉死值不必先下 592 MB。
+- LM 的 MB 是十进制(截图里 236.17),页面口径与它对齐(/1e6)。
+- 机主的口头指示没被 capture 落下——重要指示当场落 port-plan,不指望事后
+  从记忆里找。
+
+## 端口顺延游标死循环:装机夜暴露的真 bug(2026-11-04)
+
+**结果**:已修,portwalk failing-control 5/5 实测。机主装新版 exe 时
+npm 阶段跑了 50 分钟(21:42 payload 写完 → 22:32 package-lock,当晚网络,
+包没变大),收尾 SecReload 重启是设计内的一步;但随后 22:33-22:34 service
+又被重拉两次,mem-plus.log 被同一句「port 4748 busy, trying 4749」刷了
+**10083 行**、高速写把行撕成半截。根因:`tryListen` 游标写成
+`(listeningPort ?? config.port) + 1`——listeningPort 只在成功时赋值,失败
+路径恒 null → 游标永远 = base+1:4748/4749 双占时(装机窗两实例并存)无限
+空转,11 次封顶条件永不触发。同查同修还有两层:Node 的 listen 回调失败时
+不摘挂,最终成功会把前几次回调全触发——日志谎报「listening on 4748/4749」
+(实际只监听 4750);成功那次挂着的 once("error") 没人触发,后发一次 error
+会把正常服务拖进 failed-to-start 自杀。三处一并修:游标记「尝试过的端口」、
+成功回调加游标守卫并清 error 监听、两个失败出口
+`process.exit` → `shutdown(1)`(先收 llama 子进程,防 4 GB 孤儿)。
+
+**经验**:
+
+- failing-control 两条腿(全占 11 口 / 只占前两口)才把三层全照出来:只测
+  「退出了吗」看不见谎报监听——B 腿的第一版断言恰好被旧日志格式骗过,
+  子进程输出里三条 listening 才暴露第二层。
+- 端口游标类 bug 的指纹:同一句忙讯息重复上千次、数字纹丝不动。看到这个
+  形状先查游标,别先查占用者。
+- 装机窗的 `failed to load plugin ... ENOENT`(22:31:59 ×3)是「服务在跑、
+  树写到一半被热重载」的已知现象,收尾重启后自愈——排装机问题先分清这层
+  与真崩溃,别混为一谈。
+- 「装完等很久才重启」先量 `.mem-plus-payload-files.txt` 与
+  `package-lock.json` 的时间差:那 50 分钟是 npm 阶段,不是插件逻辑。
+
+**理念**:启动失败的出口一律走 `shutdown` 而不是 `process.exit`——起不来
+的时刻恰恰最该收子进程,否则每次失败都可能留一个 4 GB 孤儿。
+
+## Runtime 页三打:LM 布局照搬 + 三件砍件逐件做真功能(2026-11-04)
+
+机主指令「布局格式功能等一致,配色风格按我们的」,红框点名 GGUF 行右上的
+选择框;此前砍过的三件拍板「逐件做真功能」。蓝本仍是本机 LM Studio 的
+字符串定点抽取。
+
+**结果**:
+
+- 页面按 LM 骨架重排:区标题正文行 + 圆角卡 + 细分隔;GGUF 行右上选择框
+  (引擎名 + tag + chevron);开关行;单行更新通道卡(检查更新 + 通道下拉);
+  引擎区三道过滤(搜索/仅兼容/类型,`kind` 字段真过滤)+ LM 式引擎行
+  (图标/名/版本徽章/生效与已选/未测徽章/描述/红字原因/右侧状态药丸 +
+  安装按钮 + ⋮ 菜单:重新下载、删除已下载文件);诊断区与三动作保留在下方。
+- HTTP 层 E2E 25/25:开关与通道写盘回读、写入不碰 model 段(合并保真)、
+  prepare 400/409/200 与 force 透传、release 生效变体 409、
+  kind/preparing/service.channel 字段透传。
+- server.mjs 实测 18/18(单轮):`--ensure` 真下载 38MB→sha→解压→exit 0
+  不监听;正常启动回归 + health.channel;auto-prepare 门秒拒且零下载;
+  channel=latest 解析→写回**拷贝出来的** runtime.json(b12098→b12110)→
+  下载→按写回 digest 校验通过;非法通道告警退回 pinned。
+- 门禁:插件 tsc 4240=基线/自有 0、capture 331/0、audit no drift、
+  web tsc+vite、`node --check`。
+
+**设计理念**:
+
+- 开关与通道 **spawn 时活读** config.jsonc(`readRuntimeSpawnFlags`:装载值
+  打底、文件覆盖):与行身份无耦合,页面改完下次重启服务即生效;变体保持
+  装载期捕获——原子翻转的窗口不能被活读撕开。
+- channel=latest 的信任改变记档于 RuntimeChannel 注释:单源文件
+  runtime.json 不破,只是值的出处从"打包钉死"换成 GitHub API digest+TLS;
+  写回走 tmp+rename;行身份随 tag 翻转触发全重嵌 = 步骤3 同一条语义。
+- CUDA 两道门(页面 409 + 服务端 nvidia-smi 检查在**下载前**)——592 MB 不
+  为跑不了的引擎白下;行内按钮对不适配项禁用并红字给因。
+- release 只许未生效变体,API 层 409 + 闭包兜底:生效文件被子进程占着,
+  删了也是错。
+- prepare 火速返回 + preparing 集合 + 页面 4 秒轮询:592 MB 远超页面超时,
+  超时 ≠ 任务失败。
+
+**经验**:
+
+- `downloadTo` 的 fetch 原本**无超时**:卡住的连接哑等 300 秒(undici 默认
+  头超时)才落 catch——"准备卡住"的真身。修:fetch `AbortSignal.timeout(180s)`
+  + curl 加 `--connect-timeout 20` 与失速地板 `--speed-time 30
+  --speed-limit 1024`(慢但在动的下载不受影响)。实测同一天:一轮 A 段
+  24s、另一轮 197s、卡死轮被地板 30s 内掐掉且错误立刻可见。
+- github 间歇的实测形态:同一轮里 b12098 24s 下成、b12110 三连超时,十五
+  分钟后重跑又全成——**失败按"轮"记录**,单轮红不等于逻辑错,跨轮覆盖
+  才是判据(两轮互补后又跑出单轮 18/18 收口)。
+- **通道标签的含义不许自己编**(机主当场抓错):反代 LM 实抽——
+  `backendDownloadChannel` 枚举 `["stable","beta","latest"]`,`latest` 是
+  内部构建专用(`isBionicInternalBuild()`),hint 原文是「选择从哪个频道下载
+  扩展包,stable 是大多数用户的推荐频道」,消费点是
+  `searchModelExtensionPacks({channel})`——**频道 = 上游索引 feed 的选择**,
+  不是「发版时测没测过」。我先写的「发版时验证过的版本」是编的解读,已改。
+  配套上游实查:ggml-org/llama.cpp 近 30 个 release **只有 b-tag nightly 带
+  Windows 二进制**(全 prerelease),唯一正式版 v0.9.0 win 资产=0——上游没有
+  "带 Windows 二进制的稳定版"可指,所以我们的稳定版只能诚实表述为「本版本
+  钉死的构建、不自己变动」,测试版=追最新 nightly。
+  （该语义随后被机主下一版指令整体推翻,见下节——频道选择整个删除。）
+
+## Runtime 页四打:删通道选择、五行全列、全自动保持最新(2026-11-05)
+
+机主三连指令定形:①「布局格式功能等一致,配色我们的」;②「稳定版/测试版
+这个删了,其他都完全一致」;③「去掉(手动更新那个)按钮,只留更新,一直
+保持最新」——通道下拉与"检查→点更新"的手动流程废除,上一节的
+pinned/latest 双语义就此收档。
+
+**结果**:
+
+- 载荷五行,LM 顺序 `cpu,vulkan,harmony,office,cuda`;harmony/office 的
+  `kind=framework`——三道过滤里的类型过滤因此真有东西可滤;
+  `selectable` 仅 vulkan/cuda,其余只列不卖(行内无按钮无菜单)。
+- HTTP E2E 16/16:五行/顺序/kind/selectable、tagPending(假 activeTag 翻出
+  横幅信号)、开关写盘不碰 model 段、prepare 非法变体 400、release 生效
+  变体 409、**channel 路由 404(已删)**、updates 按钮端点保留 200。
+- 保持最新核心 server.mjs 实测 10/10(拷贝 serve 跑,真件不碰):
+  `--ensure` 不带任何通道参数即对齐——b12098→b12110 写回+新 tag exe 落地;
+  正常启动**零网络**(离线快路径,日志无对齐行),health.channel 字段已废;
+  auto-prepare 门在对齐之后、下载之前——runtime 目录零文件。
+- 拆干净:稳定/测试下拉、channel 端点、`service.runtimeChannel`、
+  `--channel`、`health.channel`、RuntimeChannel 类型全部移除;检查更新
+  按钮与端点保留(只读对比,写路由 12 条)。
+- 开关改用 LM 原话语义「自动更新选中的运行时」:开 = 插件启动后台
+  `--ensure` 对齐最新(模块级 flag 每进程一次,防三工作区三开)+缺损自动
+  补下;关 = 只手动。**重启 OpenCode 后生效**;tag 被对齐写新 →
+  tagPending 横幅(装载期 tag ≠ 盘上现值),与变体 pending 同款
+  「重启生效、换 spawn 用的运行时」。
+- 页面行式:图标/描述/原因红灰分级(cpu·cuda 硬拒绝=红字,harmony·office
+  无关=灰字),药丸 不支持/不适配/不适用,安装与 ⋮ 菜单只在 selectable 行出现。
+
+**设计理念**:
+
+- 对齐写回仍走 tmp+rename 的单源文件;解析失败**降级继续**(告警+用当前
+  tag)——离线时本地 zip 校验解压自愈照常,真要下载由下载/门如实报网络错,
+  一次探测失败永不堵死准备。
+- 对齐只挂准备动作与插件启动;服务正常启动零网络(离线可用性不变)。
+- 选全自动的底气是上游事实:Windows 二进制只有 b-tag nightly,没有第二条
+  "保守流"可指——钉死 vs 追新的争论就此了结。
+- 判据是最后一条指令里的动词(删哪个、留哪个),不是上一轮方案的延长线。
+
+**经验**:
+
+- 装机冒烟 18/18(新脚本 `installer/nsis/smoke.ps1`,shim+预检+/D=+temp XDG,
+  装→验→静默卸→清两键一条龙)。垫 PATH 拦 `opencode service` 时,`Get-Command
+  opencode` 会先抓到 npm 的 `opencode.ps1`——cmd 的 `nsExec` 执行不了 .ps1,
+  转发变成空输出、`debug paths config` 预检必假失败。真身取
+  `Get-Command opencode.cmd`。预检失败即拒跑安装,这条控制第二次就拦住了一次
+  坏安装。
+- 单源文件的代价在 dev 树可见:从仓库加载插件时,自动对齐写回的是
+  **仓库的** runtime.json,git 会脏——那是 pin 在动的真实反映,不是 bug;
+  装机用户写自己 zone 的那份。发版打包前若脏,是上游出了新版,提交与否
+  当时决定。
+- 装载路径的对齐 spawn 只有 tsc 兜底(setup 起火无法在驱动里跑)——真机
+  确认看装机后 mem-plus.log 的 `[align] runtime.json now pins ...` 行,
+  列入装机验证清单。
+
+## 行身份摘掉 nightly tag 与后端后缀:实测驱动(2026-11-05)
+
+**结果**:
+
+- `embedderIdFor(path)` = `<模型路径>@llamacpp`,tag 与 vulkan/cuda/cpu
+  后缀全部不进行身份。判据是实测:同后端跨 nightly(b12098 vs b12119,均
+  vulkan)5/5 条 cos **= 1.000000**;cpu vs vulkan 30 条真实 index chunk
+  (活区快照 VACUUM INTO 取样)min **0.999528** / mean 0.999784 / max
+  0.999909——换 tag、换后端算出的就是同一批向量。
+- `rewriteLegacyEmbedderModels`(memory-index.ts):index 打开后、buildMemoryTools
+  与 repair 扫描之前,把 `<新id>-` 前缀旧行一次 UPDATE 改写。活区快照实测
+  2161 行(2158 条 b12098 + 3 条已翻 b12119)全部改写、stale 清零、FTS
+  由触发器同步、二次跑 0 行;裸路径与 `fts-only` 行不动。
+- 效果:自动对齐翻 tag、Runtime 页切后端都不再触发全量重嵌。活区今晨
+  00:15 对齐翻 tag 造成的 2160 stale 由迁移一次消化,那次白烧的重嵌不再发生。
+
+**经验**:
+
+- LIKE 前缀匹配在这些路径上是坑:`_`(`bge-m3-Q8_0`)是 LIKE 通配符,会误配
+  别的模型名。按 `DISTINCT model` 取回 JS 做字符串前缀判断,再
+  `UPDATE ... WHERE model = ?` 才准。
+- 「宁可全重嵌不可错认」是无数据时的保守(11-04 拍板 `-cuda` 后缀的依据);
+  有 cos 数据后反转——**判据从"没卡测不了"变成"实测过"**,记档于
+  `embedderIdFor`。cuda vs vulkan 本机无 NVIDIA 卡仍未实测,按同家族假设
+  接受,有反例再加后缀。
+- 行身份的牵连面比预想大:摘身份时逐处搜到五组注释(config/client/api/
+  server.mjs)都写着「spawn 与 embedderId 同一次重载原子翻转」,漏改一处,
+  下一个人就会照旧注释推出错误行为。身份类改动的搜索词是**注释里的
+  「行身份/embedderId」**,不只代码。
+
+**设计理念**:
+
+- 家族标记 `@llamacpp` 必须留:2026-11-04 spike 实测新旧引擎家族(旧
+  node-llama-cpp vs 新 llama.cpp)cos 0.93–0.98,那才是真差异。上游
+  openclaw 行身份就是模型名本身(`memory-index-write.ts:51`),引擎版本从不
+  进行身份——摘 tag 是**向上游对齐**;家族标记是本仓与上游的分歧且有实测
+  背书(引擎确实换过一次),记档保留。
+- 迁移只改写「同模型同家族、只差 tag/后缀」的行;裸路径(旧引擎家族)与
+  `"unknown"` 行故意留给真实重嵌——改写它们才是错认。
+- 三处写入与 stale 判定仍只经 `embedderIdFor` 一个函数;迁移也只认它拼出
+  的前缀,没有第二套身份拼法。
+
+## 允许 CPU 推理:硬规则改正门(2026-11-05)
+
+**结果**:
+
+- `RuntimeVariant` 全链路收 `"cpu"`:runtime.json 钉 b12098 CPU 资产
+  (sha `8d142d40…`,24708083 B,GitHub API digest),server.mjs(manifest 校验、
+  `releaseVariantString`、`--variant` 收 cpu、cpu 包清单、`applyLatestNightly`
+  带 cpu digest、`validateGpuDevice` cpu 跳过、`-ngl`/`--fit-target` 不传、
+  backend/threads 日志)、config.ts(manifest.cpu 解析、variantFileSuffix、
+  readServiceConfig)、api.ts(三守卫收 cpu、cpu 行放开 selectable/tested/
+  compatible、device 不跑)、RuntimeView(pill 分支)全通。
+- 旧「无 GPU 即拒绝启动」改为:GPU 变体(vulkan/cuda)无设备仍拒启
+  (**不变**),cpu 是正门不是回落——拒启文案改为指路 Runtime 页换引擎。
+- 验证:**CPU 真链路 E2E 5/5**(拷 serve 到 temp:`--ensure` 对齐 b12119 并
+  自动带上 cpu digest→下载 25 MB sha 相符→起服务 GPU 门跳过→`POST /embed`
+  出 1024 维→日志 5 断言含 `cpu (device check skipped)`/`threads = auto`);
+  **API 层 27/27**(cpu 行字段、select/prepare/release 守卫与转发、pending
+  语义、device=null、无 runtime 503);plugin tsc 4240/自有 0、capture 331/0、
+  web tsc+vite 过、`node --check` 过。
+- 页面五行中 cpu 从「不支持」变真变体:可选、可下载、可切换、可删除,
+  harmony/office 仍是只列不卖的 framework 行。
+
+**经验**:
+
+- 对齐(`applyLatestNightly`)的 cpu digest 是**尽力而为**:官方哪天不发,
+  vulkan 通道照走,cpu 行如实报「runtime.json 未钉 CPU 资产」——与 cuda 块
+  同规矩,一个可选块写坏不许拖死默认变体。
+- CPU 包文件名段恰好就是键名(`llama-<tag>-bin-win-cpu-x64.zip`),但不能
+  因此省掉 `releaseVariantString` 的 cpu 分支——那个函数是下载与落盘的
+  唯一拼名点,漏了它 cuda 的版本串逻辑会顺手把 cpu 吞成 cuda。
+- 服务端 E2E 的 `Start-Process -ArgumentList` 必须传数组:单字符串逗号
+  拼接会被 node 当成脚本名(`MODULE_NOT_FOUND` 形如"找不到
+  server.mjs,--variant,cpu")。
+
+**设计理念**:
+
+- 「CPU 是正门不是回落」的分界在**用户意图**:GPU 变体配无卡机器 = 选错
+  了引擎,拒启并指路换引擎(错误要响);cpu 变体 = 用户明说就要 CPU,直接
+  跑。回落(fallback)会把配置错误藏起来,正门不会。
+- cpu 行 `tested: true`:与 cuda 的 `tested:false`(本机无卡)相对,cpu 在
+  本机真跑通过 30 条真实 chunk 对比,如实标。
+- `-ngl` 与 `--fit-target` 对 cpu 不传而非传 no-op:语义上它们属于 GPU
+  变体,传了要么被拒要么误导日志读者以为有层可卸。
+
+
+## Runtime 页三处收尾:删「未测」徽章、列表式删除、选中即生效(2026-11-05)
+
+**结果**:
+
+- 「未测」badge 删净:页面三徽章(未测/生效中/已选择)全去,api.ts 载荷
+  `tested` 字段删(注释留),`rt-engine-untested/active/selected` 键删。行内
+  只剩名称+版本徽章(LM 同款);CUDA 无卡的拒绝路径照旧由 `compatible`/`reason`
+  如实报,信息不丢。
+- release 改列表式(机主拍板:点开列表选具体文件删,不一键清空):config.ts
+  新增 `runtimeFilesDir/listRuntimeFiles/resolveRuntimeFile`(按家族模式枚举
+  runtime 目录,新 tag 在前、同 tag 目录在 zip 前);api.ts 新增
+  GET `/api/runtime/files?variant=`(带 `inUse`)、release 收 `{variant, name}`
+  (形状/模式 400、生效占用 409);index.ts release 单文件删(preparing/模式/
+  生效三守卫);RuntimeView ⋮ 菜单点开弹层逐条列+逐条删,inUse 行禁用。活区
+  三套 vulkan 孤儿目录(b12098/b12119/b12121)正是这功能的目标。
+- 切换即生效(机主拍板,对齐 LM「选中即生效」):select 写完配置服务端立即
+  `restart()`;spawn 时活读变体(`readRuntimeSpawnFlags` 收
+  `runtimeVariant`);client 记 spawn 真身 `spawnedVariant`(仅子进程活着时
+  报出),index `runningVariant()` = 真身 ?? 活读配置,download/prepare/
+  release 守卫全按它算;variantPending 横幅与双徽章删(tagPending 横幅保留,
+  tag 语义未变);select 响应带 `restartOk/detail`,页面 60s 超时,
+  `restartOk===false` 用 toast.warning 原样显示重启的真话。
+- 验证:api-e2e 44/44(含 select 即时生效链:触发重启、active 拉齐、失败
+  不重启、生效占用随 active 走、files 空/400/503、无 runtime 全 503);
+  files-e2e 真目录夹具 21/21(vulkan 家族过滤与排序、cuda 旧版本孤儿可见、
+  cudart 归属、resolveRuntimeFile 路径拒绝、空目录不抛);门禁全绿(plugin
+  tsc 4240/自有 0、capture 331/0、audit no drift、web tsc+vite 0、
+  `node --check` 0)。
+
+**经验**:
+
+- cuda 文件名模式必须按**家族**(`cuda(?:-[\d.]+)?`)不按 manifest 当前后缀:
+  换版本后旧后缀孤儿恰是最该删的东西,按当前后缀过滤会看不见。cudart 包不带
+  tag,排序垫底(tag 解析为 null)。
+- 夹具自己拼错文件名(`cudart-...-13.4.zip` 少写 `-x64`)曾让 files-e2e 报
+  2 FAIL——先怀疑代码,后 diff 出是测试数据。模式类测试的失败先核夹具字面量。
+- `spawnedVariant` 只在 child 活着时报值:死 spawn 不算「生效中」,调用方
+  回落活读配置(= 下次 spawn 会用的值)。若报死 spawn,删除守卫会拦住一堆
+  实际没人在用的文件。
+- PowerShell 变量大小写不敏感的坑在测试脚本里同样成立(见装机 shim 一节);
+  本轮无涉但每次写脚本都要过一遍。
+
+**设计理念**:
+
+- 三处都是「界面不得露开发者痕迹、状态按 LM 语义」的机主三点指令落地:
+  徽章只保留 LM 会有的(名称+版本),删除走列表(用户看得见删的是什么),
+  生效态由下拉选中值表达(选中即生效,行内不再标)。
+- 生效占用守卫刻意只拦「当前 tag 目录」:旧 tag 孤儿与 zip 永远可删——那正是
+  列表式删除要清理的东西;拦全变体会让这功能对默认安装(vulkan 一直生效)
+  毫无用处。
+- `variantPending` 字段保留在载荷里(镜像 `active!==selected`),只删 JSX:
+  重启没完成的窗口(服务被别的实例持有)里它仍是真值,页面不显示但 API
+  调用方看得到,留着不花钱。
+
+## TLS 对齐失败的修复（2026-11-05）
+
+**结果**:
+
+- 根因：node 自带的根证书库与这台机器的系统库不同——api.github.com 的
+  TLS 链只有 Windows 证书库能验（2026-11-05 实测：裸 `node fetch` 报
+  "unable to verify the first certificate"，加 `--use-system-ca` 后 200；
+  PowerShell/curl 走 Windows 库所以都通）。插件的「保持最新」对齐与运行时
+  下载都由 node 进程(server.mjs)执行，fetch 全部失败，runtime.json 一直
+  停在 b12098 而 GitHub 已到 b12125。Runtime 页显示「已钉死 b12098」
+  也是这个死循环的表象。
+- 修法：spawn server.mjs 时（service 路径与启动对齐路径）向 node 传
+  `--use-system-ca`，但先 probe 一次——老 node（<22.8）不认识该 flag，传了
+  就启动失败，probe 不过就退回到原来行为（不回归）。
+- 验证：temp 目录里用 `--use-system-ca` 跑 `server.mjs --ensure`，runtime.json
+  从 b12098 对齐到 b12125，zip sha256 与 manifest 一致，llama-server 解压落位；
+  plugin tsc 4240/自有 0；exe 重打 smoke 18/18；api-e2e ALL PASS。
+- 文案：`rt-updates-pinned` 从「已钉死 {pinned}」改为「当前 {pinned}」——
+  机制是自动对齐，不是禁止更新。
+
+**经验**:
+
+- node fetch 与 PowerShell/curl 走不同的证书库，排查 TLS 问题时不能用
+  PowerShell 代证——这次误判过一次。
+- GitHub API 的 `digest` 字段就是 sha256，对齐时的完整性只靠 TLS+API，
+  不需要先下 592 MB。`--use-system-ca` 是让这个链路在 Windows 上成立的
+  最小改动。
+- 保持最新是「自动对齐」而非「钉死」——UI 用词要反映真实机制，机主
+  会把「已钉死」读成「不让更新」。
+
+**设计理念**:
+
+- `--use-system-ca` 是 Windows-only 分发下的合理默认：证书库来自 OS，不
+  依赖我们 shipped 的根 store；探针保证老 node 不 regression。
+- probe 一次并缓存，不每次 spawn 重测（spawnSync ~50ms，但 10 次也白费）。
+- 对齐写回的是 *已装* 目录的 runtime.json，repo 里的只是种子值——
+  这让"保持最新"在用户侧真正自动，而 repo manifest 不需要每次发版手改。
+
+## 双栈与向量慢的修复（2026-11-05，机主指令「先把模型运行的修一下」）
+
+**结果**:
+
+- 根因两条,都实测。①开两个:插件按 workspace 装载,一次 opencode 启动
+  装载 N 次、两个 opencode 进程就是 2N 个 client;每个 client spawn 前的
+  扫描只有 250ms,服务还没监听时全都看不到,各自 spawn 一个 server.mjs,
+  端口顺延让它们各占一个(4748/4749),llama-server 各起一个(4848/4849),
+  bge-m3 载两份。当日 18 次 `starting service`、15 次 `llama-server ready`,
+  03:13/04:17/05:17 三轮全是双栈。②向量久:快照整文件重写,内容一变
+  chunk id 全换(身份 = text+span+model 的 hash),旧向量行被删、新行零长度;
+  快照路径不带 autoEmbed,零向量就一直堆着,直到下次启动 repair。05:17 三个
+  装载各数出 641 个零向量,又各跑 repair、双栈抢 GPU,05:17→05:28 共 11 分钟
+  才 `repair done`。
+- 修法两条。①server.mjs 加 join 守卫两层:listen 前扫端口区间(4748-4758),
+  发现 mem-plus 就退 0,不下载运行时不起 llama;listen 成功后复检,发现
+  **更低**端口有 mem-plus 才退——两实例同时起时各查一次,低的留下,保证恰
+  剩一个。`--ensure` 与 `--force-prepare` 跳过守卫(显式动作不能被「已有
+  服务」吞掉)。②快照路径改传 `{ autoEmbed: true }`:embedMissing 对不缺的
+  文件只花一次索引查询、不发嵌入请求,零向量当场补上,不再堆到下次启动。
+- 验证:`node --check` 0;plugin tsc 4240/自有 0、capture 331/自有 0、
+  audit no drift;api-e2e 44/44;join 守卫两层各有独立冒烟——layer-1 用假
+  /health 占首端口,真进程退 0 且没进启动流程;layer-2 用计数 stub(第 1 个
+  /health 答 500 骗过 layer-1,第 2 个起答 mem-plus),真进程顺延到 4771 后
+  发现 4770<4771 自己退 0,并把自己的 llama-server 收干净(测后无孤儿)。
+
+**经验**:
+
+- 「auto-embed 会每次 settle 重嵌同一 transcript」这个旧注释前提是错的:
+  embedMissing 只补零长度向量(auto-embed.ts:13 自己写明),不缺的文件
+  一次索引查询完事。**注释里的成本论证也要当假设验,不能当事实抄。**
+- 双层守卫的时序要用**请求计数**做成确定性的:layer-1 与 layer-2 之间隔
+  着运行时校验+GPU 检查,靠 sleep 卡时序会被本机快慢翻转;stub 数第几个
+  /health 请求来切换应答,两层各自必中。
+- 测试里数进程用 PowerShell `Get-CimInstance`,不要 `wmic`——本机已无 wmic。
+- `req.destroy()` 不带 error 未必触发 'error' 事件,accept 后不答的监听者
+  会把裸 httpGet 挂死;区间探测外面套了 700ms 硬超时兜底。
+
+**设计理念**:
+
+- layer-2 只认「更低端口才退」:两个实例各绑一个端口时都活着,必须有确定
+  的胜负规则;比端口号,低者胜,恰好剩一个,谁都不用等超时。
+- 守卫只认 `/health` 里的 `service === "mem-plus"` 字段:4748 被别的程序
+  占着时那是「该顺延」不是「已有服务」,误退会让服务永远起不来。
+- 快照开 autoEmbed 不改上游语义:上游(`manager-index-preparation.ts:79`)
+  索引完成即嵌,embedMissing 本来就是 mem-plus 因预算而加的节流层;快照
+  当场补零向量只是把「可搜索」的时间点拉回上游的水位,不是新增行为。

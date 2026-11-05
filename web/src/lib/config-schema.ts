@@ -125,7 +125,10 @@ export const CONFIG_SECTIONS: readonly ConfigSection[] = [
         // is no way to guess it. OpenCode can list what it has, so the page asks.
         kind: "modelRef",
         defaultValue: "",
-        help: "留空 = 用 OpenCode 当前的默认模型。",
+        // One picker, two consumers: extraction and the pre-compaction flush both
+        // run through `captureDeps`, which is built from this key. The flush used
+        // to have its own `flush.model`; see plugin/src/flush-config.ts.
+        help: "留空 = 用 OpenCode 当前的默认模型。条目抽取与压缩前落盘共用。",
       },
       { heading: "文件" },
       {
@@ -208,8 +211,9 @@ export const CONFIG_SECTIONS: readonly ConfigSection[] = [
         label: "显存预留",
         // `null` is the first defaultValue of its kind: the default here is not a
         // value the file can hold, it is "the key is absent and the engine does
-        // what it always does" (8% of total VRAM, capped at 1.6GB, in
-        // node-llama-cpp 3.22.1). The number box renders that as an empty box and
+        // what it always does" (llama-server's own --fit target, a 1024 MiB margin;
+        // before the 2026-11-04 engine switch it was node-llama-cpp 3.22.1's 8% of
+        // total VRAM capped at 1.6GB). The number box renders that as an empty box and
         // an 恢复默认 press deletes the key rather than writing `null` into it.
         // 0 remains its own value -- "reserve nothing" is a real setting, and the
         // cheapest way to reintroduce the crash this knob exists to prevent.
@@ -293,7 +297,7 @@ export const CONFIG_SECTIONS: readonly ConfigSection[] = [
         key: "service.idleMinutes",
         label: "空闲退出",
         kind: "number",
-        defaultValue: 10,
+        defaultValue: 5,
         min: 0,
         max: 1440,
         help: "空闲多少分钟后推理进程退出，0 = 不退出。",
@@ -367,29 +371,13 @@ export const CONFIG_SECTIONS: readonly ConfigSection[] = [
         defaultValue: "",
         help: "留空 = ~/.config/opencode/mem-plus/wiki。",
       },
-      { heading: "压缩前落盘" },
-      {
-        key: "flush.enabled",
-        label: "启用",
-        kind: "boolean",
-        defaultValue: true,
-        help: "长对话被 OpenCode 压缩前，把上下文抽取后写进当日记忆文件，防止压缩把没记住的内容抹掉。",
-      },
-      {
-        key: "flush.model",
-        label: "抽取模型",
-        kind: "modelRef",
-        defaultValue: "",
-        help: "留空 = 用 OpenCode 当前的默认模型。",
-      },
-      // `flush.contextRatio` is deliberately absent, and that is upstream's shape
-      // rather than an omission. Upstream's knobs are `softThresholdTokens` (an
-      // absolute count, default 4000) and `forceFlushTranscriptBytes`; neither has a
-      // value mem-plus can feed -- see the header of plugin/src/flush-config.ts, which
-      // argues why the ratio replaces the first and why the second cannot be ported
-      // at all. A fraction field here would need a `decimal` kind this form does not
-      // have, because every number it edits is truncated to an integer. Leaving the
-      // ratio out of the UI is closer to upstream than approximating it.
+      // No `flush.*` fields. Pre-compaction flush is always on -- it is the memory
+      // organ's own function, not a feature to toggle (owner's decision, 2026-11-04;
+      // upstream's `agents.defaults.compaction.memoryFlush.enabled` is not exposed).
+      // `flush.model` is likewise gone: the flush turn runs on `model.hostedModel`
+      // like every other hosted turn. `flush.contextRatio` stays out of the UI for
+      // the reason the form's number kind cannot express a fraction. See the header
+      // of plugin/src/flush-config.ts.
       { heading: "深度召回" },
       {
         key: "recall.enabled",

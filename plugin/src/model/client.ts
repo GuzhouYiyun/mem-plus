@@ -1,10 +1,11 @@
 // Plugin half of the local inference path.
 //
-// The GGUF runtime lives in a separate Node process (`serve/server.mjs`) because
-// node-llama-cpp self-tests its native binding by forking `process.execPath`, and
-// inside OpenCode that path is the bun binary rather than node -- the fork always
-// fails, the binding never loads, and there is no compiler to fall back to. See
-// the header of server.mjs for the full reasoning.
+// The GGUF runtime lives outside the plugin process (`serve/server.mjs`), because
+// it *is* the official llama.cpp `llama-server` — a native binary spawned as a
+// child, not something that can run in-process at all. (The earlier reason, before
+// the 2026-11-04 switch, was node-llama-cpp's fork-based binding self-test failing
+// under bun; that dependency is gone. Full history in server.mjs's header and
+// docs/port-plan.md.)
 //
 // This file only speaks HTTP. That boundary is what makes the arrangement
 // pleasant rather than merely possible:
@@ -14,23 +15,27 @@
 //   - the service can outlive a single `opencode run` if you want it warm, or be
 //     started on demand and reaped on idle if you do not;
 //   - when something goes wrong you can curl it instead of reading plugin internals.
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
 import { existsSync } from "node:fs";
 import { request as httpRequest } from "node:http";
-import type { ModelConfig, ServiceConfig } from "./config.js";
-import { serverEntryPath } from "./config.js";
+import type { ModelConfig, RuntimeVariant, ServiceConfig } from "./config.js";
+import { readRuntimeSpawnFlags, serverEntryPath } from "./config.js";
 
 export type ClientLog = (message: string, detail?: unknown) => void;
 
 export type ServiceHealth = {
   ok: boolean;
   service?: string;
+  /** Which llama.cpp backend the service is running（vulkan|cuda），server.mjs 上报。 */
+  variant?: string;
   port?: number | null;
   backend?: string;
   /** Embedding only: the content model left with local generation. */
   loaded?: { embed?: boolean };
   present?: { embed?: boolean };
+  /** Seconds the service has been up; sent by server.mjs, shown on the Runtime page. */
+  uptimeSeconds?: number;
 };
 
 export type MemPlusService = {
@@ -38,6 +43,13 @@ export type MemPlusService = {
   readonly url: string | null;
   /** What `/health` said the last time we asked; `null` if never reachable. */
   readonly health: ServiceHealth | null;
+  /**
+   * 本客户端最近一次 spawn 请求的变体（`readRuntimeSpawnFlags` 活读配置后的
+   * 真身），仅在我们拉起的子进程还活着时有值。Runtime 页的「生效引擎」与
+   * 文件占用守卫按它算——select 即时生效（2026-11-05）后，装载期捕获值
+   * 不再是真身；子进程没在跑时回落到活读配置（下次 spawn 会用的值）。
+   */
+  readonly spawnedVariant: RuntimeVariant | undefined;
   /**
    * Whether the embedding service is reachable right now, starting it if needed.
    *
@@ -47,7 +59,7 @@ export type MemPlusService = {
    * a ten-second outage would cost a memory permanently. Gating here means an
    * outage leaves every prompt untouched and pending instead.
    */
-  ready(): Promise<boolean>;
+  ready(opts?: { forcePrepare?: boolean }): Promise<boolean>;
   /**
    * The service is embedding-only, since the local content model was removed: extraction,
    * promotion consolidation and dreaming all run on the user's OpenCode model
@@ -191,6 +203,27 @@ async function findRunningService(
 }
 
 /**
+ * Ask whether a mem-plus service is already running, **without starting one**.
+ *
+ * Exported for the Runtime page's status probe: a GET must never autostart the
+ * service (spawning a 4 GB load because someone opened a tab), and `ready()`
+ * would. A `service.url` the user configured is probed directly, mirroring the
+ * configured-URL branch of `connect()`; otherwise the port range is scanned
+ * like discovery does. 400 ms: refused connections answer in ~1 ms, so the
+ * budget only matters when something *is* listening on a port.
+ */
+export function probeService(
+  config: ServiceConfig,
+): Promise<{ url: string; health: ServiceHealth } | null> {
+  if (config.url) {
+    return getJson(`${config.url}/health`, 1_500).then((health) =>
+      health?.ok && health.service === "mem-plus" ? { url: config.url as string, health } : null,
+    );
+  }
+  return findRunningService(config, PORT_SCAN_RANGE, 400);
+}
+
+/**
  * llama.cpp warns about `blk.32.*` on this checkpoint: block 32 is the
  * multi-token-prediction head, which single-token decoding never touches.
  * Harmless, but it arrives one line at a time and buries the lines that
@@ -208,6 +241,34 @@ function relayServiceLine(log: ClientLog, line: string): void {
 /** Ports the server may occupy: the base plus its forward-walk allowance. */
 const PORT_SCAN_RANGE = 11;
 
+/** node 二进制：opencode 下 process.execPath 是本体，不是 node。 */
+function nodeBin(): string {
+  return process.execPath.startsWith("node") ? process.execPath : "node";
+}
+
+let systemCaSupported: boolean | undefined;
+/**
+ * `--use-system-ca` 让 node 的 fetch 用系统证书库而非自带根：这台机器上
+ * api.github.com 的 TLS 链只有系统库能验（2026-11-05 实测：node fetch 报
+ * "unable to verify the first certificate"，`--use-system-ca` 后 200）。老 node
+ * （<22.8）不认这个 flag，传了就启动失败，所以先 probe 一次并缓存。
+ * 证据：node --use-system-ca -e "fetch(...)" => 200，裸 node => FAIL。
+ */
+export function nodeSystemCaArgs(): string[] {
+  if (systemCaSupported === undefined) {
+    try {
+      const probe = spawnSync(nodeBin(), ["--use-system-ca", "-e", ""], {
+        windowsHide: true,
+        stdio: "ignore",
+      });
+      systemCaSupported = probe.status === 0;
+    } catch {
+      systemCaSupported = false;
+    }
+  }
+  return systemCaSupported ? ["--use-system-ca"] : [];
+}
+
 export function createServiceClient(
   service: ServiceConfig,
   models: ModelConfig,
@@ -216,10 +277,12 @@ export function createServiceClient(
   let resolvedUrl: string | null = service.url ?? null;
   let lastHealth: ServiceHealth | null = null;
   let child: ChildProcess | null = null;
+  /** 最近一次 spawn 请求的变体；只在 child 还活着时由 `spawnedVariant` 报出。 */
+  let spawned: RuntimeVariant | undefined;
   /** Serialises discovery so concurrent sweeps don't both spawn a server. */
   let connecting: Promise<{ url: string; health: ServiceHealth }> | null = null;
 
-  async function connect(): Promise<{ url: string; health: ServiceHealth }> {
+  async function connect(opts?: { forcePrepare?: boolean }): Promise<{ url: string; health: ServiceHealth }> {
     if (resolvedUrl) {
       const health = await getJson(`${resolvedUrl}/health`, 2_000);
       if (health?.ok) {
@@ -261,14 +324,31 @@ export function createServiceClient(
       throw new Error(`service entry missing: ${entry}`);
     }
 
-    log(`starting service: node ${entry} --port ${service.port}`);
+    // auto-prepare 开关与引擎变体都在 spawn 时活读 config.jsonc（Runtime 页
+    // 改完，下次 spawn 即生效，不必等插件重载）。变体活读是 select 即时生效
+    // 的地基（机主 2026-11-05 拍板，对齐 LM「选中即生效」）：select 写完配置
+    // 立即重启服务，重启拉起的这次 spawn 读到的就是新变体。
+    const spawnFlags = readRuntimeSpawnFlags(service);
+    const extraArgs = [
+      ...(spawnFlags.autoPrepareRuntime ? [] : ["--no-auto-prepare"]),
+      ...(opts?.forcePrepare ? ["--force-prepare"] : []),
+    ];
+    log(
+      `starting service: node ${entry} --port ${service.port} --variant ${spawnFlags.runtimeVariant}` +
+        (extraArgs.length > 0 ? ` ${extraArgs.join(" ")}` : ""),
+    );
     child = spawn(
-      process.execPath.startsWith("node") ? process.execPath : "node",
+      nodeBin(),
       [
+        ...nodeSystemCaArgs(),
         entry,
         "--port", String(service.port),
         "--idle-minutes", String(service.idleMinutes),
         "--gpu", models.gpu,
+        // 引擎变体随 spawn 传（活读值，见上；真身记进 spawnedVariant，
+        // Runtime 页的生效判定按它）。
+        "--variant", spawnFlags.runtimeVariant,
+        ...extraArgs,
         // Embedding only: the content model was removed with local generation, so the
         // service is started for the vector slot and nothing else.
         "--embed", models.embedModelPath,
@@ -285,6 +365,9 @@ export function createServiceClient(
         windowsHide: true,
       },
     );
+    // spawn 返回后才记真身：同步抛错时 child 与 spawned 都不会换人，
+    // 「生效引擎」不会指向一次没起来的 spawn。
+    spawned = spawnFlags.runtimeVariant;
 
     child.stdout?.on("data", (chunk: Buffer) => {
       for (const line of chunk.toString("utf8").split(/\r?\n/)) {
@@ -314,8 +397,8 @@ export function createServiceClient(
     return started;
   }
 
-  function ensureConnected(): Promise<{ url: string; health: ServiceHealth }> {
-    connecting ??= connect();
+  function ensureConnected(opts?: { forcePrepare?: boolean }): Promise<{ url: string; health: ServiceHealth }> {
+    connecting ??= connect(opts);
     // Cleared on settle rather than in a finally, so a rejected attempt does not
     // leave an unhandled rejection behind and the next sweep may retry.
     const current = connecting;
@@ -355,10 +438,15 @@ export function createServiceClient(
     get health(): ServiceHealth | null {
       return lastHealth;
     },
+    // 子进程不在了（退出/从未起）→ undefined：调用方回落到活读配置，
+    // 不把一次死 spawn 报成「生效中」。
+    get spawnedVariant(): RuntimeVariant | undefined {
+      return child ? spawned : undefined;
+    },
 
-    ready: async () => {
+    ready: async (opts) => {
       try {
-        await ensureConnected();
+        await ensureConnected(opts);
         return true;
       } catch (error) {
         log(`service not ready: ${describeError(error)}`);

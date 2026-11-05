@@ -1,0 +1,20 @@
+{
+  "tag": "b12098",
+  "assets": {
+    "vulkan": {
+      "sha256": "3d8f6c95b0a18c9b3c7bdfc36cf22400d3f0c03551a89e72f7b90dc42bac5e2a",
+      "sizeBytes": 37660090
+    },
+    "cpu": {
+      "sha256": "8d142d409515ce7a0f873654170ef0071d945acd1918fd774d374840917bf211",
+      "sizeBytes": 24708083
+    },
+    "cuda": {
+      "variant": "cuda-13.4",
+      "sha256": "6399e31fd2e2f455288ce7d717331441708b21e9e57f1a0bb93233e47d1f398c",
+      "sizeBytes": 169174587,
+      "cudartSha256": "738f8c251ac22b70c3ae6f83a10cf222725df0395246a2cf58f32bdb85fbe668",
+      "cudartSizeBytes": 423535356
+    }
+  }
+}

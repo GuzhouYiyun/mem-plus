@@ -68,7 +68,6 @@ import {
 // Unlike `prompt.ts` this one loads at runtime. See `readDeepRecallConfig` for the one-line
 // adaptation and for the two things the old local reader got wrong.
 import { normalizePluginConfig } from "../../extensions/active-memory/config.js";
-import { localiseForRecall } from "./recall-intent.js";
 import { completeThroughHost } from "./llm.js";
 import type { MemoryTool } from "./memory-tools.js";
 import { truncateUtf16Safe } from "../../packages/normalization-core/src/utf16-slice.js";
@@ -458,51 +457,32 @@ export async function runDeepRecall(params: {
   const { config } = params;
   if (!config.enabled) return { context: null, reason: "disabled" };
 
-  // Localise first. Upstream's gate is `hasRecallIntent`, and its zh-Hans group matches
-  // 4 of 13 ordinary Chinese recall questions against 13 of 13 for its English patterns
-  // (measured 2026-10-11) -- its lookahead needs the verb phrase to END in 过/了, which
-  // natural "动词+宾语" questions never do. So the message is translated to the script the
-  // patterns were written for, and the SAME unchanged function decides. This happens for
-  // every non-Latin message, not only when the regex missed, so a gate decision never
-  // depends on which patterns happen to cover today's phrasing.
-  const localised = await localiseForRecall({
-    ctx: params.ctx,
-    message: params.message,
-    ...(params.model ? { model: params.model } : {}),
-    log: params.log,
-  });
-
   // Upstream's gate, upstream's function: `mode: "off"` never runs, `"always"` always does,
-  // and a strong lane-one hit short-circuits before a second lookup is paid for.
-  const decide = (message: string) =>
-    resolveRecallEscalationDecision({
-      mode: config.mode,
-      message,
-      hasStrongLaneOneHit: params.hasStrongLaneOneHit,
-    });
-  // The translation is authoritative when there is one; the original is still consulted
-  // so a translation that loses a match upstream would have found can never narrow recall.
-  // `mode-off` and `strong-lane-one-hit` win outright -- turning recall off, or skipping it
-  // because lane 1 already hit, must not be overridable by either text.
-  const decision = localised.localised ? decide(localised.text) : decide(params.message);
-  const decisionOriginal = localised.localised ? decide(params.message) : decision;
-  const resolved =
-    decision === "mode-off" || decision === "strong-lane-one-hit"
-      ? decision
-      : decision === "recall" || decisionOriginal === "recall"
-        ? "recall"
-        : decision;
+  // and a strong lane-one hit short-circuits before a second lookup is paid for. The message
+  // reaches it verbatim: upstream's `hasRecallIntent` runs raw text through its regexes
+  // (English plus the localized groups, confirmed unchanged at upstream main f38495f7d on
+  // 2026-11-04) and has no translation step, so there is none here.
+  //
+  // REMOVED 2026-11-04: a localisation step (`plugin/src/recall-intent.ts`) used to translate
+  // every non-Latin message to English before this gate. It was NOT upstream's: it cost one
+  // model call per inbound prompt on the critical path (measured ~400 ms per message in the
+  // log when the call failed fast, 8 s when it did not answer), for recall coverage the gate
+  // itself does not have. Upstream accepts its zh-Hans group's lower match rate as-is. See
+  // docs/port-plan.md "长会话恢复/响应变慢:四条修复(2026-11-04)".
+  const resolved = resolveRecallEscalationDecision({
+    mode: config.mode,
+    message: params.message,
+    hasStrongLaneOneHit: params.hasStrongLaneOneHit,
+  });
 
   if (resolved === "mode-off") return { context: buildRecallOutcomePrefix("skipped-no-recall-intent") };
   if (resolved === "strong-lane-one-hit") return { context: null, reason: resolved };
   if (resolved !== "recall") return { context: buildRecallOutcomePrefix("skipped-no-recall-intent") };
 
-  // The same English feeds the search. Upstream's `buildQuery` widens the query with the
-  // recent conversation tail for the model's benefit; the index itself is lexical, and FTS
-  // needs terms the sentence literally contains, which a natural question does not have
-  // ("百度网盘右键菜单怎么关" -> 0 hits, "百度网盘" -> 2). The translation is the closest
-  // thing to a keyword rewrite that does not require inventing one.
-  const searchQuery = localised.localised ? localised.text : params.searchQuery;
+  // The original message feeds the search, as upstream's does. Upstream's `buildQuery` widens
+  // the query with the recent conversation tail for the model's benefit; the index itself is
+  // lexical, and FTS needs terms the sentence literally contains.
+  const searchQuery = params.searchQuery;
 
   const breakerKey = params.model ? `${params.model.providerID}/${params.model.id}` : "opencode-default";
   const startedAt = Date.now();
@@ -530,12 +510,25 @@ export async function runDeepRecall(params: {
   let finalRaw: string | undefined;
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round += 1) {
+    // ONE budget for the whole recall, as upstream's: the hook arms a single deadline for the
+    // entire run (`createActiveMemoryHookDeadline` + `DEFAULT_TIMEOUT_MS`, 15 s) and every
+    // tool round shares it -- upstream never re-arms per round. Before 2026-11-04 this loop
+    // gave each round its own `config.timeoutMs`, so worst case was 4 x 15 s of serial wait
+    // on the prompt path with no ceiling. `ctx.generate.text` carries no abort signal (see
+    // llm.ts), so the remaining share of the budget is passed as this round's timeout; once
+    // it is spent the recall ends the way upstream's deadline ends it -- "unavailable", not
+    // "no memory".
+    const remainingMs = config.timeoutMs - (Date.now() - startedAt);
+    if (remainingMs <= 0) {
+      noteTimeout(breakerKey, Date.now(), config.circuitBreakerCooldownMs);
+      return { context: buildRecallOutcomePrefix("unavailable") };
+    }
     const reply = await completeThroughHost(
       params.ctx,
       {
         purpose: "deep recall",
         prompt,
-        timeoutMs: config.timeoutMs,
+        timeoutMs: remainingMs,
         ...(params.model ? { model: params.model } : {}),
       },
       params.log,

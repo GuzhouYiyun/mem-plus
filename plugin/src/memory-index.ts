@@ -948,6 +948,81 @@ export function vectorCount(db: DatabaseSync): number {
 }
 
 /**
+ * 行上记的、既不是 `embedderId` 也不是 `fts-only` 的 model 串（去重）。
+ *
+ * 这些行是 **stale 向量**：它们的 embedding 由另一个运行时/模型算出，而
+ * 向量 lane 只查 `model = 当前 embedderId`（`searchVector`），所以旧行既
+ * 检索不到、也没人会补 —— 只有把它们按当前 embedderId 重写（reindex
+ * 的 skip 键含 model，`memory-scan.ts` `unchangedSources`）再嵌入才能回来。
+ * 换引擎必出 stale：2026-11-04 实测同一 GGUF 新旧引擎向量 cos 0.93–0.98
+ * 不达 ≈1.0，不能当同一批向量用。
+ *
+ * `fts-only` 不算 stale：那是"本来就没有向量"的合法状态（embed 关闭、
+ * 关键字-only 安装），保持手动 reindex 的修复语义。
+ *
+ * nightly tag 与 vulkan/cuda/cpu 后端不进行身份（2026-11-05 起，实测
+ * cos≈1，见 `embedderIdFor`），所以翻 tag/切后端不再产出 stale——旧身份
+ * 行由 `rewriteLegacyEmbedderModels` 一次性改写，不走重嵌。
+ *
+ * Chain: `docs/memory-chain.md` §2（行身份含 model）、§5（向量 lane 的
+ * model 过滤）。
+ */
+export function staleEmbedderModels(db: DatabaseSync, embedderId: string): string[] {
+  return (
+    db
+      .prepare("SELECT DISTINCT model FROM memory_index_chunks WHERE model NOT IN (?, 'fts-only')")
+      .all(embedderId) as { model: string }[]
+  ).map((row) => row.model);
+}
+
+/**
+ * 把旧身份行一次性改写成当前身份，免掉"同一批向量白烧全量重嵌"。
+ *
+ * 只改写 `<当前embedderId>-...` 前缀的行（即同模型同引擎家族、只是带过
+ * nightly tag / `-cuda` 后缀的旧串）；裸路径行（旧 node-llama-cpp 家族，
+ * cos 0.93–0.98）与 `"unknown"` 行**故意不改**——那些向量真的不是同一批，
+ * 该走一次真实重嵌。改写按 `DISTINCT model` 在 JS 里做前缀判断再逐个
+ * `UPDATE ... WHERE model = ?`，不用 LIKE：路径里的 `_`（`bge-m3-Q8_0`）
+ * 是 LIKE 通配符，会误配别的模型名。
+ *
+ * FTS 镜像与 revision 由 `memory_index_chunks` 上的触发器同步
+ * （`..._fts_after_update`、`..._revision_after_update`），这里只碰主表。
+ * 幂等：第二个进程/第二次进来 0 行可改。
+ *
+ * 时机：index 打开后、buildMemoryTools 与 repair 扫描之前（index.ts 调用
+ * 点）——晚于 repair 扫描就来不及了，stale 会先被数出来。
+ *
+ * Chain: `docs/memory-chain.md` §2（行身份含 model）。
+ */
+export function rewriteLegacyEmbedderModels(db: DatabaseSync, embedderId: string): number {
+  const models = db
+    .prepare("SELECT DISTINCT model FROM memory_index_chunks WHERE model <> ? AND model <> 'fts-only'")
+    .all(embedderId) as { model: string }[];
+  const prefix = `${embedderId}-`;
+  const update = db.prepare("UPDATE memory_index_chunks SET model = ? WHERE model = ?");
+  let rewritten = 0;
+  for (const row of models) {
+    if (!row.model.startsWith(prefix)) continue;
+    rewritten += (update.run(embedderId, row.model).changes as number) | 0;
+  }
+  return rewritten;
+}
+
+/**
+ * `model` 名下还没向量的行数。判定与 `chunksMissingVectors` 同一条：
+ * "没有向量" 是零长度 BLOB 而不是 NULL（`embedding BLOB NOT NULL`，
+ * 见上面 `chunksMissingVectors` 的注释），所以条件是 `length(embedding) = 0`。
+ * repair 用它复检进度，一次 `COUNT(*)` 比拉一窗 id 便宜。
+ */
+export function missingVectorCount(db: DatabaseSync, model: string): number {
+  return (
+    db
+      .prepare("SELECT COUNT(*) AS n FROM memory_index_chunks WHERE length(embedding) = 0 AND model = ?")
+      .get(model) as { n: number }
+  ).n;
+}
+
+/**
  * Cosine similarity over `memory_index_chunks.embedding`, honouring the same filters.
  *
  * Scored with upstream's `cosineSimilarity` (`embedding-vector.ts:42`) rather than the

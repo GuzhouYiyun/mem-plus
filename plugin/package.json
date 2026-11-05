@@ -10,8 +10,5 @@
   "dependencies": {
     "@openclaw/fs-safe": "0.18.2",
     "@opencode/plugin": "2.0.20"
-  },
-  "optionalDependencies": {
-    "node-llama-cpp": "^3.22.1"
   }
 }

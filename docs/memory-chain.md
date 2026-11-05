@@ -56,6 +56,16 @@ when a context window is known the soft threshold is clamped to
 Target `memory/${dateStamp}.md` in `agents.defaults.userTimezone`.
 `defaults.enabled === false` returns `null` — no flush at all (`flush-plan.ts:73`).
 
+**DIVERGENCE (mem-plus, 2026-11-04) — the flush has no off switch.** mem-plus
+keeps the gate above, with two differences already recorded elsewhere (the ratio
+replaces the absolute soft-token count, and the gate runs once per user prompt).
+The third is this: it never returns "no flush" for a config value. Upstream's
+`enabled === false` is not exposed, because pre-compaction flush is the memory
+organ's function rather than an optional feature (owner's decision). The
+behaviour is upstream's default (`enabled` unset is on); the difference is that it
+cannot be turned off, and a `flush.enabled` key already in `config.jsonc` is
+ignored. See the header of `plugin/src/flush-config.ts`.
+
 **Session-memory hook**, outside the extension: `src/hooks/bundled/session-memory/`
 on `command:new`, `command:reset`, `session:auto-reset`. Writes
 `memory/YYYY-MM-DD-HHMM.md` from the last 15 messages (`transcript.ts:147`).
@@ -307,6 +317,18 @@ Requires `automaticRecall.eligible === true` **and** all its project keys active
 2. `hasRecallIntent(message)` (line 68) — 14 regexes plus 5 locales
    (zh-Hans, zh-Hant, ja, ko, ru, es); a future-reminder phrasing suppresses
    escalation unless a retrospective marker co-occurs.
+
+**RESOLVED (mem-plus, 2026-11-04) — the localisation step was removed; the gate
+again sees the original message, byte-for-byte upstream's behaviour.** The DIVERGENCE
+below is kept as the measurement record that chose the approach, but the approach is
+reversed: it put one model call on the critical path of *every* non-Latin prompt
+(measured ~400 ms per message in this deployment, failing, before the first token),
+and upstream — re-checked at main `f38495f7d` — has no translation step at any ref;
+its `hasRecallIntent` runs the raw text and accepts the zh-Hans group's match rate as
+it is. `plugin/src/recall-intent.ts` is deleted and `runDeepRecall` gates and searches
+on the original message. The cost now matches upstream exactly: Chinese recall
+coverage is the zh-Hans group's 4/13 again, which is upstream's own coverage.
+See `docs/port-plan.md` "长会话恢复/响应变慢:四条修复(2026-11-04)".
 
 **DIVERGENCE (mem-plus, 2026-10-11) — the gate sees a translated message;
 `hasRecallIntent` itself is untouched, byte-identical to upstream.** Upstream decides a turn

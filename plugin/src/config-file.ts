@@ -79,7 +79,7 @@ const CONFIG_TEMPLATE = `{
     // "url": "",
     "port": 4748,
     "autostart": true,
-    "idleMinutes": 10,
+    "idleMinutes": 5,
     "startTimeoutMs": 30000
   },
 

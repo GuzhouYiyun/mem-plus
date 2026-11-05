@@ -4,9 +4,10 @@ export const ROUTES = {
   dreams: "/dreams",
   config: "/config",
   configFile: "/config-file",
+  runtime: "/runtime",
 } as const;
 
-export type AppView = "promptFiles" | "dreams" | "config" | "configFile";
+export type AppView = "promptFiles" | "dreams" | "config" | "configFile" | "runtime";
 
 /** The path the read-only status page used to live at, kept so old links resolve. */
 const REMOVED_SETTINGS = "/settings";
@@ -24,6 +25,8 @@ export function viewFromPath(pathname: string): AppView {
       return "config";
     case ROUTES.configFile:
       return "configFile";
+    case ROUTES.runtime:
+      return "runtime";
     default:
       return "promptFiles";
   }
@@ -33,6 +36,7 @@ export function pathForView(view: AppView): string {
   if (view === "dreams") return ROUTES.dreams;
   if (view === "config") return ROUTES.config;
   if (view === "configFile") return ROUTES.configFile;
+  if (view === "runtime") return ROUTES.runtime;
   return ROUTES.promptFiles;
 }
 
@@ -43,7 +47,8 @@ export function isAppPath(pathname: string): boolean {
     path === ROUTES.promptFiles ||
     path === ROUTES.dreams ||
     path === ROUTES.config ||
-    path === ROUTES.configFile
+    path === ROUTES.configFile ||
+    path === ROUTES.runtime
   );
 }
 

@@ -27,7 +27,9 @@
 //   direction also holds -- a broken or deleted index is repaired by
 //   `memory_reindex`, and no memory is ever lost with it.
 import path from "node:path";
-import { readFile } from "node:fs/promises";
+import { existsSync, rmSync } from "node:fs";
+import { spawn } from "node:child_process";
+import type { DatabaseSync } from "node:sqlite";
 import { Plugin } from "@opencode/plugin";
 import {
   createMemoryCapture,
@@ -44,16 +46,17 @@ import {
   type CaptureCompleteOverride,
 } from "./capture-deps.js";
 import { createStorageOpenKeyedStore } from "./kv.js";
-import { readModelConfig, readServiceConfig, resolveEmbedAvailability } from "./model/config.js";
+import { readModelConfig, readRuntimeSpawnFlags, readServiceConfig, resolveEmbedAvailability, resolveRuntimeFile, runtimeCudartZipPath, runtimeDirPath, runtimeTag, runtimeZipPath, serverEntryPath, type RuntimeVariant } from "./model/config.js";
 import { readWikiConfig } from "./wiki/config.js";
 import { readWebConfig } from "./web/config.js";
 import { startWebServer } from "./web/server.js";
+import type { RepairOutcome, RuntimeAction } from "./web/api.js";
 import { forget as forgetHost } from "./forget.js";
-import { createServiceClient, type MemPlusService } from "./model/client.js";
+import { createServiceClient, nodeSystemCaArgs, probeService, type MemPlusService } from "./model/client.js";
 import { createLogger } from "./log.js";
-import { indexPath, memoryRelativePath, openIndex } from "./memory-index.js";
+import { indexPath, memoryRelativePath, missingVectorCount, openIndex, rewriteLegacyEmbedderModels, staleEmbedderModels } from "./memory-index.js";
 import { indexWrittenFile } from "./memory-scan.js";
-import { buildMemoryTools, EMBED_BUDGET } from "./memory-tools.js";
+import { buildMemoryTools, EMBED_BUDGET, type RetrievalTools } from "./memory-tools.js";
 import { createAutoEmbedScheduler } from "./auto-embed.js";
 import { completeThroughHost } from "./llm.js";
 import { buildStandingIntentTool } from "./standing-intents.js";
@@ -72,6 +75,7 @@ import {
   BOOTSTRAP_FILENAMES,
   buildProjectContextSection,
   loadBootstrapContextFiles,
+  readContextFile,
 } from "./bootstrap-context.js";
 import {
   eventBelongsToWorkspace,
@@ -145,6 +149,127 @@ async function pruneStalePrompts(): Promise<number> {
   return pruned;
 }
 
+/**
+ * embedder repair 每进程只开一次。多个项目窗口共享一个 OpenCode 进程和
+ * 一个 index.db：第一处发现 stale 就开修，其余窗口再各开一遍只会并发重复
+ * 同一批 /embed（幂等，但双倍流量、双倍日志）。
+ */
+let embedderRepairStarted = false;
+
+/**
+ * 正在跑的那次 repair。自动触发与网页「触发向量修复」共用一个入口
+ * （`startEmbedderRepair`）：同时来两次只跑一次——第二次拿到的是同一个
+ * promise，等它出结果，而不是并发再嵌一批。
+ */
+let embedderRepairInFlight: Promise<RepairOutcome> | null = null;
+
+/**
+ * embedder 身份切换后的全重嵌：把 stale 行按当前 `embedderId` 重写并补嵌，
+ * 直到 index 干净（`docs/port-plan.md` 2026-11-04「推理服务换官方 llama.cpp」
+ * 的步骤 3，行为变化记档在那里）。
+ *
+ * 走的是用户手动 `memory_reindex {embed:true}` 的同一条路——同一个工具
+ * execute、同一个 runReindex，没有第二套写路径：`reindexFiles` 的 skip 键含
+ * model（`unchangedSources` 按 chunk model 聚合，混模也算变），旧行按身份
+ * 不匹配被整文件重写；`writeSourceChunks` 的 preserved SELECT 只保留
+ * `model = 目标` 的向量，旧行向量不会被错留。
+ *
+ * 上限 20 轮 × embedBudget 500（工具自己的上限；活区 533 chunks，一轮装
+ * 不下也不至于烧不完）。每轮之间从 db 复检 stale/missing，先停的是**没
+ * 进展**而不是没轮数：进展 = stale 或 missing 至少一个下降（reindex 第一轮
+ * 会把 stale 换成 missing，所以两个计数要分别比，不能加起来比）。
+ * 超上下文被 `embedMissing` 跳过的 chunk 让 missing 永远到不了 0——那种
+ * index 走 stalled 出口，诚实报 incomplete，不假装修好。
+ *
+ * 全程后台，不挡插件加载。门控在调用点：`vectorsUsable`（embed 关闭时旧行
+ * 不是 stale，是配置）+ `retrieval.available` + 先查出有活才干——没活时
+ * 一个请求都不发，`ready()` 可能触发的 autostart（spawn llama-server）不会
+ * 因为每次启动白跑一遍。
+ *
+ * 返回值（`RepairOutcome`）只给网页 Runtime 页的「触发向量修复」按钮：
+ * 自动触发那路忽略它，照旧只写日志。自动与手动共用
+ * `startEmbedderRepair`，并发来两次只跑一次。
+ */
+async function repairEmbedder(params: {
+  readonly db: DatabaseSync;
+  readonly retrieval: RetrievalTools;
+  readonly embedderId: string;
+  readonly serviceReady: () => Promise<boolean>;
+  readonly log: (message: string, detail?: unknown) => void;
+}): Promise<RepairOutcome> {
+  const { db, retrieval, embedderId, serviceReady, log } = params;
+  let stale = staleEmbedderModels(db, embedderId);
+  let missing = missingVectorCount(db, embedderId);
+  if (stale.length === 0 && missing === 0) return { status: "clean", rounds: 0, stale: 0, missing: 0 };
+
+  const tool = retrieval.tools.find((candidate) => candidate.name === "memory_reindex");
+  if (!tool) {
+    log("embedder repair skipped: memory_reindex not registered");
+    return { status: "skipped", rounds: 0, stale: stale.length, missing };
+  }
+
+  log(
+    `embedder id is ${embedderId}: ${stale.length} stale model group(s)` +
+      (stale.length > 0 ? ` under ${stale.join(", ")}` : "") +
+      `, ${missing} chunk(s) without vectors -- background re-embed starting`,
+  );
+
+  if (!(await serviceReady())) {
+    log(
+      "embedder repair postponed: embedding service not ready -- stale rows stay " +
+        "invisible to vector search until a later start repairs them",
+    );
+    return { status: "postponed", rounds: 0, stale: stale.length, missing };
+  }
+
+  const MAX_ROUNDS = 20;
+  const BUDGET = 500;
+  let rounds = 0;
+  while (rounds < MAX_ROUNDS && (stale.length > 0 || missing > 0)) {
+    const prevStale = stale.length;
+    const prevMissing = missing;
+    rounds += 1;
+    // `execute` 只读 `context?.signal`，但其 context 类型要整个 ToolContext：
+    // 后台修复没有 agent/session/message/call，branded id 字段给一次 cast，
+    // 其余字段照实拼——同 web 端 reindex 包装的取舍（工具将来多读一个字段
+    // 会先在编译期在这里报错）。
+    await tool.execute(
+      { embed: true, embedBudget: BUDGET },
+      {
+        agent: "mem-plus-repair" as never,
+        signal: new AbortController().signal,
+        progress: async () => {},
+        sessionID: "repair" as never,
+        messageID: "repair" as never,
+        id: "repair" as never,
+      },
+    );
+    stale = staleEmbedderModels(db, embedderId);
+    missing = missingVectorCount(db, embedderId);
+    if (stale.length === 0 && missing === 0) break;
+    if (stale.length >= prevStale && missing >= prevMissing) {
+      log(
+        `embedder repair stalled after round ${rounds}: stale=${stale.length} ` +
+          `missing=${missing} -- not retrying; those counts name what is left`,
+      );
+      return { status: "stalled", rounds, stale: stale.length, missing };
+    }
+  }
+  if (stale.length === 0 && missing === 0) {
+    log(`embedder repair done in ${rounds} round(s): all vectors now under ${embedderId}`);
+    return { status: "done", rounds, stale: 0, missing: 0 };
+  }
+  log(
+    `embedder repair incomplete after ${rounds} round(s): stale=${stale.length} ` +
+      `missing=${missing} under ${embedderId}`,
+  );
+  return { status: "incomplete", rounds, stale: stale.length, missing };
+}
+
+// 保持最新的启动对齐每**进程**只跑一次：setup 按工作区进来三次，各跑一遍
+// 就是三次下载（.part 互踩）。放模块级，与 embedderRepairInFlight 同款。
+let runtimeAlignStarted = false;
+
 export default Plugin.define({
   id: "mem-plus",
   async setup(ctx) {
@@ -157,6 +282,9 @@ export default Plugin.define({
     const workspaceDir = ctx.location.directory;
     // Lane-one injection (trigger recall + project memory), once the index exists.
     let memoryInjection: { dispose: () => Promise<void> } | undefined;
+    // Runtime 页「准备中」灯：prepare 是火速返回（592 MB 超页面超时），
+    // 靠这组集合让引擎行显示进度、并防同一变体双开下载。
+    const preparingVariants = new Set<RuntimeVariant>();
     // First line in the log file, so an empty or stale log is unambiguous.
     log(`plugin loaded, workspace ${workspaceDir}`);
     log(`log file ${logFile()}`);
@@ -176,6 +304,9 @@ export default Plugin.define({
 
     const modelConfig = readModelConfig(options);
     const serviceConfig = readServiceConfig(options);
+    // 装载时的运行时 tag：自动对齐把 runtime.json 写新后，status 用它算
+    // tagPending（=旧值≠现值），与变体 pending 同款「重启生效」语义。
+    const runtimeTagAtLoad = runtimeTag();
     const wikiConfig = readWikiConfig(options);
     // Only one model slot is left on this machine: the embedding model. Extraction,
     // promotion consolidation and dreaming all run on the user's OpenCode model, so a
@@ -191,6 +322,37 @@ export default Plugin.define({
     const service: MemPlusService | null = vectorsUsable
       ? createServiceClient(serviceConfig, modelConfig, log)
       : null;
+
+    // 保持最新（机主 2026-11-05 拍板：删掉稳定版/测试版选择，全自动）：
+    // 装载后后台对齐一次上游最新 nightly——server.mjs `--ensure`：解析→
+    // 写回 runtime.json→缺则下载→完即退，不监听。开关关着不跑；离线时
+    // server.mjs 内部降级继续（10s 探测上限，只落日志），不碰服务与索引。
+    // 下一次 OpenCode 启动会带着新 tag 装载（行身份不变，重启只为让
+    // spawn 用上新 tag 的运行时目录）。
+    if (vectorsUsable && serviceConfig.autoPrepareRuntime && !runtimeAlignStarted) {
+      const alignEntry = serverEntryPath();
+      if (existsSync(alignEntry)) {
+        runtimeAlignStarted = true;
+        const align = spawn(
+          process.execPath.startsWith("node") ? process.execPath : "node",
+          [...nodeSystemCaArgs(), alignEntry, "--variant", serviceConfig.runtimeVariant, "--ensure"],
+          { stdio: ["ignore", "pipe", "pipe"], windowsHide: true },
+        );
+        const relayAlign = (chunk: Buffer) => {
+          for (const line of chunk.toString("utf8").split(/\r?\n/)) {
+            if (line.trim().length > 0) log(`[align] ${line}`);
+          }
+        };
+        align.stdout?.on("data", relayAlign);
+        align.stderr?.on("data", relayAlign);
+        align.on("error", (error) => log("runtime align spawn failed", error));
+        align.on("exit", (code) =>
+          log(`runtime align ${code === 0 ? "finished" : `failed (exit ${code})`}`),
+        );
+        log("runtime align started (keep-latest, background)");
+      }
+    }
+
     log(`extraction model = opencode (model = ${hostedLabel})`);
 
     // The extraction transport, named once because the pre-compaction flush reuses it.
@@ -225,6 +387,15 @@ export default Plugin.define({
     const localService = service;
 
     /**
+     * 正在跑的引擎变体：本插件 spawn 的真身（client 活读配置后记录，仅子进程
+     * 活着时有值）；服务没在跑时回落到活读配置 = 下次 spawn 会用的值。
+     * 生效判定与文件占用守卫都按它算——select 即时生效（2026-11-05 拍板）
+     * 后，装载期捕获的 `serviceConfig.runtimeVariant` 不再是真身。
+     */
+    const runningVariant = (): RuntimeVariant =>
+      localService?.spawnedVariant ?? readRuntimeSpawnFlags(serviceConfig).runtimeVariant;
+
+    /**
      * Installed by the retrieval block when the index and vector lane are
      * available. The write-path closures below also run when they are not, so
      * they call these no-ops instead of branching on `index`/`retrieval`.
@@ -257,6 +428,12 @@ export default Plugin.define({
     if (index) {
       log(`index ${indexPath()}`);
 
+      // 旧身份行（带 nightly tag / `-cuda` 后缀）一次性改写成当前身份，
+      // 必须在 repair 扫描与任何检索之前——同一批向量不值得为身份串白烧
+      // 全量重嵌（实测 cos≈1，见 embedderIdFor）。0 行可改时零开销。
+      const rewritten = rewriteLegacyEmbedderModels(index, modelConfig.embedderId);
+      if (rewritten > 0) log(`rewrote ${rewritten} chunk(s) to embedder id ${modelConfig.embedderId}`);
+
       // The memory browser, started here because this is where the index becomes
       // available: the page's data endpoints read it through the same open
       // connection the tools use, so there is exactly one reader of index.db.
@@ -268,10 +445,11 @@ export default Plugin.define({
         // Null service = vector modes off (see the note above); extraction above
         // keeps its own reference either way.
         service: vectorsUsable ? localService : null,
-        // The same string the index write and the embed pass use. `model` is part of a
-        // chunk's row identity, so these three must agree exactly -- see the note on
-        // `RetrievalDeps.model`.
-        model: modelConfig.embedModelPath,
+        // The same string the index write and the embed pass use: `embedderId`
+        // (model path + engine family `@llamacpp`). `model` is part of a chunk's row identity,
+        // so these three must agree exactly -- see the note on `ModelConfig.embedderId`
+        // and on `RetrievalDeps.model`.
+        model: modelConfig.embedderId,
         options,
         log,
       });
@@ -289,6 +467,31 @@ export default Plugin.define({
       });
       scheduleAutoEmbed = (file) => autoEmbed.schedule(memoryRelativePath(file));
       disposeAutoEmbed = autoEmbed.dispose;
+
+      // 换嵌入运行时/模型后，旧行的向量已失效且向量 lane 查不到它们
+      // （`searchVector` 只查 `model = embedderId`）——后台按需全重嵌。
+      // 只在真有活时开跑（函数内部先查 stale/missing，零活即返回，
+      // 不碰服务不发请求）；`ready()` 失败只推迟不重试，下次启动自愈。
+      // 手动入口（Runtime 页按钮）走同一个 runner，并发时合流到在跑的那次。
+      const runEmbedderRepair = (): Promise<RepairOutcome> => {
+        if (embedderRepairInFlight) return embedderRepairInFlight;
+        let pending: Promise<RepairOutcome>;
+        pending = repairEmbedder({
+          db: index,
+          retrieval,
+          embedderId: modelConfig.embedderId,
+          serviceReady: () => localService?.ready() ?? Promise.resolve(false),
+          log,
+        }).finally(() => {
+          if (embedderRepairInFlight === pending) embedderRepairInFlight = null;
+        });
+        embedderRepairInFlight = pending;
+        return pending;
+      };
+      if (vectorsUsable && retrieval.available && !embedderRepairStarted) {
+        embedderRepairStarted = true;
+        void runEmbedderRepair().catch((error) => log("embedder repair failed", error));
+      }
 
       // Lane one, upstream's way: the matched curated entries ride along as
       // request-scoped system context on every agent-loop model call. Registered
@@ -373,6 +576,149 @@ export default Plugin.define({
                 return { content, metadata: (result.metadata ?? {}) as Record<string, unknown> };
               }
             : undefined,
+          // Runtime 页：状态读取走 handleRuntimeStatus（它自己读文件与索引），
+          // 这里只给动作与服务探针。三个动作都要服务对象，向量不可用时整块
+          // 不给，页面按 503 显示"不可用"。
+          runtime:
+            vectorsUsable && localService
+              ? {
+                  // 生效引擎 = spawn 真身（活读），不是装载期捕获值——见
+                  // runningVariant 的注释。
+                  get activeVariant(): RuntimeVariant {
+                    return runningVariant();
+                  },
+                  activeTag: runtimeTagAtLoad,
+                  probe: () => probeService(serviceConfig),
+                  download: async (force: boolean): Promise<RuntimeAction> => {
+                    // 擦的对象 = 会用到它的那一个变体；在 dispose 之前取值
+                    // （dispose 后 spawn 真身消失，只剩活读配置）。
+                    const variant = runningVariant();
+                    if (force) {
+                      // 先停再删：llama-server.exe 正在跑时 Windows 锁着文件，删不掉。
+                      await localService.dispose();
+                      try {
+                        rmSync(runtimeDirPath(variant), { recursive: true, force: true });
+                        rmSync(runtimeZipPath(variant), { force: true });
+                        if (variant === "cuda") {
+                          rmSync(runtimeCudartZipPath(), { force: true });
+                        }
+                      } catch (error) {
+                        return {
+                          ok: false,
+                          detail: `删除旧运行时失败（可能仍被占用）：${error instanceof Error ? error.message : String(error)}`,
+                        };
+                      }
+                    }
+                    const started = await localService.ready({ forcePrepare: true });
+                    if (started) return { ok: true, detail: `运行时就绪，服务已启动：${localService.url ?? ""}` };
+                    return {
+                      ok: false,
+                      detail: force
+                        ? "重新下载已触发，但服务 30 秒内未就绪——下载在后台继续，完成后自动恢复，稍后刷新本页"
+                        : "启动已触发（首次包含运行时下载），但服务 30 秒内未就绪——下载在后台继续，完成后自动恢复，稍后刷新本页",
+                    };
+                  },
+                  restart: async (): Promise<RuntimeAction> => {
+                    const before = await probeService(serviceConfig);
+                    await localService.dispose();
+                    const started = await localService.ready();
+                    if (!started) return { ok: false, detail: "服务未能就绪：30 秒内没有响应，稍后重试或查看日志" };
+                    const after = await probeService(serviceConfig);
+                    const url = after?.url ?? localService.url ?? "";
+                    if (!before) return { ok: true, detail: `服务未在运行，已启动：${url}` };
+                    const prev = before.health.uptimeSeconds;
+                    const now = after?.health.uptimeSeconds;
+                    // uptime 变小 = 换了进程 = 真重启了。没变说明服务是别的
+                    // 实例启动的（dispose 只回收本插件拉起的子进程），如实说没重启。
+                    return prev === undefined || now === undefined || now < prev
+                      ? { ok: true, detail: `服务已重启：${url}` }
+                      : { ok: true, detail: `服务由其他实例持有（本窗口没有启动它），未重启、已重新连接：${url}` };
+                  },
+                  repair: runEmbedderRepair,
+                  preparing: () => [...preparingVariants],
+                  prepare: async (variant: RuntimeVariant, force: boolean): Promise<RuntimeAction> => {
+                    if (preparingVariants.has(variant)) {
+                      return { ok: true, detail: `${variant} 引擎已在后台准备中，完成后引擎列表会显示已安装` };
+                    }
+                    // 生效变体的 exe 被子进程握着：先停再删（与 download force
+                    // 同一条规矩）；非生效变体没人占，直接删。生效 = spawn 真身。
+                    if (variant === runningVariant()) await localService.dispose();
+                    if (force) {
+                      try {
+                        rmSync(runtimeDirPath(variant), { recursive: true, force: true });
+                        rmSync(runtimeZipPath(variant), { force: true });
+                        if (variant === "cuda") rmSync(runtimeCudartZipPath(), { force: true });
+                      } catch (error) {
+                        return {
+                          ok: false,
+                          detail: `删除旧运行时失败（可能仍被占用）：${error instanceof Error ? error.message : String(error)}`,
+                        };
+                      }
+                    }
+                    const entry = serverEntryPath();
+                    if (!existsSync(entry)) return { ok: false, detail: `找不到 ${entry}` };
+                    // 火速后台模式：--ensure 准备完即退，不起服务、不校验 GPU；
+                    // 日志转进 mem-plus.log，进度由 preparing 集合驱动页面灯。
+                    const child = spawn(
+                      process.execPath.startsWith("node") ? process.execPath : "node",
+                      [entry, "--variant", variant, "--ensure"],
+                      { stdio: ["ignore", "pipe", "pipe"], windowsHide: true },
+                    );
+                    preparingVariants.add(variant);
+                    const relay = (chunk: Buffer) => {
+                      for (const line of chunk.toString("utf8").split(/\r?\n/)) {
+                        if (line.trim().length > 0) log(`[prepare:${variant}] ${line}`);
+                      }
+                    };
+                    child.stdout?.on("data", relay);
+                    child.stderr?.on("data", relay);
+                    child.on("error", (error) => {
+                      preparingVariants.delete(variant);
+                      log(`prepare ${variant} spawn failed`, error);
+                    });
+                    child.on("exit", (code) => {
+                      preparingVariants.delete(variant);
+                      log(`prepare ${variant} ${code === 0 ? "finished" : `failed (exit ${code})`}`);
+                    });
+                    return {
+                      ok: true,
+                      detail: `${force ? "重新" : ""}准备 ${variant} 引擎已在后台开始（下载→sha 校验→解压），完成后引擎列表自动显示已安装；体积大时可能要几分钟`,
+                    };
+                  },
+                  /**
+                   * 删除**一个**已下载文件（列表式：点开列表选具体文件删，
+                   * 机主 2026-11-05 拍板，不一键清空整个变体）。三道守卫：
+                   * 准备中不删；名字必须属于该变体的模式（resolveRuntimeFile
+                   * 不猜路径，删不掉列表外的东西）；生效引擎正在用的当前
+                   * tag 目录不删（API 层另有一道同语义兜底）。旧 tag 孤儿与
+                   * zip 可以删——那正是这功能要清理的东西。
+                   */
+                  release: async (variant: RuntimeVariant, name: string): Promise<RuntimeAction> => {
+                    if (preparingVariants.has(variant)) {
+                      return { ok: false, detail: `${variant} 正在后台准备中，等它结束再删` };
+                    }
+                    const target = resolveRuntimeFile(variant, name);
+                    if (!target) {
+                      return { ok: false, detail: `不认识的文件：${name}` };
+                    }
+                    if (variant === runningVariant() && name === path.basename(runtimeDirPath(variant))) {
+                      return {
+                        ok: false,
+                        detail: "这是当前生效引擎正在使用的文件：先在下拉里切走，再删除它",
+                      };
+                    }
+                    try {
+                      rmSync(target.path, { recursive: target.kind === "directory", force: true });
+                      return { ok: true, detail: `已删除 ${name}` };
+                    } catch (error) {
+                      return {
+                        ok: false,
+                        detail: `删除失败（可能仍被占用）：${error instanceof Error ? error.message : String(error)}`,
+                      };
+                    }
+                  },
+                }
+              : undefined,
         },
         (message) => log(message)
       );
@@ -404,9 +750,13 @@ export default Plugin.define({
      * failed update is repaired by `memory_reindex` without the user needing to
      * know it happened.
      *
-     * `autoEmbed` is for the rare long-term write (`MEMORY.md` after promotion).
-     * Snapshots rewrite every turn and stay on-demand; auto-embedding them would
-     * re-embed the same transcript on every settle.
+     * `autoEmbed` queues the file for the background pass. It is safe on every
+     * full-file write, snapshots included: `embedMissing` only fills chunks
+     * whose vector is zero-length (auto-embed.ts says so), so an unchanged
+     * settle costs one indexed query and no embed call — the old fear that
+     * auto-embedding would re-embed the same transcript every turn was wrong,
+     * and skipping it let changed snapshots accumulate missing vectors until
+     * the next startup's repair (641 chunks, 11 min, 2026-11-05).
      */
     const indexReplaced = async (
       files: readonly string[],
@@ -430,7 +780,7 @@ export default Plugin.define({
           // The chunks are only eligible for vectors if they carry the same model
           // string the embed/search passes use; `indexWrittenFile` defaults to
           // fts-only when this is omitted.
-          model: modelConfig.embedModelPath,
+          model: modelConfig.embedderId,
           log,
         });
         if (written > 0) {
@@ -469,7 +819,7 @@ export default Plugin.define({
         memoryHome: memoryHomeDir(),
         // Same reason as `indexReplaced`: without the model the chunks are written
         // fts-only and no embed pass will ever select them.
-        model: modelConfig.embedModelPath,
+        model: modelConfig.embedderId,
         log,
       });
       if (written > 0) {
@@ -517,9 +867,10 @@ export default Plugin.define({
     // `loadAssistantTurn` then finds no reply to work from.
     //
     // Two triggers, because one is not enough:
-    //   occupancy -- the context hook below, on the last observed token usage.
+    //   occupancy -- the prompt hook below, on the last observed token usage.
     //     This is the one that runs *before* the compaction, which is the whole
-    //     point of the upstream mechanism.
+    //     point of the upstream mechanism. Once per inbound user prompt, matching
+    //     upstream's per-turn gate in reply preparation.
     //   compaction -- `session.compaction.started`, as the backstop for a
     //     compaction the hook did not see coming (a manual `/compact`, or a turn
     //     that outgrew the window without ever returning to the hook).
@@ -608,7 +959,7 @@ export default Plugin.define({
       trigger: FlushTrigger,
       options?: { readonly compactionID?: string; readonly note?: string },
     ): Promise<void> => {
-      if (!flushConfig.enabled || closed || flushInFlight) return;
+      if (closed || flushInFlight) return;
       flushInFlight = true;
       const note = options?.note ? ` (${options.note})` : "";
       try {
@@ -639,13 +990,10 @@ export default Plugin.define({
       }
     };
 
-    if (!flushConfig.enabled) {
-      log("pre-compaction flush off (flush.enabled = false)");
-    }
-
     // Inject bootstrap files into the session system prompt -- the same mechanism
-    // openclaw uses for its embedded agents. The files are read fresh on every
-    // model request because the owner may edit them between turns.
+    // openclaw uses for its embedded agents. Reads go through upstream's identity
+    // cache (`readContextFile`): an edit between turns is picked up on the next
+    // model request, while an unchanged file costs a stat instead of a re-read.
     //
     // The five instruction files are the user's own and stay in the project;
     // MEMORY.md is openclaw's home file, so it is read from the memory home and
@@ -664,30 +1012,40 @@ export default Plugin.define({
     // fires on every model request, and a missing session id is a property of how the
     // host wired the hook rather than of any one turn.
     let warnedMissingSessionID = false;
+    // The flush occupancy gate runs once per inbound user prompt. Upstream runs it once
+    // per user turn, in reply preparation (`reply-agent-turn-preparation.ts:568`,
+    // openclaw main f38495f7d) -- never on every model request. It used to live in the
+    // `context` hook below, which fires once per agent-loop model call, so a long
+    // session paid a full `ctx.session.context()` read (the whole message list) on
+    // every model request instead of once per turn.
+    //
+    // Off the critical path, the same rule as `scheduleSettle`: a flush costs a model
+    // request, so it is started and not awaited -- the turn that noticed the threshold
+    // must not wait for it.
+    await ctx.session.hook("prompt", async (event) => {
+      const sessionID = event.sessionID;
+      if (typeof sessionID !== "string" || sessionID.length === 0) return;
+      void (async () => {
+        const occupancy = await readOccupancy(sessionID);
+        if (!occupancy || occupancy.window <= 0) return;
+        if (
+          shouldFlushForOccupancy({
+            totalTokens: occupancy.used,
+            contextWindowTokens: occupancy.window,
+            contextRatio: flushConfig.contextRatio,
+          })
+        ) {
+          await maybeFlush(sessionID, "occupancy", {
+            note:
+              `context ${Math.round((occupancy.used / occupancy.window) * 100)}% of ` +
+              `${occupancy.window} tokens`,
+          });
+        }
+      })();
+    });
+
     await ctx.session.hook("context", async (event) => {
-      // Occupancy first, and off the critical path. A flush costs a model request,
-      // so it must never delay the turn that noticed the threshold -- started and
-      // not awaited, the same rule as `scheduleSettle`.
       const sessionID = (event as { sessionID?: string }).sessionID;
-      if (typeof sessionID === "string" && sessionID.length > 0 && flushConfig.enabled) {
-        void (async () => {
-          const occupancy = await readOccupancy(sessionID);
-          if (!occupancy || occupancy.window <= 0) return;
-          if (
-            shouldFlushForOccupancy({
-              totalTokens: occupancy.used,
-              contextWindowTokens: occupancy.window,
-              contextRatio: flushConfig.contextRatio,
-            })
-          ) {
-            await maybeFlush(sessionID, "occupancy", {
-              note:
-                `context ${Math.round((occupancy.used / occupancy.window) * 100)}% of ` +
-                `${occupancy.window} tokens`,
-            });
-          }
-        })();
-      }
       try {
         const files = await loadBootstrapContextFiles(workspaceDir, instructionFileNames);
         const homeMemoryPath = path.join(memoryHomeDir(), DEFAULT_MEMORY_FILENAME);
@@ -702,10 +1060,13 @@ export default Plugin.define({
           // sit verbatim in the system prompt of a session working in another.
           await prepareActiveProjectKey(sessionID, workspaceDir);
           try {
-            const memoryContent = filterProjectScopedCuratedContext(
-              await readFile(homeMemoryPath, "utf8"),
-              activeProjectKeys(sessionID),
-            );
+            // Through upstream's identity cache (`readContextFile`): a stat per model
+            // request, a read only when the file actually changed.
+            const rawMemory = await readContextFile(homeMemoryPath);
+            const memoryContent =
+              rawMemory === undefined
+                ? ""
+                : filterProjectScopedCuratedContext(rawMemory, activeProjectKeys(sessionID));
             if (memoryContent.trim().length > 0) {
               files.push({
                 name: DEFAULT_MEMORY_FILENAME,
@@ -855,7 +1216,8 @@ export default Plugin.define({
           // pre-promotion text until the next `memory_reindex`. Index it here,
           // through the same path as every other full-file write. This is a
           // once-a-day long-term write, so let the background pass embed it too;
-          // per-turn snapshots stay on-demand.
+          // per-turn snapshots also embed, but only their missing chunks (see
+          // `indexReplaced` below).
           await indexReplaced([path.join(memoryHomeDir(), DEFAULT_MEMORY_FILENAME)], {
             autoEmbed: true,
           });
@@ -876,7 +1238,12 @@ export default Plugin.define({
           log(`snapshot ${snapshot.bytes} B -> ${snapshot.path}`);
           // One file, in the session's own project slice of the home: a
           // cross-project search finds it under the project that had it.
-          await indexReplaced([snapshot.path]);
+          // autoEmbed: a changed snapshot re-ids its chunks (hash over text +
+          // span), leaving zero-length vectors behind; without this they pile
+          // up until the next startup's repair — 641 once, 11 minutes of
+          // double-stack GPU contention (2026-11-05). `embedMissing` only
+          // fills what is missing, so an unchanged settle costs one query.
+          await indexReplaced([snapshot.path], { autoEmbed: true });
         }
       } catch (error) {
         log("snapshot failed", error);

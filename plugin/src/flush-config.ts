@@ -19,6 +19,15 @@
 //   server-side compaction plans) is not ported: those are provider-internal
 //   thresholds, and mem-plus reads OpenCode's own `Model.Info.limit.context`.
 //
+// WHEN THE GATE RUNS
+//   Once per inbound user prompt (`index.ts`'s `prompt` hook), matching upstream's
+//   per-user-turn gate in reply preparation (`reply-agent-turn-preparation.ts:568`,
+//   openclaw main f38495f7d). Before 2026-11-04 mem-plus ran it from the `context`
+//   hook -- once per agent-loop model call -- so a long session paid a full
+//   `ctx.session.context()` read on every model request instead of once per turn.
+//   The `session.compaction.started` trigger is unchanged: it is the backstop for a
+//   compaction the prompt-time gate did not see, not a second gate frequency.
+//
 // THE THRESHOLD IS A RATIO, NOT A TOKEN COUNT
 //   Upstream defaults to `softThresholdTokens = 4000` but caps the reserved
 //   compaction space at a quarter of the window, so the flush effectively runs at
@@ -27,9 +36,28 @@
 //   the same policy with one fewer knob, and `flush.contextRatio` is that 0.75.
 //
 // COPIED VERBATIM FROM `flush-plan.ts`
-//   The four prompt clauses, both prompt texts, and the `enabled` / `model`
-//   knobs. `SILENT_REPLY_TOKEN` is imported from the vendored openclaw tree
-//   rather than retyped, so the token stays the host's single definition.
+//   The four prompt clauses and both prompt texts.
+//   `SILENT_REPLY_TOKEN` is imported from the vendored openclaw tree rather than
+//   retyped, so the token stays the host's single definition.
+//
+// NOT PORTED (owner's decision, 2026-11-04): `flush.enabled`
+//   Upstream gates the whole mechanism on `agents.defaults.compaction.memoryFlush
+//   .enabled` (`memory-flush-plan.ts:36`; `enabled === false` yields no plan and no
+//   flush, default on). mem-plus does not expose that switch: pre-compaction flush
+//   is the memory organ's own function -- the thing that keeps a compaction from
+//   erasing what capture has not written yet -- so an off switch is an off switch
+//   for the organ, and the settings page offered exactly one control for it. The
+//   behaviour is upstream's default; what differs is that it cannot be turned off.
+//   An existing `config.jsonc` key `flush.enabled` parses and is ignored.
+//
+// NOT PORTED: upstream's `flush.model`
+//   Upstream's flush can name its own model. mem-plus reads one model for every
+//   hosted turn -- `model.hostedModel`, which the flush already runs on through
+//   `captureDeps` -- so a second key would be a second name for one setting. It
+//   was read here and then never consumed (`FlushConfig.hostedModel` had zero
+//   use sites), which made the settings page offer two identical pickers. The
+//   key stays accepted-and-ignored so an existing `config.jsonc` still parses,
+//   but nothing reads it.
 //
 // NOT PORTED: `forceFlushTranscriptBytes`
 //   Upstream's second trigger is the transcript's own size (2 MB default), read at
@@ -40,7 +68,6 @@
 import { buildCaptureSystemPrompt } from "../../extensions/memory-core/src/capture/extract.js";
 import { detectCaptureLanguage, getCaptureLanguageName } from "../../extensions/memory-core/src/capture/language.js";
 import { SILENT_REPLY_TOKEN } from "../../src/auto-reply/tokens.js";
-import type { HostedModelRef } from "./model/config.js";
 
 /**
  * The occupancy that opens the gate: openclaw's `MAX_COMPACTION_RESERVE_RATIO` is
@@ -51,15 +78,15 @@ import type { HostedModelRef } from "./model/config.js";
 const DEFAULT_CONTEXT_RATIO = 0.75;
 
 export type FlushConfig = {
-  /** `flush.enabled: false` turns the flush off; nothing else changes. */
-  readonly enabled: boolean;
   /**
    * Context occupancy that triggers a flush, as a fraction of the model's window.
    * Upstream's effective 0.75, stated directly.
    */
   readonly contextRatio: number;
-  /** Which model answers the flush turn; unset = the session's own model. */
-  readonly hostedModel?: HostedModelRef;
+  // Upstream's `flush.model` is deliberately absent: the flush turn runs on
+  // `model.hostedModel` like every other hosted turn. See the file header.
+  // Upstream's `flush.enabled` is deliberately absent too: pre-compaction flush is
+  // always on. See the file header.
 };
 
 export function readFlushConfig(options: unknown): FlushConfig {
@@ -77,20 +104,8 @@ export function readFlushConfig(options: unknown): FlushConfig {
       : DEFAULT_CONTEXT_RATIO;
 
   return {
-    enabled: nested["enabled"] !== false,
     contextRatio,
-    ...readHostedModel(nested["model"]),
   };
-}
-
-function readHostedModel(value: unknown): { hostedModel?: HostedModelRef } {
-  if (typeof value !== "string") return {};
-  const trimmed = value.trim();
-  // Split on the first slash only: model ids carry slashes themselves
-  // (`openrouter/anthropic/claude-sonnet-4`).
-  const slash = trimmed.indexOf("/");
-  if (slash <= 0 || slash === trimmed.length - 1) return {};
-  return { hostedModel: { providerID: trimmed.slice(0, slash), id: trimmed.slice(slash + 1) } };
 }
 
 /**

@@ -1,6 +1,6 @@
 {
   "name": "mem-plus",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "type": "module",
   "description": "OpenCode plugin giving coding agents persistent local memory.",
   "license": "MIT",
@@ -10,9 +10,6 @@
   },
   "opencode": {
     "type": "plugin"
-  },
-  "optionalDependencies": {
-    "node-llama-cpp": "^3.22.1"
   },
   "scripts": {
     "postinstall": "node plugin/scripts/link-openclaw-alias.mjs",
@@ -746,6 +743,7 @@
     "src/agents/workspace-access.ts",
     "src/agents/workspace-attachment-preparer.ts",
     "src/agents/workspace-bootstrap-policy.ts",
+    "src/agents/workspace-bootstrap-read.ts",
     "src/agents/workspace-default-path.ts",
     "src/agents/workspace-default.ts",
     "src/agents/workspace-dirs.ts",
@@ -1504,6 +1502,7 @@
     "src/infra/kysely-sync-cache-state.ts",
     "src/infra/kysely-sync.ts",
     "src/infra/legacy-acp-migration-source.ts",
+    "src/infra/lru-cache.ts",
     "src/infra/map-size.ts",
     "src/infra/mutation-authority.ts",
     "src/infra/native-error-response-schema.ts",

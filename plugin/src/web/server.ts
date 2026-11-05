@@ -17,9 +17,9 @@
 //   either way, so one server is enough and the log says where it is.
 //
 // NOT THE INFERENCE SERVICE
-//   That one is a separate Node process (`serve/server.mjs`) because
-//   node-llama-cpp cannot load inside OpenCode's runtime. This one has no native
-//   dependency, so it runs in-process.
+//   That one spawns the official llama.cpp `llama-server` binary
+//   (`serve/server.mjs`); a native binary cannot run inside this process. This one
+//   has no native dependency, so it runs in-process.
 //
 // ACCESS CONTROL (ported from opencode-mem)
 //   Two independent layers, both in this file's request path:
@@ -43,8 +43,18 @@ import {
   handleModelList,
   handlePluginConfig,
   handlePromptFiles,
+  handleRuntimeStatus,
   saveSettings,
   reindexMemory,
+  repairVectors,
+  downloadRuntime,
+  restartRuntime,
+  selectRuntimeVariant,
+  checkRuntimeUpdates,
+  setAutoPrepareRuntime,
+  prepareRuntimeVariant,
+  releaseRuntimeVariant,
+  listRuntimeFilesApi,
   savePromptFile,
   forgetMemory,
   type MemoryApiDeps,
@@ -314,7 +324,112 @@ export async function startWebServer(
           }
         );
       }
-      // Writes are confined to four routes; everything else here is a read.
+      // Writes are confined to twelve routes; everything else here is a read.
+      if (pathname === "/api/runtime/download" && request.method === "POST") {
+        try {
+          const body = (await request.json().catch(() => ({}))) as { force?: unknown };
+          return await downloadRuntime({ runtime: api.runtime, force: body.force === true, log });
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error);
+          log("api POST /api/runtime/download failed", detail);
+          return new Response(JSON.stringify({ success: false, error: detail }), {
+            status: 500,
+            headers: { "content-type": "application/json; charset=utf-8" },
+          });
+        }
+      }
+      if (pathname === "/api/runtime/restart" && request.method === "POST") {
+        try {
+          return await restartRuntime({ runtime: api.runtime, log });
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error);
+          log("api POST /api/runtime/restart failed", detail);
+          return new Response(JSON.stringify({ success: false, error: detail }), {
+            status: 500,
+            headers: { "content-type": "application/json; charset=utf-8" },
+          });
+        }
+      }
+      if (pathname === "/api/repair" && request.method === "POST") {
+        try {
+          return await repairVectors({ runtime: api.runtime, log });
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error);
+          log("api POST /api/repair failed", detail);
+          return new Response(JSON.stringify({ success: false, error: detail }), {
+            status: 500,
+            headers: { "content-type": "application/json; charset=utf-8" },
+          });
+        }
+      }
+      if (pathname === "/api/runtime/select" && request.method === "POST") {
+        try {
+          const body = await request.json().catch(() => ({}));
+          // 成功路径的日志在 selectRuntimeVariant 内（带重启结果）；校验失败
+          // 的 400/409 与写配置失败由响应本身承载，不另记。
+          return await selectRuntimeVariant(api, body, log);
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error);
+          log("api POST /api/runtime/select failed", detail);
+          return new Response(JSON.stringify({ success: false, error: detail }), {
+            status: 500,
+            headers: { "content-type": "application/json; charset=utf-8" },
+          });
+        }
+      }
+      if (pathname === "/api/runtime/auto-prepare" && request.method === "POST") {
+        try {
+          const body = await request.json().catch(() => ({}));
+          const response = setAutoPrepareRuntime(body);
+          if (response.ok) log("api POST /api/runtime/auto-prepare: ok");
+          return response;
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error);
+          log("api POST /api/runtime/auto-prepare failed", detail);
+          return new Response(JSON.stringify({ success: false, error: detail }), {
+            status: 500,
+            headers: { "content-type": "application/json; charset=utf-8" },
+          });
+        }
+      }
+      if (pathname === "/api/runtime/updates" && request.method === "POST") {
+        try {
+          return await checkRuntimeUpdates();
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error);
+          log("api POST /api/runtime/updates failed", detail);
+          return new Response(JSON.stringify({ success: false, error: detail }), {
+            status: 500,
+            headers: { "content-type": "application/json; charset=utf-8" },
+          });
+        }
+      }
+      if (pathname === "/api/runtime/prepare" && request.method === "POST") {
+        try {
+          const body = await request.json().catch(() => ({}));
+          return await prepareRuntimeVariant(api, body, log);
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error);
+          log("api POST /api/runtime/prepare failed", detail);
+          return new Response(JSON.stringify({ success: false, error: detail }), {
+            status: 500,
+            headers: { "content-type": "application/json; charset=utf-8" },
+          });
+        }
+      }
+      if (pathname === "/api/runtime/release" && request.method === "POST") {
+        try {
+          const body = await request.json().catch(() => ({}));
+          return await releaseRuntimeVariant(api, body, log);
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error);
+          log("api POST /api/runtime/release failed", detail);
+          return new Response(JSON.stringify({ success: false, error: detail }), {
+            status: 500,
+            headers: { "content-type": "application/json; charset=utf-8" },
+          });
+        }
+      }
       if (pathname === "/api/forget" && request.method === "POST") {
         try {
           const body = await request.json().catch(() => ({}));
@@ -403,6 +518,8 @@ export async function startWebServer(
         if (pathname === "/api/config") return handlePluginConfig();
         if (pathname === "/api/model-files") return handleModelFiles();
         if (pathname === "/api/models") return handleModelList(api.listModels);
+        if (pathname === "/api/runtime") return await handleRuntimeStatus(api);
+        if (pathname === "/api/runtime/files") return listRuntimeFilesApi(api, request.url);
         const routed = await handleMemoryApi(request, { ...api, authEnabled: auth.isEnabled() });
         if (routed) return routed;
       } catch (error) {

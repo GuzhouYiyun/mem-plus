@@ -1,5 +1,5 @@
 import type { MouseEvent } from "react";
-import { FileCog, FileJson, FileText, Moon, Sparkles, Sun, X } from "lucide-react";
+import { Cpu, FileCog, FileJson, FileText, Moon, Sparkles, Sun, X } from "lucide-react";
 import { GithubIcon } from "$lib/components/icons/GithubIcon";
 import { Button } from "$lib/components/ui/button";
 import { Separator } from "$lib/components/ui/separator";
@@ -15,6 +15,7 @@ type Props = {
   configLabel: string;
   configFileLabel: string;
   dreamsLabel: string;
+  runtimeLabel: string;
   themeLabel: string;
   closeLabel: string;
   onOpenChange?: (open: boolean) => void;
@@ -28,6 +29,7 @@ export function AppSidebar({
   configLabel,
   configFileLabel,
   dreamsLabel,
+  runtimeLabel,
   themeLabel,
   closeLabel,
   onOpenChange,
@@ -145,6 +147,18 @@ export function AppSidebar({
           >
             <FileCog className="size-4 shrink-0" />
             <span className="truncate text-start">{configLabel}</span>
+          </a>
+          {/* Last, and deliberately after 设置: 运行时 is where you go when
+              something is wrong (runtime missing, service down, stale vectors),
+              not a place most visits need. */}
+          <a
+            href={ROUTES.runtime}
+            className={navClass(currentView === "runtime")}
+            aria-current={currentView === "runtime" ? "page" : undefined}
+            onClick={(e) => onNavClick(e, ROUTES.runtime)}
+          >
+            <Cpu className="size-4 shrink-0" />
+            <span className="truncate text-start">{runtimeLabel}</span>
           </a>
         </nav>
 
