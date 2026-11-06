@@ -62,6 +62,13 @@ TODO.md
 
 VERIFY.md
 
+# All internal working documents -- the memory-chain physiology record, the
+# port ledger (port-plan), the companion plan, benchmarks, papers. Owner's
+# decision 2026-11-07: these live on this machine only, never committed, never
+# shipped. The code and its comments remain the record of behaviour; a fresh
+# clone carries no docs, so read them here, not on GitHub.
+/docs/
+
 # Windows installer build output. The payload dir holds the unpacked tarball that gets
 # embedded (~2550 files), dist holds the installer; build.ps1 regenerates both.
 # version.nsh and nsis-paths.nsh are written by the build (the version lives in
