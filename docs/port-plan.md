@@ -3737,3 +3737,49 @@ read-modify-append,唯一的防线是写前的 marker 检查,而 marker 检查�
 - 三道门里 `serviceUp` 是唯一碰外部的,所以它被放在最后:零缺失时一次 COUNT
   就返回,服务不在跑时只留一行日志——兜底扫描永远不该是"顺手把 4 GB 模型拉起来"
   的那个动作。
+
+## Phase 1 信任修复（2026-11-07）
+
+D1 flush race：`withMemoryFileLock` 已在 capture 与 flush 两条写路径落锁（`capture-deps.ts:197`、`flush-run.ts:299`），fail-closed，per-file sidecar。状态：**已修**。
+
+D2 provenance ratchet：`recordMemoryArtifactWriteProvenance` 在 requested `agent` 但落 `untrusted` 时写日志（`provenance downgraded to untrusted: <path> (<reason>)`）。reason 区分：无先验记录 / 先验已 untrusted / 内容自上次 agent 写后变化。状态：**已修（可见性 + USER.md owner 默认）**。DIVERGENCE：上游静默降级，本仓改为显式日志；`USER.md` 无 provenance 记录时默认 `owner`，stale provenance 在扫描时归为 `owner`，agent 写入仍走棘轮降级，保护 owner 偏好字段不被 agent 认领。
+
+D4 retention：`pruneIndexRetention(db, maxChunks, memoryHome)` 在 reconciler pass 中执行，上限 50 000 chunks，按 importance 再 mtime 淘汰 episodic daily sources，源文件移入 `memory/archive/`（不删），curated/wiki/高价值近期源永不淘汰。DIVERGENCE：上游无淘汰策略 (#114612)。状态：**已修（归档淘汰）**。
+
+D3 verbatim promotion：dreaming deep 提升路径（short-term-promotion-apply.ts append fallback 与 dreaming-consolidation.ts consolidation resultEntry）改为通过 completeThroughHost 合成简洁 durable 条目，失败/超时/无模型时回退到逐字复制。DIVERGENCE：上游 deep phase 原样复制 daily 行 (#67363)，本仓改为 LLM 合成；分数仍决定进不进，LLM 只决定怎么写，且来源引用与 provenance 元数据保留。
+
+D3 验证与设计：consolidation 直驱探针通过（合成成功、坏 JSON 时逐字回退），未调用 OpenCode CLI。Phase 2 自生成 rehearsal 落地为 DREAMS.md 的 managed block：rank candidates -> LLM 生成 QA 自评 -> 仅高相关 QA 进入人类审阅层。DIVERGENCE：新增 Review tier 内容，不进入 MEMORY.md/USER.md 精选层；LLM 失败只写日志，不阻断 dreaming/promotion。
+
+## Phase 2 收尾：语义 reward 与验收（2026-11-07）
+
+结果：语义 reward 落地为 promotion 的否决层（plugin/src/semantic-reward.ts，接在
+runPromotionRound 的 rank 与 apply 之间）。直驱探针三路通过：0.1 相关度被否决
+（vetoed=1, keep=[a]）、坏 JSON 全保留（skipped, reason=no parseable relevance
+scores）、模型抛错全保留（skipped, reason=boom），未调用 OpenCode CLI。终态门禁：
+plugin gate 4240 错（owned 0）、capture gate 331 错（owned 0）、audit --check no
+drift。L2 启发式 ingest 现状核实：daily-notes 源（ingestDailyMemorySignals，sha1
+指纹去重+长度过滤，固定分 0.62）已随 light/REM sweep 每次跑，零模型；
+session-transcript 源需要 OpenClawConfig 的 agent 名册，mem-plus 无此物，
+collectSessionIngestionBatches 短路返回空——设计如此，不是缺陷。
+
+经验一：findstr 的 "a\\|b" 不是正则或——默认字面匹配，整串当一个词。用它过滤 tsc
+输出得到的「0 错误」是假绿，与 AGENTS「绿色检查没走失败路径」同族。正确姿势：tsc
+全输出落文件，按行首路径分组计数 owned（plugin/、extensions/、bootstrap）必须 0，
+总数对照基线。
+
+经验二：D3 编辑曾误删 short-term-promotion-apply.ts 的
+buildBudgetedMemoryAppend import，调用点还在 append fallback 里。tsc 本可当场抓住，
+但被经验一的假绿放过；兜住它的是 audit-npm-pack --check——closure 从 import 图算，
+import 断则 memory-budget-append.ts 掉出 closure，表现为 files 清单意外「多出文件」。
+audit 意外报 extra 时先怀疑源码 import 断，这次它比过滤器可靠。探针只覆盖了
+consolidation 主路径、没覆盖改动所在的 fallback 分支，是这条错能活一整天的直接原因
+——探针按分支配，不按文件配。
+
+设计理念（语义 reward 为什么是「否决层」而不是「选择层」）：memory-chain §3 的铁律
+是分数决定进不进、模型只决定怎么写；上游任何地方都没有模型驱动的保留。Sleep 论文的
+semantic reward 方向是「留任务相关的，不留只是共现的」。转接件形态：确定性门照旧选
+人，模型只能把人再往后推一轮——否决不等于删除，被推的候选留在短期库，下轮 rank 还能
+回来；未答复的 key 不算否决；模型缺席或失败时整轮 fail-open，行为精确回到 Phase 1。
+这样 companion 强模型增益可叠加，弱模型路径一行没变（companion-plan §5 决定 2）。
+阈值 0.5 取量程中点，超过 16 个候选不计分直接保留（promotion 轮 limit 常态 ≤16，
+这条只为最坏情况兜底）。DIVERGENCE：additive，上游无对应物。

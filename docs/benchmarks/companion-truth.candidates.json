@@ -1,0 +1,282 @@
+[
+  {
+    "query": "用户要求登记大模型评估的大致思路，并启动P0优先级的任务。",
+    "expected": [
+      "memory/mem-plus--83e5df/2026-11-07.md"
+    ],
+    "kind": "auto-candidate"
+  },
+  {
+    "query": "分析WS63固件在MQTT连接时因堆内存不足导致mbedtls SSL初始化失败的问题，并同步更新答辩PPT与DOCX中关于华为云IoTDA接入状态的描述。",
+    "expected": [
+      "memory/harmony_oldman--6973dd/2026-11-07.md"
+    ],
+    "kind": "auto-candidate"
+  },
+  {
+    "query": "配置 OpenHarmony 设备的 IoT 属性并验证 MQTT 上行链路，同时初始化 AGC Push Kit。",
+    "expected": [
+      "memory/harmony_oldman--6973dd/2026-11-06.md"
+    ],
+    "kind": "auto-candidate"
+  },
+  {
+    "query": "Guided the user on how to launch the HarmonyOS emulator in DevEco Studio to proceed with device connection and signing v",
+    "expected": [
+      "memory/harmony_oldman--6973dd/2026-11-06.md"
+    ],
+    "kind": "auto-candidate"
+  },
+  {
+    "query": "统一 HarmonyOS 项目包名为 `com.homeguard.guard`，清理旧包名缓存并完成 AGC 推送服务签名指纹配置。",
+    "expected": [
+      "memory/harmony_oldman--6973dd/2026-11-06.md"
+    ],
+    "kind": "auto-candidate"
+  },
+  {
+    "query": "User inquired about the progress of the previous task, prompting a status update on debugging a custom SHA-256 implement",
+    "expected": [
+      "memory/harmony_oldman--6973dd/2026-11-06.md"
+    ],
+    "kind": "auto-candidate"
+  },
+  {
+    "query": "执行预压缩内存刷新，将当前会话中关于鸿蒙端（HarmonyOS）MQTT 客户端开发与 HMAC-SHA256 加密实现的关键技术决策和工作状态记录到持久化存储中。",
+    "expected": [
+      "memory/harmony_oldman--6973dd/2026-11-06.md"
+    ],
+    "kind": "auto-candidate"
+  },
+  {
+    "query": "在设备烧录完成后，协助检查云端侧设备的上线状态及数据上报情况。",
+    "expected": [
+      "memory/harmony_oldman--6973dd/2026-11-06.md"
+    ],
+    "kind": "auto-candidate"
+  },
+  {
+    "query": "修复板端 MQTT 连接失败（`create 失败 rc=-4`）的问题，并确认 Paho 组件的 TLS 支持及固件构建。",
+    "expected": [
+      "memory/harmony_oldman--6973dd/2026-11-06.md"
+    ],
+    "kind": "auto-candidate"
+  },
+  {
+    "query": "排查 WS63 开发板串口日志中间歇性蜂鸣声及频繁重启的根因，并分析 MQTT 连接失败 rc=-4 的潜在内存不足问题。",
+    "expected": [
+      "memory/harmony_oldman--6973dd/2026-11-06.md"
+    ],
+    "kind": "auto-candidate"
+  },
+  {
+    "query": "编译新固件以诊断 WS63 开发板 MQTT 连接失败问题，并生成包含 TCP 探针功能的固件包及串口抓取脚本。",
+    "expected": [
+      "memory/harmony_oldman--6973dd/2026-11-06.md"
+    ],
+    "kind": "auto-candidate"
+  },
+  {
+    "query": "诊断 WS63 开发板每 72 秒重启并伴随“滴”声的问题，排查 SLE 扫描僵死导致的重启死循环，并修复配网态下的错误重启逻辑。",
+    "expected": [
+      "memory/harmony_oldman--6973dd/2026-11-06.md"
+    ],
+    "kind": "auto-candidate"
+  },
+  {
+    "query": "更新 WS63 固件的 mux 池泄漏诊断打点，并明确烧录及启动日志捕获流程。",
+    "expected": [
+      "memory/harmony_oldman--6973dd/2026-11-06.md"
+    ],
+    "kind": "auto-candidate"
+  },
+  {
+    "query": "诊断 WS63 设备 MQTT TLS 连接失败及堆内存不足问题，并修正答辩 PPT/DOCX 文档技术内容。",
+    "expected": [
+      "memory/harmony_oldman--6973dd/2026-11-06.md"
+    ],
+    "kind": "auto-candidate"
+  },
+  {
+    "query": "验证 WS63 新固件烧录后的 MQTT TLS 连接问题，并继续修正答辩 PPT/DOCX 中「华为云 IoTDA」相关技术表述与敏感信息。",
+    "expected": [
+      "memory/harmony_oldman--6973dd/2026-11-06.md"
+    ],
+    "kind": "auto-candidate"
+  },
+  {
+    "query": "请求修改标题行的显示内容，使其由代码逻辑中的 'lm' 显示为对应的中文文案，并修复测试中发现的相关显示问题。",
+    "expected": [
+      "memory/mem-plus--83e5df/2026-11-06.md"
+    ],
+    "kind": "auto-candidate"
+  },
+  {
+    "query": "排查运行时版本不一致导致的 UI 黄色提示条（tagPending）及并发下载失败问题。",
+    "expected": [
+      "memory/mem-plus--83e5df/2026-11-06.md"
+    ],
+    "kind": "auto-candidate"
+  },
+  {
+    "query": "修复运行时版本对齐逻辑中的黄条误报问题，并解决多工作区并发下载时的 `.part` 文件互踩异常。",
+    "expected": [
+      "memory/mem-plus--83e5df/2026-11-06.md"
+    ],
+    "kind": "auto-candidate"
+  },
+  {
+    "query": "改进 OpenCode 配置持久化逻辑及 Web 端 UI 交互，实现重启提示的跨会话持久化并优化目录选择体验。",
+    "expected": [
+      "memory/mem-plus--83e5df/2026-11-06.md"
+    ],
+    "kind": "auto-candidate"
+  },
+  {
+    "query": "重构运行时引擎切换逻辑并实现方案 B，确保切换配置时不无脑拉起服务；同时分析 mem-plus 与 openclaw 在嵌入触发时机和去抖机制上的差异。",
+    "expected": [
+      "memory/mem-plus--83e5df/2026-11-06.md"
+    ],
+    "kind": "auto-candidate"
+  },
+  {
+    "query": "实现 mem-plus 的 5 分钟索引恢复扫描（兜底 reconciler），以覆盖手动编辑文件未触发的嵌入与索引同步场景。",
+    "expected": [
+      "memory/mem-plus--83e5df/2026-11-06.md"
+    ],
+    "kind": "auto-candidate"
+  },
+  {
+    "query": "分析 OpenClaw 及竞品的人格记忆架构，并规划 mem-plus 项目中 `USER.md` 自动更新机制。",
+    "expected": [
+      "memory/mem-plus--83e5df/2026-11-06.md"
+    ],
+    "kind": "auto-candidate"
+  },
+  {
+    "query": "针对主控 SLE 模块运行 48 分钟后的自发僵死故障（扫描失效、连接超时循环）以及门磁状态刷新延迟问题进行修复与性能优化。",
+    "expected": [
+      "memory/harmony_oldman--6973dd/2026-11-05.md"
+    ],
+    "kind": "auto-candidate"
+  },
+  {
+    "query": "针对主控 SLE 模块自发僵死（扫描失效、连接超时循环）及门磁/按键延迟问题进行修复与性能优化，并完成相关功能闭环。",
+    "expected": [
+      "memory/harmony_oldman--6973dd/2026-11-05.md"
+    ],
+    "kind": "auto-candidate"
+  },
+  {
+    "query": "修复鸿蒙App端因板端重启导致`seq`游标失效而丢弃实时帧的问题，并优化门磁状态上屏延迟。",
+    "expected": [
+      "memory/harmony_oldman--6973dd/2026-11-05.md"
+    ],
+    "kind": "auto-candidate"
+  },
+  {
+    "query": "为独居老人居家安全监测与应急辅助系统项目生成答辩PPT（15页）及对应的详细演讲逐字稿文档。",
+    "expected": [
+      "memory/harmony_oldman--6973dd/2026-11-05.md"
+    ],
+    "kind": "auto-candidate"
+  },
+  {
+    "query": "针对比赛演示场景，确认华为云（IoTDA）部署架构及板端与云端的数据传输链路，并制定“网关中继上云”的技术实施方案。",
+    "expected": [
+      "memory/harmony_oldman--6973dd/2026-11-05.md"
+    ],
+    "kind": "auto-candidate"
+  },
+  {
+    "query": "制定华为云 IoTDA 接入方案，设计板端 MQTT 直连云端及 App 云数据读取/推送的完整技术链路。",
+    "expected": [
+      "memory/harmony_oldman--6973dd/2026-11-05.md"
+    ],
+    "kind": "auto-candidate"
+  },
+  {
+    "query": "重构 Runtime 页面交互与逻辑，移除更新通道下拉菜单以实现自动跟随最新策略，并移除页面底部冗余状态展示区。",
+    "expected": [
+      "memory/mem-plus--83e5df/2026-11-05.md"
+    ],
+    "kind": "auto-candidate"
+  },
+  {
+    "query": "记录关于运行时引擎切换、向量重嵌入性能及安装冒烟测试的技术细节与决策。",
+    "expected": [
+      "memory/mem-plus--83e5df/2026-11-05.md"
+    ],
+    "kind": "auto-candidate"
+  },
+  {
+    "query": "记录向量嵌入一致性验证、行身份去标识化重构及 CPU 推理链路落地的技术细节。",
+    "expected": [
+      "memory/mem-plus--83e5df/2026-11-05.md"
+    ],
+    "kind": "auto-candidate"
+  },
+  {
+    "query": "执行预压缩记忆刷新，将本轮会话中完成的 CPU 推理支持、向量嵌入身份重构及界面中文化等关键技术变更持久化存储至 memory/2026-11-05.md。",
+    "expected": [
+      "memory/mem-plus--83e5df/2026-11-05.md"
+    ],
+    "kind": "auto-candidate"
+  },
+  {
+    "query": "执行预压缩记忆刷新，记录 CPU E2E/API 测试通过结果、运行时扩展行身份重构（Harmony/Office 行移除 b12121 标签）、删除「未测」徽章、清理逻辑升级为全标签删除及去除重复选中态徽章等技术变更。",
+    "expected": [
+      "memory/mem-plus--83e5df/2026-11-05.md"
+    ],
+    "kind": "auto-candidate"
+  },
+  {
+    "query": "确认LM简中包无「删除已下载文件」文案及菜单项语义，并验证harmony/office运行时残留清理彻底性。",
+    "expected": [
+      "memory/mem-plus--83e5df/2026-11-05.md"
+    ],
+    "kind": "auto-candidate"
+  },
+  {
+    "query": "Implement and verify new runtime file management features including configuration, client API, and UI components, follow",
+    "expected": [
+      "memory/mem-plus--83e5df/2026-11-05.md"
+    ],
+    "kind": "auto-candidate"
+  },
+  {
+    "query": "诊断并修复 `server.mjs` 中因端口竞争导致的 `llama-server` 重复实例化问题，以及快照重新索引后向量缺失未自动嵌入的性能缺陷。",
+    "expected": [
+      "memory/mem-plus--83e5df/2026-11-05.md"
+    ],
+    "kind": "auto-candidate"
+  },
+  {
+    "query": "分析运行时版本管理策略，对比 LM Studio 的 LRU 清理机制，明确 nightly zip 的目录隔离、校验锚点及旧版本清理逻辑。",
+    "expected": [
+      "memory/mem-plus--83e5df/2026-11-05.md"
+    ],
+    "kind": "auto-candidate"
+  },
+  {
+    "query": "修复运行时版本状态误报为「未安装」的 bug，并实现基于 LRU 的旧版本与 zip 清理机制，对齐 LM Studio 状态语义。",
+    "expected": [
+      "memory/mem-plus--83e5df/2026-11-05.md"
+    ],
+    "kind": "auto-candidate"
+  },
+  {
+    "query": "用户要求修正UI组件与LM Studio的展示逻辑以符合预期设计，具体包括保留“LM”未适配时的下载按钮、修改底部抽屉为从上方展开、将版本号标识改为中文，并删除冗余图标同时缩短标签并调整更新按钮位置。",
+    "expected": [
+      "memory/mem-plus--83e5df/2026-11-05.md"
+    ],
+    "kind": "auto-candidate"
+  },
+  {
+    "query": "The user requested to add a configuration entry (likely a server path or setting) to the OpenCode configuration file.",
+    "expected": [
+      "memory/21991--712362/2026-11-04.md"
+    ],
+    "kind": "auto-candidate"
+  }
+]

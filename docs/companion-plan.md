@@ -147,11 +147,13 @@ dreaming 承担 70–78% 的事实学习增益。→ **梦不是装饰，是主�
 
 ## 5. 开放问题（需机主决定）
 
-1. Phase 范围：先 1+2，还是 1–4 一并？
-2. 陪伴者模式是否要求强模型（hostedModel）？弱模型下回退到复制，体验差异大。
-3. 是否把 `USER.md` 偏好抽取做成默认开（上游 `flush.enabled` 默认开，本仓已不可关）？
-4. 评估基准由机主手标，还是先用合成数据？
-5. Phase 1 的 D1/D2/D4 修法是否接受作为 DIVERGENCE 记入 port-plan？
+1. Phase 范围：先 1+2，Phase 3/4 视机主 2 周使用反馈决定。
+2. 陪伴者模式要求 `model.hostedModel` 指向强模型；弱模型下 dreaming 回退到复制（D3 回退）。
+3. `USER.md` 偏好抽取默认开，不可关（与 flush 一致）。
+4. 评估基准先由机主手标（当前 25 条），后续再扩。
+5. D1/D2/D4 的修法接受为 DIVERGENCE，记入 `port-plan.md`。
+
+（2026-11-07：以上五问已答，作为 Phase 1 实施前提。）
 
 ## 6. 与现有规则的对齐
 
@@ -159,6 +161,66 @@ dreaming 承担 70–78% 的事实学习增益。→ **梦不是装饰，是主�
 - 每个新行为 cites `docs/memory-chain.md` 对应 §（AGENTS.md §"The memory chain" 第 1 条）。
 - 不静默修缺陷（第 3 条）：D1–D4 的修复在 port-plan 中明确标为 DIVERGENCE + 原因。
 - 代码注释写明对应 openclaw 段落与移植后差异（AGENTS.md 总目标）。
+
+## 7. 文件分工（机主 2026-11-06 定）
+
+四文件，全部沿用 openclaw 默认注入名单，零代码改动（`bootstrap-context.ts:43`
+`BOOTSTRAP_FILENAMES` 原样）。**经验并入 `MEMORY.md`**，不新开 `LESSONS.md`：
+教训本来就是 durable fact，dreaming 已经往 `MEMORY.md` 提升，代价是「吃过什么亏」
+与「发生过什么」同住一个文件，接受。
+
+| 文件 | 装什么 | 谁写 | 注入 |
+|---|---|---|---|
+| `SOUL.md` | 人设：性格、身份、边界 | **只有人** | 每轮 |
+| `USER.md` | 用户形象：模型认为的你（称呼、偏好、背景、习惯） | capture 抽取 + 人可改 | 每轮 |
+| `AGENTS.md` | 工作规则、代码约定 | **只有人** | 每轮 |
+| `MEMORY.md` | 事实、决策、open loops、**经验/教训** | dreaming 提升 + agent 追加 | 每轮 |
+
+分工一句话：`SOUL` 管它是谁，`AGENTS` 管怎么干活，`USER` 管它认为你是谁，
+`MEMORY` 管发生过什么、吃过什么亏。
+
+设计取舍（为什么不拆）：
+
+- **`IDENTITY.md` 并入 `SOUL.md`**：名字/vibe/emoji 就是人设的一部分，两文件分开放
+  只会让人设写一半。
+- **`BOOTSTRAP.md` 不用**：onboarding 用完即弃，拿它装经验名字对不上内容。
+- **不新开 `LESSONS.md`**：加一行 `BOOTSTRAP_FILENAMES` 只省 4 行代码，却要从
+  `60_000` 总预算里再切一份、多一个文件要人管。机主 2026-11-06 判断「默认会被
+  注入的够用」，成立。
+- **`DREAMS.md` 仍不注入**（`memory-path-provenance.ts:15` 分类为 `system`）：
+  dreaming 产出直接写进 `MEMORY.md`，`DREAMS.md` 降级为 dreaming 的中间草稿。
+- **`daily/` 不参与分工**：内部存储，只 on recall。
+
+所有权红线：
+
+1. `SOUL.md`、`AGENTS.md` 人专属，agent 只能建议修改，不能自动改。
+2. `USER.md`、`MEMORY.md` agent 可写，但 `USER.md` 每条带 provenance
+   （`memory-chain.md` §Lane 1a：只有 `owner` 和 `agent` 过自动注入门）。
+3. `USER.md` 偏好变更走 supersede，不删历史。
+
+## 8. 覆盖策略：取长补短（机主 2026-11-07 定）
+
+**目标**：mem-plus 的 LLM 抽取质量高但触发窄；openclaw 的触发宽但启发式浅。
+取两者优点，不二选一。
+
+| 层 | 来源 | 作用 | 状态 |
+|---|---|---|---|
+| L1 LLM 抽取 | mem-plus capture | 高质量结构化条目（summary/type/tags） | 已有，主路径 |
+| L2 启发式 ingest | openclaw dreaming ingest | LLM 失败/超时的兜底：sha1 去重 + 长度过滤，无模型 | **已有**：daily-notes 源随 light/REM sweep 每次跑（`ingestDailyMemorySignals`，固定分 0.62）；session-transcript 源需要 OpenClawConfig agent 名册，本仓不适用（2026-11-07 核实） |
+| L3 会话结束 hook | openclaw session-memory | `/new`/`/reset`/auto-reset 时写最后 N 条消息到 daily | **待加**（Phase 3） |
+| L4 周期 reconciler | mem-plus index-reconcile | 5 分钟扫 home/wiki，mtime/bytes 跳过未变；手动编辑兜底 | 已有 |
+
+规则：
+- L1 成功 → 跳过 L2（同 turn 不重复写）。
+- L1 失败 → L2 落一条降级条目（标记 `provenance: untrusted`，不进 curated）。
+- L3/L4 只写 episodic，不直接写 curated（遵守 §4 提升门）。
+- 覆盖率度量进 Phase 0 基准：触发率、成功率、漏掉的会话数。
+
+优化（避免过重）：
+- L2/L3 零模型：sha1 去重 + 长度过滤 + 原始尾部追加；每 sweep 上限 240 msg / 80 per file（openclaw 常量）。
+- L2/L3 只在 L1 漏掉时跑（session 结束无 capture、或 L1 failed/exhausted）。
+- L4 reconciler 已有 mtime/bytes 跳过，不动。
+- 门控失败时降级条目标 `provenance: untrusted`，不进 curated 层。
 
 ---
 *规划稿，待机主审阅。确认后按 Phase 顺序落地，每 Phase 一个 commit（中文主体式，格式照 openclaw 上游）。*

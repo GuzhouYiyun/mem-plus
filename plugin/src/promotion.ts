@@ -14,6 +14,11 @@
 //   `readPromotionConfig`; only the defaults live in openclaw.
 import { applyShortTermPromotions } from "../../extensions/memory-core/src/short-term-promotion-apply.js";
 import { rankShortTermPromotionCandidates } from "../../extensions/memory-core/src/short-term-promotion.js";
+
+/** A ranked candidate, as both the gate below and `applyShortTermPromotions` consume it. */
+export type RankedPromotionCandidate = Awaited<
+  ReturnType<typeof rankShortTermPromotionCandidates>
+>[number];
 import { recordShortTermRecalls } from "../../extensions/memory-core/src/short-term-promotion-record.js";
 import type { DreamingCompletion } from "../../extensions/memory-core/src/dreaming-narrative.js";
 import type { MemorySearchResult } from "../../packages/memory-host-sdk/src/host/types.js";
@@ -40,6 +45,15 @@ export async function runPromotionRound(params: {
   subagent?: DreamingCompletion;
   log: (message: string, detail?: unknown) => void;
   nowMs?: number;
+  /**
+   * Phase 2 semantic-reward veto layer (see `semantic-reward.ts`): receives the ranked
+   * candidates, returns the ones to write. Runs after the deterministic gates, so it
+   * can only delay a candidate, never promote one early. A throwing gate falls back to
+   * the full list -- the gate is not allowed to take the round down.
+   */
+  reward?: (candidates: readonly RankedPromotionCandidate[]) => Promise<
+    readonly RankedPromotionCandidate[]
+  >;
 }): Promise<PromotionRound | null> {
   const config = readPromotionConfig(params.options);
   if (!config.enabled) return null;
@@ -59,13 +73,26 @@ export async function runPromotionRound(params: {
     if (candidates.length === 0) {
       return { candidates: 0, applied: 0, rejected: 0 };
     }
+    let toApply: readonly RankedPromotionCandidate[] = candidates;
+    if (params.reward) {
+      try {
+        toApply = await params.reward(candidates);
+      } catch (error) {
+        // The reward gate itself must never cost the round its promotions.
+        params.log("promotion: semantic reward gate failed, applying all candidates", error);
+        toApply = candidates;
+      }
+      if (toApply.length === 0) {
+        return { candidates: candidates.length, applied: 0, rejected: 0 };
+      }
+    }
     const applied = await applyShortTermPromotions({
       // Upstream's call site passes both; they scope the promotion to the agent whose
       // workspace the entries came from.
       agentId: "main",
       workspaceAgentIds: ["main"],
       workspaceDir: params.memoryHome,
-      candidates,
+      candidates: [...toApply],
       ...thresholds,
       ...(params.nowMs === undefined ? {} : { nowMs: params.nowMs }),
       consolidation: {

@@ -64,6 +64,8 @@ import { buildStandingIntentTool } from "./standing-intents.js";
 import { installMemoryInjection } from "./recall-inject.js";
 import { recallToolsFor, readDeepRecallConfig } from "./deep-recall.js";
 import { runPromotionRound } from "./promotion.js";
+import { runSelfGeneratedRehearsalRound } from "./rehearsal.js";
+import { applySemanticRewardGate } from "./semantic-reward.js";
 import { resolveOptions } from "./config-file.js";
 import { adoptOpenclawStateDir, dreamingMarker, homeProjectMemoryDir, homeProjectSlug, logFile, memoryHomeDir, stateRoot } from "./paths.js";
 import {
@@ -1257,6 +1259,26 @@ export default Plugin.define({
             `(degradedPhases=${result?.degradedPhases ?? 0}, pendingNarratives=${result?.pendingNarratives ?? 0})`,
         );
 
+        // Self-generated rehearsal is a human-review DREAMS.md pass. It stays
+        // curated-free: QA pairs are never promoted directly into MEMORY.md.
+        const rehearsal = await runSelfGeneratedRehearsalRound({
+          ctx,
+          memoryHome: memoryHomeDir(),
+          ...(modelConfig.hostedModel ? { model: modelConfig.hostedModel } : {}),
+          log,
+          nowMs: now,
+        });
+        if (rehearsal.retained > 0) {
+          log(
+            `dreaming rehearsal: kept ${rehearsal.retained}/${rehearsal.generated} QA pair(s) ` +
+              `from ${rehearsal.candidates} candidate(s)`,
+          );
+        } else if (!rehearsal.skipped) {
+          log("dreaming rehearsal: no retained QA pairs");
+        } else if (rehearsal.candidates > 0 && rehearsal.reason) {
+          log(`dreaming rehearsal skipped: ${rehearsal.reason}`);
+        }
+
         // deep: episodic -> curated. Reached only when the sweep returned, matching
         // upstream's `continue` on sweep failure.
         const promotion = await runPromotionRound({
@@ -1265,6 +1287,27 @@ export default Plugin.define({
           subagent,
           log,
           nowMs: now,
+          // Phase 2 item 3: semantic-reward veto between the deterministic gates and
+          // the write. Fail-open -- without an answering strong model this reduces to
+          // the Phase-1 behaviour exactly (companion-plan §5 decision 2).
+          reward: async (candidates) => {
+            const gated = await applySemanticRewardGate({
+              ctx,
+              ...(modelConfig.hostedModel ? { model: modelConfig.hostedModel } : {}),
+              candidates,
+              log,
+            });
+            if (!gated.outcome.skipped) {
+              log(
+                `promotion: semantic reward kept ${String(gated.keep.length)}/${String(gated.outcome.candidates)} ` +
+                  `candidate(s) (${String(gated.outcome.vetoed)} delayed, ` +
+                  `${String(gated.outcome.scored)} scored)`,
+              );
+            } else if (gated.outcome.candidates > 0 && gated.outcome.reason) {
+              log(`promotion: semantic reward skipped: ${gated.outcome.reason}`);
+            }
+            return gated.keep;
+          },
         });
         if (promotion && promotion.applied > 0) {
           log(
