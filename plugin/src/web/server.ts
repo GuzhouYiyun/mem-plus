@@ -42,6 +42,8 @@ import {
   handleModelFiles,
   handleModelList,
   handlePluginConfig,
+  handleResolvedPaths,
+  handlePickDirectory,
   handlePromptFiles,
   handleRuntimeStatus,
   saveSettings,
@@ -365,8 +367,8 @@ export async function startWebServer(
       if (pathname === "/api/runtime/select" && request.method === "POST") {
         try {
           const body = await request.json().catch(() => ({}));
-          // 成功路径的日志在 selectRuntimeVariant 内（带重启结果）；校验失败
-          // 的 400/409 与写配置失败由响应本身承载，不另记。
+          // 成功路径的日志在 selectRuntimeVariant 内（带重启尝试的结果）；
+          // 校验失败的 400/409 与写配置失败由响应本身承载，不另记。
           return await selectRuntimeVariant(api, body, log);
         } catch (error) {
           const detail = error instanceof Error ? error.message : String(error);
@@ -462,6 +464,18 @@ export async function startWebServer(
           });
         }
       }
+      if (pathname === "/api/pick-directory" && request.method === "POST") {
+        try {
+          return await handlePickDirectory();
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error);
+          log("api POST /api/pick-directory failed", detail);
+          return new Response(JSON.stringify({ success: false, error: detail }), {
+            status: 500,
+            headers: { "content-type": "application/json; charset=utf-8" },
+          });
+        }
+      }
       if (pathname === "/api/config" && request.method === "PUT") {
         try {
           const body = (await request.json().catch(() => ({}))) as {
@@ -516,6 +530,7 @@ export async function startWebServer(
         if (pathname === "/api/prompt-files") return handlePromptFiles(api.workspaceDir);
         if (pathname === "/api/dreams") return handleDreams();
         if (pathname === "/api/config") return handlePluginConfig();
+        if (pathname === "/api/resolved-paths") return await handleResolvedPaths();
         if (pathname === "/api/model-files") return handleModelFiles();
         if (pathname === "/api/models") return handleModelList(api.listModels);
         if (pathname === "/api/runtime") return await handleRuntimeStatus(api);

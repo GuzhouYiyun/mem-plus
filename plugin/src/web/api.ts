@@ -21,11 +21,14 @@ import { spawnSync } from "node:child_process";
 import { open, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { indexDocument, indexStats, missingVectorCount, staleEmbedderModels } from "../memory-index.js";
-import { listRuntimeFiles, readModelConfig, readRuntimeManifest, readServiceConfig, resolveRuntimeFile, runtimeDirPath, runtimeTag, runtimeZipPath } from "../model/config.js";
+import { listRuntimeFiles, readModelConfig, readRuntimeManifest, readServiceConfig, resolveRuntimeFile, runtimeTag, runtimeZipPath, installedRuntimeTag, effectiveRuntimeDirPath } from "../model/config.js";
 import type { RuntimeVariant } from "../model/config.js";
 import type { ServiceHealth } from "../model/client.js";
-import { readPluginConfig, savePluginConfig } from "./config-file.js";
+import { markConfigRestartNeeded, readPluginConfig, savePluginConfig } from "./config-file.js";
+import { readWebConfig } from "./config.js";
+import { readWikiConfig } from "../wiki/config.js";
 import { DREAMS_FILE_NAME, MEMORY_FILE_NAME, memoryHomeDir, projectSlug } from "../paths.js";
 
 export type MemoryApiDeps = {
@@ -119,10 +122,9 @@ export type RuntimeApi = {
   /** One manual `embedder repair` pass; coalesces with an in-flight run. */
   repair(): Promise<RepairOutcome>;
   /**
-   * 生效的变体：本插件 spawn 的真身（活读配置，`spawnedVariant`）；服务没在
-   * 跑时回落到活读配置 = 下次 spawn 会用的值。select 即时生效（2026-11-05）
-   * 后它不再是装载期定死——与 `variantSelected` 不同只发生在重启没完成的
-   * 窗口里（服务被别的实例持有等）。
+   * 生效的变体：服务在跑时是 spawn 真身（活读，`spawnedVariant`）；没在跑时
+   * 回落到活读配置 = 下次 spawn 会用的值。select 只在服务跑着时顺手重启
+   * （2026-11-06），没跑就只落配置——见 `selectRuntimeVariant`。
    */
   activeVariant: RuntimeVariant;
   /**
@@ -474,6 +476,59 @@ export async function handlePluginConfig(): Promise<Response> {
 }
 
 /**
+ * Resolved on-disk locations for the settings whose default is "somewhere the
+ * plugin picks". The form shows these beside the (possibly empty) value so a
+ * blank field no longer reads as "unset" -- it names the folder the plugin will
+ * actually use. Computed here because the defaults live in the plugin process
+ * (model dir, wiki dir, web bundle dir), not in the browser.
+ */
+export async function handleResolvedPaths(): Promise<Response> {
+  const settings = readPluginConfig();
+  const options = settings.options ?? {};
+  const model = readModelConfig(options);
+  const web = readWebConfig(options);
+  const wiki = readWikiConfig(options);
+  const webDir = (() => {
+    if (web.dir && web.dir.trim().length > 0) return web.dir.trim();
+    const here = path.dirname(fileURLToPath(import.meta.url));
+    const candidates = [
+      path.resolve(here, "..", "..", "..", "web", "dist"),
+      path.resolve(here, "..", "..", "..", "..", "web", "dist"),
+    ];
+    for (const candidate of candidates) {
+      if (existsSync(path.join(candidate, "index.html"))) return candidate;
+    }
+    return candidates[0];
+  })();
+  return ok({
+    modelDir: model.modelDir,
+    webDir,
+    wikiDir: wiki.dir,
+  });
+}
+
+/**
+ * Open a native Windows folder picker and return the chosen path (or an empty
+ * string when the user cancels). The browser cannot raise a real OS folder
+ * dialog for a text field, so the plugin does it on the host's side.
+ */
+export async function handlePickDirectory(): Promise<Response> {
+  const script =
+    "Add-Type -AssemblyName System.Windows.Forms; " +
+    "$f = New-Object System.Windows.Forms.FolderBrowserDialog; " +
+    "$f.Description = '选择目录'; " +
+    "$f.ShowNewFolderButton = $true; " +
+    "if ($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { $f.SelectedPath }";
+  const result = spawnSync("pwsh", ["-STA", "-NoProfile", "-Command", script], {
+    encoding: "utf8",
+    timeout: 300000,
+    windowsHide: false,
+  });
+  const selected = (result.stdout ?? "").trim();
+  return ok({ path: selected });
+}
+
+/**
  * The model files the settings page offers for `model.embedPath`.
  *
  * The list is the resolved models directory -- `readModelConfig` answers for the
@@ -528,6 +583,11 @@ export async function saveSettings(params: {
     log(`settings save refused (${result.status}): ${result.error}`, result.detail);
     return fail(result.error, result.status);
   }
+  // A save that actually changed something needs an OpenCode restart to take
+  // effect; record that on the server so the reminder survives a page refresh
+  // instead of living only in React state. An unchanged save clears nothing
+  // (the previous changed-save's reminder still stands until restart).
+  if (!result.unchanged) markConfigRestartNeeded(true);
   log(
     result.unchanged
       ? `settings unchanged: ${result.path}`
@@ -625,9 +685,11 @@ function nvidiaPresent(): boolean {
  * Stale/missing come from the same two functions `repairEmbedder` checks, so
  * the page and the repair cannot disagree about whether there is work.
  *
- * 变体三件套：`variantSelected`（配置所选，下拉框）、`variantActive`（生效，
- * spawn 的真身，活读）、`variantPending`（两者不同 = 重启没完成的窗口——
- * select 即时生效后正常态是 false）。stale/missing 按当前行身份算——身份只
+ * 变体三件套：`variantSelected`（配置所选，下拉框）、`variantActive`（生效 =
+ * 服务 /health 自报的引擎，没服务在跑时是下次启动会用的值）、`variantPending`
+ * （服务在跑且引擎与所选不同 = 选中还没换过来；没服务在跑时恒 false）。见
+ * `selectRuntimeVariant`：选中只在服务已经跑着时才顺手重启。stale/missing 按
+ * 当前行身份算——身份只
  * 到引擎家族（embedderIdFor），不随变体/tag 走，所选与生效值不同时也不会
  * 把整库误报成 stale。
  */
@@ -635,21 +697,35 @@ export async function handleRuntimeStatus(deps: MemoryApiDeps): Promise<Response
   const rawOptions = readPluginConfig().options ?? {};
   const serviceCfg = readServiceConfig(rawOptions);
   const selected = serviceCfg.runtimeVariant;
-  const active = deps.runtime?.activeVariant ?? selected;
+  // 生效引擎在 `probed` 之后才算：服务 /health 自报的变体最可信（别的实例起的
+  // 服务也说得清），没服务在跑才回落到 spawn 真身 / 活读配置 = 下次启动会用的值。
   // 身份不随变体走（embedderIdFor），所选/装载值不同时这里也不必再改写
   // 配置重读——stale/missing 与页面看到的是同一个身份串。
   const model = readModelConfig(rawOptions);
   const tag = runtimeTag();
-  const dir = runtimeDirPath(selected);
+  // LM 的 localVersion：页面报的目录是服务**实际会用**的那个——钉死版在位
+  // 是钉死版，否则家族里最新的旧版（server.mjs 正常启动同款回退）。
+  const dir = effectiveRuntimeDirPath(selected);
   const zip = runtimeZipPath(selected);
   const exe = path.join(dir, "llama-server.exe");
   const downloaded = existsSync(exe);
   const stale = deps.db ? staleEmbedderModels(deps.db, model.embedderId) : [];
   const missing = deps.db ? missingVectorCount(deps.db, model.embedderId) : 0;
   const probed = deps.runtime ? await deps.runtime.probe() : null;
+  // 服务在跑时以它自报的变体为「生效」；没在跑就是空，回落到下次启动会用的值。
+  const servedVariant = (probed?.health.variant ?? null) as "cpu" | "vulkan" | "cuda" | null;
+  const active = servedVariant ?? deps.runtime?.activeVariant ?? selected;
   const manifest = readRuntimeManifest();
   const cuda = manifest?.cuda;
   const nvidia = nvidiaPresent();
+  // LM 两维状态：installedTags.<v> !== null 是「装过」（localVersion，含旧
+  // tag 家族目录），与钉死 tag 不等 = 「可更新」。与 server.mjs 的回退运行
+  // 同一算法，页面不骗人。
+  const installedTags: Record<"cpu" | "vulkan" | "cuda", string | null> = {
+    cpu: installedRuntimeTag("cpu"),
+    vulkan: installedRuntimeTag("vulkan"),
+    cuda: installedRuntimeTag("cuda"),
+  };
   return ok({
     tag,
     tagKnown: tag !== "unknown",
@@ -668,12 +744,21 @@ export async function handleRuntimeStatus(deps: MemoryApiDeps): Promise<Response
     actionsAvailable: deps.runtime !== undefined,
     variantSelected: selected,
     variantActive: active,
-    variantPending: active !== selected,
+    // pending 只在服务在跑、且它报的引擎与所选不同时为 true：没服务在跑不是
+    // 「待重启」，是「下次启动用它」——选中的值背后没有在跑的实例可落后。
+    variantPending: servedVariant !== null && servedVariant !== selected,
     autoPrepareRuntime: serviceCfg.autoPrepareRuntime,
     // 自动对齐（一直保持最新）把 runtime.json 写新后，装载期 tag 与现值不等：
     // 与变体 pending 同款语义，横幅提示重启（行身份不变，重启只为换 spawn
     // 用的运行时）。
-    tagPending: deps.runtime !== undefined && deps.runtime.activeTag !== tag,
+    // 判据改为「在跑的进程」而非装载期读到的文件：服务 /health 的 backend 带
+    // `build bNNNNN`，与该变体实际会用的已装 tag 不等才提示重启。装载期 tag
+    // 比对会在每次重装（内嵌 zip 旧于上游）后误报一次。
+    tagPending: (() => {
+      const served = /build (b\d+)/.exec(probed?.health.backend ?? "")?.[1];
+      const installed = installedTags[selected];
+      return served !== undefined && installed !== null && served !== installed;
+    })(),
     // 下拉与引擎列表的数据。三行（cpu/vulkan/cuda，LM 顺序的子集；harmony/
     // office 两行按机主 2026-11-05 指令删除——它们不是 llama.cpp、也装不了，
     // 行尾版本 badge 对它们还是错配）。服务端 prepare/release 只认
@@ -686,14 +771,17 @@ export async function handleRuntimeStatus(deps: MemoryApiDeps): Promise<Response
         kind: "engine",
         label: "CPU llama.cpp (Windows)",
         sizeBytes: manifest?.cpu?.sizeBytes ?? null,
-        installed: existsSync(runtimeDirPath("cpu")),
-        // 可跑的条件：盘上有运行时（离线直跑，不需要钉），或 manifest 钉了
-        // CPU 资产（能下载校验）。两者都没有 = 装不了，如实标不适配。
-        compatible: existsSync(runtimeDirPath("cpu")) || manifest?.cpu !== undefined,
+        installed: installedTags.cpu !== null,
+        installedVersion: installedTags.cpu,
+        updateAvailable: installedTags.cpu !== null && installedTags.cpu !== tag,
+        // 可跑的条件：盘上有运行时（离线直跑，不需要钉；旧 tag 目录同样能跑，
+        // server.mjs 会回退用它），或 manifest 钉了 CPU 资产（能下载校验）。
+        // 两者都没有 = 装不了，如实标不适配。
+        compatible: installedTags.cpu !== null || manifest?.cpu !== undefined,
         // cpu 变体真机实测过：b12119 CPU 包下载、起服务、嵌入全通过
         // （2026-11-05，30 条真实 chunk 与 vulkan 对比 cos min 0.999528）。
         reason:
-          existsSync(runtimeDirPath("cpu")) || manifest?.cpu !== undefined
+          installedTags.cpu !== null || manifest?.cpu !== undefined
             ? null
             : "runtime.json 未钉 CPU 资产",
         preparing: deps.runtime?.preparing().includes("cpu") ?? false,
@@ -704,7 +792,9 @@ export async function handleRuntimeStatus(deps: MemoryApiDeps): Promise<Response
         kind: "engine",
         label: "Vulkan llama.cpp (Windows)",
         sizeBytes: manifest?.vulkan?.sizeBytes ?? null,
-        installed: existsSync(runtimeDirPath("vulkan")),
+        installed: installedTags.vulkan !== null,
+        installedVersion: installedTags.vulkan,
+        updateAvailable: installedTags.vulkan !== null && installedTags.vulkan !== tag,
         compatible: true,
         reason: null,
         preparing: deps.runtime?.preparing().includes("vulkan") ?? false,
@@ -715,7 +805,9 @@ export async function handleRuntimeStatus(deps: MemoryApiDeps): Promise<Response
         kind: "engine",
         label: "CUDA llama.cpp (Windows)",
         sizeBytes: cuda ? cuda.sizeBytes + cuda.cudartSizeBytes : null,
-        installed: existsSync(runtimeDirPath("cuda")),
+        installed: installedTags.cuda !== null,
+        installedVersion: installedTags.cuda,
+        updateAvailable: installedTags.cuda !== null && installedTags.cuda !== tag,
         compatible: nvidia && cuda !== undefined,
         reason: !cuda
           ? "runtime.json 未钉 CUDA 资产"
@@ -818,12 +910,18 @@ export async function repairVectors(params: {
 }
 
 /**
- * POST /api/runtime/select — 写 `service.runtimeVariant` 后**立即重启推理
- * 服务**（机主 2026-11-05 拍板，对齐 LM「选中即生效」）：spawn 时活读配置
- * （`readRuntimeSpawnFlags`），重启拉起的服务就是新变体，页面不再等 OpenCode
- * 重载、也不再有「待重启」横幅。重启的真话（服务由别的实例持有 / 30 秒没
- * 就绪 / 目标引擎还没下载）经 `detail` 原样带回页面显示。行身份不随后端走
- * （cpu/vulkan 实测同批向量，见 embedderIdFor），切换本身不触发重嵌。
+ * POST /api/runtime/select — 写 `service.runtimeVariant`，**不因此启动服务**。
+ *
+ * 照 LM Studio 的 Runtime 设置（本机 0.4.28+2 实测：选中只发 `selectBackend`
+ * RPC 写默认引擎，不 reload、不 restart、不起服务；按钮文案是 "Select as
+ * default for <format>"）。机主 2026-11-06 定：我们多走半步——服务**已经在
+ * 跑**就顺手重启换成新引擎（只有本插件拉起的子进程回收得掉），没在跑就只落
+ * 配置，下次启动服务时生效。旧行为（2026-11-05「选中即生效」）选一次 CPU
+ * 就替人拉起一个慢服务，那是副作用，不是选择。
+ *
+ * 别人（另一个 OpenCode 实例）起的服务本进程回收不了，restart 会如实报
+ * 「服务由其他实例持有」；重启失败同样经 `detail` 原样回页面。行身份不随
+ * 变体走（cpu/vulkan 实测同批向量，见 embedderIdFor），切换本身不触发重嵌。
  */
 export async function selectRuntimeVariant(
   deps: MemoryApiDeps,
@@ -849,11 +947,21 @@ export async function selectRuntimeVariant(
     ...(current.exists ? { sha256: current.sha256 } : { create: true }),
   });
   if (!saved.ok) return fail(saved.error, saved.status);
-  // 写完立即重启（活读配置的 spawn 带上新变体）。向量不可用（无 runtime）
-  // 时没有服务可重启，只落配置——页面那侧本来就把操作显示为不可用。
-  let detail: string | undefined;
-  let restartOk: boolean | null = null;
+  // 手不伸到没开的服务上：probe() 只探活、不启动（probeService），没有服务
+  // 在跑就没有可换的引擎，也没有理由替用户拉起一个。
+  let running = null;
   if (deps.runtime) {
+    try {
+      running = await deps.runtime.probe();
+    } catch (error) {
+      log("api POST /api/runtime/select probe failed", error instanceof Error ? error.message : String(error));
+    }
+  }
+  let restartAttempted = false;
+  let restartOk: boolean | null = null;
+  let detail: string | undefined;
+  if (deps.runtime && running) {
+    restartAttempted = true;
     try {
       const outcome = await deps.runtime.restart();
       restartOk = outcome.ok;
@@ -864,16 +972,30 @@ export async function selectRuntimeVariant(
       detail = error instanceof Error ? error.message : String(error);
       log("api POST /api/runtime/select restart failed", detail);
     }
+    // 重启后再探一次：真换过来了没有，只有服务自己报的变体说得准（尤其是
+    // 服务由别的实例持有、我们回收不掉它的场合）。探测失败不判成失败，
+    // 页面下次 load() 会再问一次。
+    try {
+      running = await deps.runtime.probe();
+    } catch {
+      running = null;
+    }
+  } else {
+    detail = "服务未在运行：配置已写入，下次启动服务时使用该引擎。";
+    log(`api POST /api/runtime/select variant=${variant}: saved, service not running`);
   }
-  const active = deps.runtime?.activeVariant ?? null;
+  // 生效值：服务在跑就以它自报的变体为准；没在跑回落到「下次启动会用的值」。
+  const served = (running?.health.variant ?? null) as "cpu" | "vulkan" | "cuda" | null;
+  const active = served ?? deps.runtime?.activeVariant ?? null;
   return ok({
     variant,
     active,
-    // 重启把服务带到新变体后 active 即新值 → 恒 false；只有重启没生效
-    // （服务被别的实例持有等）才 true。
-    pending: active !== null && active !== variant,
-    detail,
+    // 服务在跑且自报的引擎仍不是所选 = 没换过来（别的实例持有 / 重启失败）。
+    // 没服务在跑不是「待重启」——选中的值背后没有在跑的实例可落后。
+    pending: served !== null && served !== variant,
+    restartAttempted,
     restartOk,
+    detail,
   });
 }
 
@@ -985,7 +1107,10 @@ export function listRuntimeFilesApi(deps: MemoryApiDeps, requestUrl: string): Re
   if (!deps.runtime) {
     return fail("运行时操作不可用：向量检索未启用（没有可用的嵌入模型或 model.embed = false）。", 503);
   }
-  const currentDir = path.basename(runtimeDirPath(variant));
+  // inUse 标记的是服务**实际在用**的目录（钉死版缺时会回退旧版，见
+  // handleRuntimeStatus），不是名义上的钉死版——否则回退运行中还能从列表
+  // 里删掉正在跑的 exe 本体。
+  const currentDir = path.basename(effectiveRuntimeDirPath(variant));
   const active = deps.runtime.activeVariant;
   return ok({
     files: listRuntimeFiles(variant).map((entry) => ({
@@ -1015,9 +1140,9 @@ export async function releaseRuntimeVariant(
   if (!deps.runtime) {
     return fail("运行时操作不可用：向量检索未启用（没有可用的嵌入模型或 model.embed = false）。", 503);
   }
-  // 生效引擎正在用的当前 tag 目录：exe 被子进程握着，先拦。旧 tag 孤儿与
-  // zip 放行——那正是列表式删除要清理的东西。
-  if (variant === deps.runtime.activeVariant && name === path.basename(runtimeDirPath(variant))) {
+  // 生效引擎正在用的目录（含回退运行的旧版）：exe 被子进程握着，先拦。
+  // 其余旧 tag 孤儿与 zip 放行——那正是列表式删除要清理的东西。
+  if (variant === deps.runtime.activeVariant && name === path.basename(effectiveRuntimeDirPath(variant))) {
     return fail("这是当前生效引擎正在使用的文件：先在下拉里切走，再删除它", 409);
   }
   try {
@@ -1152,3 +1277,5 @@ export function handleMemoryStats(db: DatabaseSync | null): Response {
     bytes: stats.bytes,
   });
 }
+
+

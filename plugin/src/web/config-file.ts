@@ -21,6 +21,24 @@ import { stateRoot } from "../paths.js";
 /** Options that are secrets: reported as set / not set, never returned. */
 const SECRET_KEYS = ["authPassword"] as const;
 
+/**
+ * Whether the settings file has changed (via a save with a real diff) since this
+ * OpenCode process started. Module-level so it resets on process start; the
+ * plugin resolves its settings when it loads, so a save only takes effect after
+ * `opencode service restart`. The flag is the server-side source of truth for
+ * the "restart OpenCode to apply" reminder, which is what makes it survive a
+ * page refresh instead of living in React state. See ConfigForm.tsx.
+ */
+let configRestartNeeded = false;
+
+export function markConfigRestartNeeded(value: boolean): void {
+  configRestartNeeded = value;
+}
+
+export function isConfigRestartNeeded(): boolean {
+  return configRestartNeeded;
+}
+
 export type PluginSettingsRead = {
   path: string;
   exists: boolean;
@@ -33,6 +51,14 @@ export type PluginSettingsRead = {
   secrets: Record<string, boolean>;
   parseErrors: { offset: number; length: number; message: string }[];
   error?: string;
+  /**
+   * True when the settings file has been saved (with a change) since this
+   * OpenCode process started. The plugin resolves its settings when it loads,
+   * so a save only takes effect after `opencode service restart`; this flag is
+   * the persistent, refresh-surviving signal for that. It resets to false on
+   * process start -- a restart clears the reminder by construction.
+   */
+  restartNeeded: boolean;
 };
 
 /**
@@ -75,6 +101,7 @@ export function readPluginConfig(): PluginSettingsRead {
     secrets: {},
     parseErrors: read.parseErrors,
     ...(read.error ? { error: read.error } : {}),
+    restartNeeded: configRestartNeeded,
   };
   if (!read.exists || read.error) return base;
 
