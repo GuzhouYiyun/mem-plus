@@ -3584,60 +3584,44 @@ pinned/latest 双语义就此收档。
   跨 nightly cos=1.0,两版并存期间没有任何正确性差别,只是列表里多一条待清
   孤儿,交给 sweep。
 
-## 已知缺陷 D1:并发 flush/capture 写竞争(2026-11-06)
-
-对应 `docs/memory-chain.md` §11 的 flush race(`#131604`)。上游在提升路径上修过
-(`extensions/memory-core/src/short-term-promotion-apply.ts:398`):`withFileLock`
-+ `withMemoryWorkspaceLock` 双锁,锁内重读 store 与源文件、逐候选比对指纹,
-只提交未被别人动过的候选。mem-plus 的 capture/flush 写路径当时完全无锁——
-`appendCaptureEntry`(`extensions/memory-core/src/capture/write.ts:48`)是裸的
-read-modify-append,唯一的防线是写前的 marker 检查,而 marker 检查发生在两次写
-之间,两个都在锁外,因此拦不住并发。
+## Runtime 选中不再起服务:照 LM 的默认引擎语义(2026-11-06)
 
 **结果**:
 
-- 锁落在**目标日文件**上,不是 memory home。上游的提升锁本身就是 per-file
-  (`resolveMemoryPromotionLockTarget` 哈希 workspace 成一个路径,再对那一个路径
-  `withFileLock`),所以这不是发明粒度,是照它。`withMemoryWorkspaceLock` 没有
-  采用:它锁整个 home,会把三个项目的写入互相堵死——同项目同日文件的竞争才是
-  这个缺陷,跨项目的写入本来就没有共享文件。
-- 锁参数照抄上游 `MEMORY_WRITE_LOCK_OPTIONS`(`short-term-promotion-apply.ts:64`):
-  `retries 100 / factor 1.2 / 25-250ms`、`stale 120_000`、`staleRecovery:
-  "fail-closed"`。fail-closed 的含义:锁拿不到就是写失败,caller 看到失败,
-  不是看到"写成功了但条目丢了"。
-- 临界区包住 append 与 provenance 记录两件事(锁在 `withWriteProvenance` 的
-  `append` 回调内)。`withWriteProvenance` 是先读 before、再 append、再读 after,
-  然后按 `contentBefore` 的哈希决定 originClass 是否保持 `agent`——这两步不同时
-  进临界区,别人的一次写入就能嵌在中间,让这条记录的 downgrade 判断失真。
-- 覆盖两条写路径:`capture-deps.ts` 的 `writeEntry`(插件恒传的主路径)与
-  `flush-run.ts` 的 append fallback(fallback 是同一形状的同一文件写入,留一扇
-  没锁的门等于没修)。
-- 验证:bun 直驱新模块 `withMemoryFileLock`,三个并发 writer 打同一个日文件,
-  错峰启动下进入顺序 A→B→C 严格串行,三次 append 全部落盘,sidecar 释放后无
-  残留。门禁:`tsc -p tsconfig.plugin.json` 4240 = 基线(`plugin/`+`extensions/`
-  +`bootstrap` 0 错)、`tsc -p tsconfig.capture.json` 331 = 基线(自有 0 错)、
-  `web` `tsc` 0、`audit-npm-pack.mjs --check` no drift、api-e2e/files-e2e ALL PASS。
+- `POST /api/runtime/select` 只写 `service.runtimeVariant`。服务**已在跑**才
+  顺手 `restart()` 一次换引擎;没在跑就只落配置,不 spawn。实测(bun 直驱
+  `selectRuntimeVariant`,temp `XDG_CONFIG_HOME`):无服务时 restart 调用 0 次、
+  响应 `restartAttempted:false`;probe 报有服务时 1 次、`restartAttempted:true`。
+- 状态页 `variantPending` 改成「服务在跑且 `/health` 报的变体 ≠ 所选」。实测:
+  probe 报 vulkan、所选 cpu → `pending:true`、`active:"vulkan"`;无服务 →
+  `pending:false`、`active` = 所选。页面恢复琥珀横幅「已选择 X,当前服务仍用 Y;
+  重启 OpenCode 后生效」。
+- 2026-11-05「选中即生效」(select 后立即重启并可能起服务)由本节作废。不是
+  openclaw 移植行为,与 `docs/memory-chain.md` 无关。
 
-**经验**:
+**经验**(本机 LM Studio 0.4.28+2,`renderer/main_window.js` 实测):
 
-- `openclaw/plugin-sdk/file-lock` 这条 import 链在本树是可用的,但**可用不等于
-  已经注册**:alias 由 `plugin/scripts/link-openclaw-alias.mjs` 按
-  `src/plugin-sdk/` 的源清单生成,`src/plugin-sdk/file-lock.ts` 在册,所以
-  postinstall 之后 `node_modules/openclaw/plugin-sdk/file-lock.ts` 必然存在。
-  新加一个 import 之前,先确认它在册,不要凭"extensions 已经在用"推断——那是
-  `extensions/` 自己的事。
-- 锁 smoke 第一版的断言写错了:`/A\(\d+\) B\(\d+\) C\(\d+\)/` 断言三个固定顺序,
-  而锁只保证互斥、不保证谁先进,于是把"锁有效"测成了"锁无效"。并发断言只能测
-  **不变量**(进入临界区期间只有一个 holder、全部条目都落盘),不能测顺序。
+- 选中引擎只发一次 `selectBackend` RPC(`useSetBackendForModelCompatibilityType`
+  → `callRpc`),回调里没有 reload/restart/spawn;行内按钮文案是
+  `Select as default for <format>`——它是"默认引擎",不是"现在换引擎"。
+- 服务与引擎是两件事:`startServer` / `stopServer` / `restartServer` 三个显式
+  RPC,重启由人点。
+- 引擎变更在下次加载模型时生效(文案 `update the engine and reload the model`)。
+  已加载的模型不被迁移。
+- LM 没有 CPU/Vulkan/CUDA 三选一:renderer bundle 里没有任何此类选择文案,扩展
+  包按硬件兼容性自动匹配;用户能选的只有引擎版本。三行变体是 mem-plus 自己的
+  构造,所以"照 LM"只能照它的「选中 = 写默认值,不触发进程」这一层。
 
 **设计理念**:
 
-- 锁不放进 `appendCaptureEntry` 自己:它是 vendored 的 openclaw 原文件,上游没有
-  在那里加锁(上游锁在调用侧),改 vendored 文件会让下一次对上游的字节比对失真。
-  锁放调用侧,与上游同一形状。
-- marker 检查保留。锁是新的第一道,marker 退成第二道:它在单进程内仍然免费,
-  而且能挡住"同一条目被重放"这种与并发无关的情况。删掉它是拿一个不需要的
-  行为变化换零收益。
+- 纯写配置(方案 A)不可行,不是偏好问题:服务可能是另一个 OpenCode 实例起的,
+  本进程既回收不了子进程、也换不了它的引擎。只写配置就会让页面长期显示旧引擎,
+  或者撒谎说已切换。方案 B 是能落地的最近似物:自己有子进程就换掉,换不了就
+  如实报「服务由其他实例持有」。
+- 起不起服务由"第一次需要向量"或用户显式点重启/下载决定,配置页的动作不生产
+  副作用。选中只表达"下次用哪个引擎",不表达"现在把它跑起来"。另外,服务若由
+  别的实例持有,选中顺手重启也只能得到一句"未重启,已重新连接"——那不该被
+  写成一次成功的切换。
 
 ## 索引恢复扫描:补上 openclaw 的 5 分钟兜底(2026-11-06)
 
