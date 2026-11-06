@@ -43,7 +43,7 @@ export function ConfigFileView() {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-3">
-      <ConfigAlerts error={cfg.error} saved={cfg.saved} />
+      <ConfigAlerts error={cfg.error} saved={cfg.saved} restartNeeded={cfg.config?.restartNeeded === true} />
 
       <div className="flex shrink-0 flex-wrap items-center gap-2 rounded-xl border border-border bg-card px-4 py-2.5">
         <FileJson className="size-4 shrink-0 text-muted-foreground" />
@@ -81,6 +81,7 @@ export function ConfigFileView() {
                   models={cfg.models}
                   modelsAvailable={cfg.modelsAvailable}
                   modelFiles={cfg.modelFiles}
+                  resolvedPaths={cfg.resolvedPaths}
                   disabled={blocked}
                   onChange={cfg.setField}
                 />

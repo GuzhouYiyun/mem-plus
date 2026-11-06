@@ -29,7 +29,9 @@ export type FieldKind =
   | "enum"
   | "modelRef"
   /** A dropdown over the model files the resolved directory actually holds. */
-  | "modelFile";
+  | "modelFile"
+  /** A text box with a native OS folder picker beside it. */
+  | "directory";
 
 export type ConfigField = {
   /** Path inside the options object, e.g. `web.port`. */
@@ -134,7 +136,7 @@ export const CONFIG_SECTIONS: readonly ConfigSection[] = [
       {
         key: "model.dir",
         label: "模型目录",
-        kind: "text",
+        kind: "directory",
         defaultValue: "",
         help: "留空 = 仓库里的 models/，安装版则用记忆库目录下的 models/。",
       },
@@ -338,23 +340,9 @@ export const CONFIG_SECTIONS: readonly ConfigSection[] = [
       {
         key: "web.dir",
         label: "前端目录",
-        kind: "text",
+        kind: "directory",
         defaultValue: "",
         help: "留空 = 插件目录旁的 web/dist。",
-      },
-      {
-        key: "web.authUser",
-        label: "登录名",
-        kind: "text",
-        defaultValue: "",
-        help: "留空 = 系统账户名。只在设置了密码时生效。",
-      },
-      {
-        key: "web.authPassword",
-        label: "密码",
-        kind: "secret",
-        defaultValue: "",
-        help: "留空 = 不认证（仅在本机收听时安全）。支持 env://NAME 与 file:///path。值不会回传到页面，只显示「已设置」。",
       },
       { heading: "文档语料" },
       {
@@ -367,7 +355,7 @@ export const CONFIG_SECTIONS: readonly ConfigSection[] = [
       {
         key: "wiki.dir",
         label: "目录",
-        kind: "text",
+        kind: "directory",
         defaultValue: "",
         help: "留空 = ~/.config/opencode/mem-plus/wiki。",
       },

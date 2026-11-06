@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { Cpu, HardDrive, MoreVertical, RefreshCw, Search, Trash2, TriangleAlert, X, Zap } from "lucide-react";
 import { toast } from "sonner";
-import { cn } from "$lib/utils";
 import { fetchAPI } from "$lib/api";
 import { Badge } from "$lib/components/ui/badge";
 import { Button } from "$lib/components/ui/button";
@@ -21,6 +20,10 @@ type VariantInfo = {
   label: string;
   sizeBytes: number | null;
   installed: boolean;
+  /** LM localVersion 维度：家族里实际装着的最高 tag；没装过 = null。 */
+  installedVersion: string | null;
+  /** installedVersion 有值但不是钉死 tag——「已装 · 可更新」，不是「没装」。 */
+  updateAvailable: boolean;
   compatible: boolean;
   reason: string | null;
   preparing: boolean;
@@ -112,22 +115,6 @@ function CardRow({
   );
 }
 
-/** LM 式状态药丸：不适配（红）/ 已安装（绿）/ 未下载（灰）。 */
-function Pill({ tone, children }: { tone: "bad" | "ok" | "idle"; children: ReactNode }) {
-  const style =
-    tone === "bad"
-      ? "border-destructive/40 bg-destructive/10 text-destructive"
-      : tone === "ok"
-        ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
-        : "border-border text-muted-foreground";
-  return (
-    <span className={`inline-flex shrink-0 items-center gap-1 rounded-full border px-2 py-0.5 text-xs ${style}`}>
-      {tone === "bad" ? <TriangleAlert className="size-3" /> : null}
-      {children}
-    </span>
-  );
-}
-
 /**
  * 运行时页：LM Studio Runtime 设置页的布局移植（机主 2026-11-04 拍板：
  * 「布局格式功能一致，配色风格用我们的」，且三件被砍过的件逐件做真功能——
@@ -145,7 +132,6 @@ export function RuntimeView() {
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState<Busy>(null);
   const [checking, setChecking] = useState(false);
-  const [updates, setUpdates] = useState<UpdatesResult | null>(null);
   const [menuFor, setMenuFor] = useState<string | null>(null);
   const [filterQuery, setFilterQuery] = useState("");
   const [filterCompat, setFilterCompat] = useState("all");
@@ -198,24 +184,31 @@ export function RuntimeView() {
   }
 
   /**
-   * 下拉换引擎：写配置后**立即重启推理服务**（spawn 活读变体），LM 式
-   * 「选中即生效」——没有「重启 OpenCode 生效」的横幅与徽章（机主
-   * 2026-11-05 拍板）。重启最多等 30 秒+，超时给宽到 60 秒。
+   * 下拉换引擎：**只写配置，不因此起服务**（照 LM Studio 的 Runtime 设置，
+   * 本机 0.4.28 实测：选中只发 `selectBackend` RPC 写默认引擎）。服务已经在
+   * 跑时后端顺手重启换引擎；没在跑就等下次启动——选 CPU 不再替人拉起慢服务
+   * （机主 2026-11-06 定）。
    */
   async function selectVariant(value: string) {
     if (!status || value === status.variantSelected) return;
     setBusy("select");
     try {
-      const r = await post<{ variant: string; detail?: string; restartOk?: boolean | null }>(
-        "/api/runtime/select",
-        { variant: value },
-        60_000,
-      );
+      const r = await post<{
+        variant: string;
+        active: string | null;
+        pending: boolean;
+        restartAttempted: boolean;
+        restartOk: boolean | null;
+        detail?: string;
+      }>("/api/runtime/select", { variant: value }, 60_000);
       if (r.ok && r.data) {
         const label = status.variants.find((v) => v.id === value)?.label ?? value;
-        // 重启的真话（服务由别的实例持有 / 没就绪 / 目标引擎还没下载）当
-        // 描述显示；restartOk=false 用 warning，别把失败说成顺利生效。
-        if (r.data.restartOk === false) {
+        if (!r.data.restartAttempted) {
+          // 服务没在跑：配置已写，下次启动生效。不起服务。
+          toast.info(t("rt-select-pending", { variant: label }), { description: r.data.detail });
+        } else if (r.data.restartOk === false || r.data.pending) {
+          // 重启没成（服务由别的实例持有 / 30 秒没就绪）——如实说，别把
+          // 没生效说成顺利切换。
           toast.warning(t("rt-select-ok", { variant: label }), { description: r.data.detail });
         } else {
           toast.success(t("rt-select-ok", { variant: label }), { description: r.data.detail });
@@ -309,8 +302,17 @@ export function RuntimeView() {
     setChecking(true);
     try {
       const r = await post<UpdatesResult>("/api/runtime/updates", {});
-      if (r.ok && r.data) setUpdates(r.data);
-      else toast.error(t("rt-updates-failed"), { description: r.error });
+      if (r.ok && r.data) {
+        const msg =
+          r.data.latest === null
+            ? t("rt-updates-none")
+            : r.data.newer
+              ? t("rt-updates-behind", { latest: r.data.latest })
+              : t("rt-updates-same");
+        toast.success(msg);
+      } else {
+        toast.error(t("rt-updates-failed"), { description: r.error });
+      }
     } finally {
       setChecking(false);
     }
@@ -343,6 +345,10 @@ export function RuntimeView() {
     return true;
   });
 
+  // 引擎行的 label（横幅与 toast 用整名，不露 id）。
+  const variantLabel = (id: string | null): string =>
+    (status?.variants ?? []).find((v) => v.id === id)?.label ?? id ?? "";
+
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       {error ? (
@@ -352,10 +358,7 @@ export function RuntimeView() {
       <section className="flex min-h-0 flex-1 flex-col rounded-xl border border-border bg-card">
         <div className="shrink-0 space-y-2 p-4">
           <div className="flex flex-wrap items-center gap-2">
-            <Cpu className="size-4 shrink-0 text-muted-foreground" />
-            <Badge variant="secondary">
-              {status ? (status.tagKnown ? t("rt-runtime-tag", { tag: status.tag }) : t("rt-runtime-tag-bad")) : "…"}
-            </Badge>
+            {status && !status.tagKnown ? <Badge variant="secondary">{t("rt-runtime-tag-bad")}</Badge> : null}
             <Button
               variant="outline"
               size="icon"
@@ -367,8 +370,20 @@ export function RuntimeView() {
               <RefreshCw className={`size-4 ${loading ? "animate-spin" : ""}`} />
             </Button>
           </div>
-          {/* 变体「待重启」横幅已删（select 即时生效，2026-11-05）；tagPending
-              仍在：自动对齐写新 runtime.json 后要重载才换 spawn 用的目录。 */}
+          {/* 变体「待重启」横幅回来了（2026-11-06：选中不再起服务，服务在跑且
+              引擎还是旧的时，只有重启 OpenCode 才能换过来）。tagPending 仍在：
+              自动对齐写新 runtime.json 后要重载才换 spawn 用的目录。 */}
+          {status?.variantPending ? (
+            <div className="flex items-start gap-2 rounded-lg border border-amber-500/40 bg-amber-500/10 p-2.5 text-sm text-amber-700 dark:text-amber-300">
+              <TriangleAlert className="mt-0.5 size-4 shrink-0" />
+              <span>
+                {t("rt-variant-pending", {
+                  variant: variantLabel(status.variantSelected),
+                  active: variantLabel(status.variantActive),
+                })}
+              </span>
+            </div>
+          ) : null}
           {status?.tagPending ? (
             <div className="flex items-start gap-2 rounded-lg border border-amber-500/40 bg-amber-500/10 p-2.5 text-sm text-amber-700 dark:text-amber-300">
               <TriangleAlert className="mt-0.5 size-4 shrink-0" />
@@ -410,39 +425,12 @@ export function RuntimeView() {
                 />
               </Card>
 
-              {/* LM「Runtime updates channel」：单行卡；通道下拉按机主
-                  2026-11-05 指令删除（稳定版/测试版不做选择），只留检查按钮，
-                  与 LM 其余部分完全一致。 */}
               <div className="mt-4">
-                <Card>
-                  <CardRow
-                    label={t("rt-channel-label")}
-                    children={
-                      <Button size="sm" variant="outline" disabled={checking} onClick={() => void checkUpdates()}>
-                        <RefreshCw className={`me-1.5 inline size-3 ${checking ? "animate-spin" : ""}`} />
-                        {checking ? t("rt-updates-checking") : t("rt-updates-check")}
-                      </Button>
-                    }
-                  />
-                </Card>
-                {updates ? (
-                  <p className="px-4 pt-1 text-xs text-muted-foreground">
-                    {updates.latest === null
-                      ? t("rt-updates-none")
-                      : updates.newer
-                        ? t("rt-updates-behind", { latest: updates.latest })
-                        : t("rt-updates-same")}
-                    {" · "}
-                    {t("rt-updates-pinned", { pinned: updates.pinned, latest: updates.latest ?? "—" })}
-                  </p>
-                ) : null}
-              </div>
-
-              {/* LM「Engines & Frameworks」：三件过滤 + 引擎列表卡。 */}
-              <div className="mt-4">
+                {/* 机主 2026-11-06 指令：搜索栏放回本区（缩短到 w-48，不占整行），
+                    「运行时更新」段落整段删除，检查更新按钮并入本行最右。 */}
                 <Heading>{t("rt-engines-heading")}</Heading>
                 <div className="flex flex-wrap items-center gap-2 px-4 pb-2">
-                  <div className="relative min-w-40 flex-1">
+                  <div className="relative w-48">
                     <Search className="pointer-events-none absolute start-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
                     <Input
                       className="ps-8"
@@ -470,6 +458,16 @@ export function RuntimeView() {
                     ]}
                     onChange={setFilterType}
                   />
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="ms-auto"
+                    disabled={checking}
+                    onClick={() => void checkUpdates()}
+                  >
+                    <RefreshCw className={`me-1.5 inline size-3 ${checking ? "animate-spin" : ""}`} />
+                    {checking ? t("rt-updates-checking") : t("rt-updates-check")}
+                  </Button>
                 </div>
                 <Card>
                   {shownVariants.length === 0 ? (
@@ -500,70 +498,75 @@ export function RuntimeView() {
                               <HardDrive className="size-3.5 shrink-0 text-muted-foreground" />
                             )}
                             <span className="text-sm font-medium">{v.label}</span>
+                            {/* LM 的 RuntimeVersionBadge 对（bundle 字面：
+                                `version:a.remoteVersion` 先挂，装了且与钉死值不
+                                等才 `→ 已装版`）：钉死 tag → 已装旧版。机主
+                                2026-11-05 指令「5 缩短点、更新按钮放 5 右边」
+                                = 本行右端。 */}
                             {status.tagKnown ? (
                               <Badge variant="outline" className="px-1.5 py-0 text-[11px] font-normal">
-                                {status.tag}
+                                {v.installedVersion === status.tag
+                                  ? t("rt-badge-installed", { tag: status.tag })
+                                  : t("rt-badge-latest", { tag: status.tag })}
                               </Badge>
                             ) : null}
-                            {/* 「生效中/已选择/未测」三徽章已删（LM 行内只有
-                                名称+版本徽章，选中态只在下拉里显示；给用户
-                                的界面不露开发者痕迹——机主 2026-11-05）。 */}
+                            {v.installedVersion && v.installedVersion !== status.tag ? (
+                              <>
+                                <span className="text-xs text-muted-foreground">→</span>
+                                <Badge variant="outline" className="px-1.5 py-0 text-[11px] font-normal">
+                                  {t("rt-badge-installed", { tag: v.installedVersion })}
+                                </Badge>
+                              </>
+                            ) : null}
+                            {v.selectable && (!v.installed || v.updateAvailable) ? (
+                              <Button
+                                size="sm"
+                                className="ms-1 h-6 px-2 text-xs"
+                                disabled={!usable || v.preparing || busyAny}
+                                onClick={() => void prepareRow(v, false)}
+                              >
+                                {v.preparing ? (
+                                  <>
+                                    <RefreshCw className="me-1 inline size-3 animate-spin" />
+                                    {t("rt-act-preparing")}
+                                  </>
+                                ) : v.updateAvailable ? (
+                                  t("rt-act-update-plain")
+                                ) : (
+                                  t("rt-act-install-plain")
+                                )}
+                              </Button>
+                            ) : null}
                           </div>
-                          <p className="mt-0.5 text-xs text-muted-foreground">
+                          <p className="mt-0.5 truncate text-xs text-muted-foreground">
                             {v.id === "cuda"
                               ? t("rt-engine-cuda-desc")
                               : v.id === "vulkan"
                                 ? t("rt-engine-vulkan-desc")
                                 : t("rt-engine-cpu-desc")}
                           </p>
-                          {/* 不适配且有理由（cpu/cuda 硬拒绝）→ 红字照实报；
-                              已适配 → 安装/尺寸状态行。 */}
-                          {!v.compatible && v.reason === null ? null : (
-                            <p
-                              className={cn(
-                                "mt-0.5 text-xs",
-                                !v.compatible ? "text-destructive" : "text-muted-foreground",
-                              )}
-                            >
-                              {!v.compatible
-                                ? v.reason
-                                : [
-                                    v.installed ? t("rt-engine-installed") : t("rt-engine-not-installed"),
-                                    v.sizeBytes !== null ? t("rt-engine-size", { size: mb(v.sizeBytes) }) : "",
-                                  ]
-                                    .filter((piece) => piece.length > 0)
-                                    .join(" · ")}
-                            </p>
-                          )}
+                          {/* 不适配（cuda 无卡等）→ 红字照实报，位置同 LM 的
+                              destructive description 行。 */}
+                          {!v.compatible && v.reason !== null ? (
+                            <p className="mt-0.5 text-xs text-destructive">{v.reason}</p>
+                          ) : null}
                           {v.preparing ? (
                             <p className="mt-0.5 text-xs text-primary">{t("rt-engine-downloading")}</p>
                           ) : null}
                         </div>
                         <div className="flex shrink-0 items-center gap-2">
+                          {/* LM 行右侧只有三件：不适配红字 chip、下载/更新按钮、
+                              ⋮ 菜单。「已安装/可更新/未下载」药丸已删（机主
+                              2026-11-05 截图比对：LM 的安装态由版本徽章对表达，
+                              不重复挂药丸）。 */}
                           {!v.compatible ? (
-                            <Pill tone="bad">{t("rt-engine-incompatible")}</Pill>
-                          ) : v.installed ? (
-                            <Pill tone="ok">{t("rt-engine-installed")}</Pill>
-                          ) : (
-                            <Pill tone="idle">{t("rt-engine-not-installed")}</Pill>
-                          )}
-                          {v.selectable && !v.installed ? (
-                            <Button
-                              size="sm"
-                              disabled={!usable || v.preparing || !v.compatible || busyAny}
-                              onClick={() => void prepareRow(v, false)}
+                            <span
+                              className="inline-flex shrink-0 cursor-help items-center gap-1 rounded-full border border-destructive/40 bg-destructive/10 px-2 py-0.5 text-[11px] leading-[1.3] text-destructive"
+                              title={v.reason ?? undefined}
                             >
-                              {v.preparing ? (
-                                <>
-                                  <RefreshCw className="me-1.5 inline size-3 animate-spin" />
-                                  {t("rt-act-preparing")}
-                                </>
-                              ) : v.sizeBytes !== null ? (
-                                t("rt-act-install", { size: mb(v.sizeBytes) })
-                              ) : (
-                                t("rt-act-install-plain")
-                              )}
-                            </Button>
+                              <TriangleAlert className="size-3" />
+                              {t("rt-engine-incompatible")}
+                            </span>
                           ) : null}
                           {v.selectable ? (
                           <div className="relative">
@@ -580,7 +583,7 @@ export function RuntimeView() {
                             {menuFor === v.id ? (
                               <>
                                 <div className="fixed inset-0 z-40" onClick={() => setMenuFor(null)} />
-                                <div className="absolute end-0 z-50 mt-1 w-44 overflow-hidden rounded-lg border border-border bg-popover py-1 shadow-lg">
+                                <div className="absolute end-0 bottom-full z-50 mb-1 w-44 overflow-hidden rounded-lg border border-border bg-popover py-1 shadow-lg">
                                   <button
                                     type="button"
                                     className="w-full px-3 py-1.5 text-start text-sm hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50"

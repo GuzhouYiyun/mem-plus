@@ -62,6 +62,8 @@ export type ConfigResponse = {
   secrets: Record<string, boolean>;
   parseErrors: { offset: number; length: number; message: string }[];
   error?: string;
+  /** True when a changed save happened this process; restart OpenCode to apply. */
+  restartNeeded?: boolean;
 };
 
 /** One entry of `GET /api/model-files`: a GGUF in the resolved models directory. */
@@ -92,6 +94,7 @@ export function useConfigFile() {
   const [models, setModels] = useState<ModelOption[] | null>(null);
   const [modelsAvailable, setModelsAvailable] = useState(true);
   const [modelFiles, setModelFiles] = useState<ModelFileEntries | null>(null);
+  const [resolvedPaths, setResolvedPaths] = useState<{ modelDir: string; webDir: string; wikiDir: string } | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -149,6 +152,18 @@ export function useConfigFile() {
     };
   }, []);
 
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      const result = await fetchAPI<{ modelDir: string; webDir: string; wikiDir: string }>("/api/resolved-paths");
+      if (cancelled) return;
+      if (result.success && result.data) setResolvedPaths(result.data);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const exists = config?.exists === true;
   const parseErrors = config?.parseErrors ?? [];
   const secrets = config?.secrets ?? {};
@@ -178,7 +193,9 @@ export function useConfigFile() {
       return;
     }
     await load();
-    setSaved(create ? t("cfg-created") : result.data?.unchanged ? t("cfg-saved-unchanged") : t("cfg-saved-restart"));
+    if (create) setSaved(t("cfg-created"));
+    else if (result.data?.unchanged) setSaved(t("cfg-saved-unchanged"));
+    else setSaved(null);
   }
 
   function discard() {
@@ -196,6 +213,7 @@ export function useConfigFile() {
     models,
     modelsAvailable,
     modelFiles,
+    resolvedPaths,
     exists,
     parseErrors,
     secrets,
@@ -210,7 +228,8 @@ export function useConfigFile() {
 export type ConfigFileState = ReturnType<typeof useConfigFile>;
 
 /** The two banners: a failure, and the confirmation that follows a save. */
-export function ConfigAlerts({ error, saved }: { error: string | null; saved: string | null }) {
+export function ConfigAlerts({ error, saved, restartNeeded }: { error: string | null; saved: string | null; restartNeeded?: boolean }) {
+  const { t } = useI18n();
   return (
     <>
       {error ? (
@@ -224,6 +243,13 @@ export function ConfigAlerts({ error, saved }: { error: string | null; saved: st
         <Alert className="mb-3 shrink-0 border-[oklch(0.72_0.15_150)]/40 bg-[oklch(0.72_0.15_150)]/10">
           <Info className="text-[oklch(0.55_0.15_150)]" />
           <AlertDescription>{saved}</AlertDescription>
+        </Alert>
+      ) : null}
+
+      {restartNeeded ? (
+        <Alert className="mb-3 shrink-0 border-amber-500/40 bg-amber-500/10">
+          <TriangleAlert className="text-amber-600 dark:text-amber-400" />
+          <AlertDescription>{t("cfg-restart-needed")}</AlertDescription>
         </Alert>
       ) : null}
     </>
@@ -342,6 +368,7 @@ export function ConfigFormFields({
   models,
   modelsAvailable,
   modelFiles,
+  resolvedPaths,
   disabled,
   onChange,
 }: {
@@ -350,6 +377,7 @@ export function ConfigFormFields({
   models: ModelOption[] | null;
   modelsAvailable: boolean;
   modelFiles: ModelFileEntries | null;
+  resolvedPaths: { modelDir: string; webDir: string; wikiDir: string } | null;
   disabled: boolean;
   onChange: (key: string, value: unknown) => void;
 }) {
@@ -367,6 +395,7 @@ export function ConfigFormFields({
               models={models}
               modelsAvailable={modelsAvailable}
               modelFiles={modelFiles}
+              resolvedPaths={resolvedPaths}
               disabled={disabled}
               onChange={onChange}
             />
@@ -396,6 +425,7 @@ function GroupBlock({
   models,
   modelsAvailable,
   modelFiles,
+  resolvedPaths,
   disabled,
   onChange,
 }: {
@@ -406,6 +436,7 @@ function GroupBlock({
   models: ModelOption[] | null;
   modelsAvailable: boolean;
   modelFiles: ModelFileEntries | null;
+  resolvedPaths: { modelDir: string; webDir: string; wikiDir: string } | null;
   disabled: boolean;
   onChange: (key: string, value: unknown) => void;
 }) {
@@ -428,6 +459,7 @@ function GroupBlock({
         models={models}
         modelsAvailable={modelsAvailable}
         modelFiles={modelFiles}
+        resolvedPaths={resolvedPaths}
         disabled={disabled}
         onChange={(next) => onChange(row.key, next)}
         // A null default is the absent key, so reset deletes rather than writes
@@ -530,6 +562,7 @@ function FieldRow({
   models,
   modelsAvailable,
   modelFiles,
+  resolvedPaths,
   disabled,
   onChange,
   onReset,
@@ -540,6 +573,7 @@ function FieldRow({
   models: ModelOption[] | null;
   modelsAvailable: boolean;
   modelFiles: ModelFileEntries | null;
+  resolvedPaths: { modelDir: string; webDir: string; wikiDir: string } | null;
   disabled: boolean;
   onChange: (next: unknown) => void;
   onReset: () => void;
@@ -556,7 +590,14 @@ function FieldRow({
   // the way a model host names where the files actually live. `/api/model-files`
   // reports `readModelConfig`'s own `modelDir`, so this is the directory the
   // embed service reads -- not a second opinion.
-  const resolvedDir = field.key === "model.dir" && modelFiles?.dir ? modelFiles.dir : null;
+  const resolvedDir =
+    field.key === "model.dir"
+      ? resolvedPaths?.modelDir ?? modelFiles?.dir ?? null
+      : field.key === "web.dir"
+      ? resolvedPaths?.webDir ?? null
+      : field.key === "wiki.dir"
+      ? resolvedPaths?.wikiDir ?? null
+      : null;
 
   return (
     <div className="grid gap-1.5 sm:grid-cols-[minmax(0,15rem)_minmax(0,1fr)] sm:items-start sm:gap-4">
@@ -748,6 +789,32 @@ function Control({
     );
   }
 
+  if (field.kind === "directory") {
+    const current = typeof value === "string" ? value : "";
+    return (
+      <div className="flex w-full items-center gap-2">
+        <Input
+          id={id}
+          disabled={disabled}
+          className="sm:max-w-md"
+          value={current}
+          onChange={(event) => onChange(event.target.value)}
+        />
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          disabled={disabled}
+          onClick={async () => {
+            const result = await fetchAPI<{ path: string }>("/api/pick-directory", { method: "POST" });
+            if (result.success && result.data?.path) onChange(result.data.path);
+          }}
+        >
+          {t("cfg-pick-dir")}
+        </Button>
+      </div>
+    );
+  }
   if (field.kind === "boolean") {
     const on = value === true;
     return (

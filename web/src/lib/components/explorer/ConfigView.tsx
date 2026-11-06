@@ -29,7 +29,7 @@ export function ConfigView() {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <ConfigAlerts error={cfg.error} saved={cfg.saved} />
+      <ConfigAlerts error={cfg.error} saved={cfg.saved} restartNeeded={cfg.config?.restartNeeded === true} />
 
       <section className="flex min-h-0 flex-1 flex-col rounded-xl border border-border bg-card">
         <div className="shrink-0 space-y-2 p-4">
@@ -68,6 +68,7 @@ export function ConfigView() {
               models={cfg.models}
               modelsAvailable={cfg.modelsAvailable}
               modelFiles={cfg.modelFiles}
+              resolvedPaths={cfg.resolvedPaths}
               disabled={blocked}
               onChange={cfg.setField}
             />
