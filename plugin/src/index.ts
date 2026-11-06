@@ -58,6 +58,7 @@ import { indexPath, memoryRelativePath, missingVectorCount, openIndex, rewriteLe
 import { indexWrittenFile } from "./memory-scan.js";
 import { buildMemoryTools, EMBED_BUDGET, type RetrievalTools } from "./memory-tools.js";
 import { createAutoEmbedScheduler } from "./auto-embed.js";
+import { createIndexReconciler } from "./index-reconcile.js";
 import { completeThroughHost } from "./llm.js";
 import { buildStandingIntentTool } from "./standing-intents.js";
 import { installMemoryInjection } from "./recall-inject.js";
@@ -402,6 +403,17 @@ export default Plugin.define({
      */
     let scheduleAutoEmbed: (file: string) => void = () => {};
     let disposeAutoEmbed: () => void = () => {};
+    /** openclaw's 5-minute recovery scan: files the write path never named. */
+    let disposeIndexReconcile: () => void = () => {};
+    /**
+     * Whole-index background embed pass, driven by the recovery scan.
+     *
+     * Bound by the retrieval block, which is the only place with a live
+     * `retrieval` object; calling it before that is a no-op. `closed` is read
+     * per batch so a plugin unload stops the loop between chunks rather than
+     * running to the end of a long index.
+     */
+    let embedWholeIndex: (budget: number) => Promise<number> = async () => 0;
 
     // The extraction transport. `model.content` decides this, and nothing else does.
     //
@@ -467,6 +479,55 @@ export default Plugin.define({
       });
       scheduleAutoEmbed = (file) => autoEmbed.schedule(memoryRelativePath(file));
       disposeAutoEmbed = autoEmbed.dispose;
+
+      // The whole-index embed pass. Loops while a batch fills its budget, because
+      // the recovery scan asks it to drain everything that is missing rather
+      // than take one slice of it; a batch that did not fill the budget means
+      // nothing is left. Single-flight by construction: `embedMissing` is
+      // `RetrievalTools`'s own, which is bound once here, and the reconcile pass
+      // is the only caller -- `repairEmbedder` has its own loop and its own
+      // in-flight promise.
+      embedWholeIndex = async (budget: number): Promise<number> => {
+        let total = 0;
+        for (;;) {
+          if (closed) break;
+          // No `paths`: the whole index. No `signal`: this is a background loop
+          // with no request to cancel, same as `repairEmbedder`.
+          const written = await retrieval.embedMissing(budget);
+          total += written;
+          if (written < budget) break;
+        }
+        return total;
+      };
+
+      // Upstream's recovery pass, at its own five-minute cadence. Covers what
+      // the write path cannot name -- a hand-edited MEMORY.md, a wiki page -- and
+      // so makes `memory_reindex` a repair tool rather than the only way a file
+      // becomes visible. It does not replace `memory_reindex`: that still rebuilds
+      // everything explicitly.
+      //
+      // Deliberately placed BEFORE the embedder repair below: the repair looks
+      // for stale rows, which is a different question from "is anything missing",
+      // and the two must not race over the same chunks.
+      const reconcile = createIndexReconciler({
+        db: index,
+        ...(modelConfig.embedderId ? { model: modelConfig.embedderId } : {}),
+        options,
+        log,
+        vectorsEnabled: vectorsUsable,
+        missingVectors: () => missingVectorCount(index, modelConfig.embedderId),
+        // Probe only. A recovery pass must never be the thing that pulls a
+        // multi-GB model into memory, so the question is "is one already up",
+        // answered by the same `probeService` the Runtime page uses.
+        serviceUp: async () => (await probeService(serviceConfig)) !== null,
+        scheduleEmbed: () => {
+          // Fire-and-forget: the pass that scheduled it has nothing to report to.
+          void embedWholeIndex(EMBED_BUDGET).catch((error) =>
+            log("index reconcile embed failed", error),
+          );
+        },
+      });
+      disposeIndexReconcile = reconcile.dispose;
 
       // 换嵌入运行时/模型后，旧行的向量已失效且向量 lane 查不到它们
       // （`searchVector` 只查 `model = embedderId`）——后台按需全重嵌。
@@ -1372,6 +1433,7 @@ export default Plugin.define({
     return () => {
       closed = true;
       disposeAutoEmbed();
+      disposeIndexReconcile();
       controller.abort();
       for (const timer of settleTimers.values()) clearTimeout(timer);
       settleTimers.clear();

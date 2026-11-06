@@ -69,6 +69,7 @@ import type {
 } from "../../extensions/memory-core/src/capture/types.js";
 import { buildFlushPrompt, buildFlushSystemPrompt } from "./flush-config.js";
 import { ensureFlushTargetFile } from "./flush-target.js";
+import { withMemoryFileLock } from "./memory-file-lock.js";
 import { dailyMemoryFile, memoryHomeDir } from "./paths.js";
 import { withWriteProvenance } from "./write-provenance.js";
 
@@ -285,11 +286,19 @@ export async function runFlush(params: {
       // workspace-relative path, which is correct only where the workspace *is* the
       // memory home. The plugin always supplies `writeEntry`, so nothing reaches it
       // here -- and it is deliberately not the path the guard prepared above.
+      //
+      // The lock is here for the same reason it is in `writeEntry` (`#131604`):
+      // this is the same read-modify-append on the same daily file, so an
+      // unlocked fallback would be the one door left open. The two branches
+      // are kept identical on purpose -- a fallback that is less safe than the
+      // path it stands in for is not a fallback.
       await withWriteProvenance({
         memoryHome: params.deps.workspaceDir,
         absolutePath: target.absolutePath,
         append: async () => {
-          await appendCaptureEntry({ absolutePath: target.absolutePath, rendered, entryKey });
+          await withMemoryFileLock(target.absolutePath, async () => {
+            await appendCaptureEntry({ absolutePath: target.absolutePath, rendered, entryKey });
+          });
         },
       });
       writtenPath = target.absolutePath;

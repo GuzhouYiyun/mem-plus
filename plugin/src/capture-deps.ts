@@ -10,6 +10,7 @@ import { appendCaptureEntry, readCaptureTargetText } from "../../extensions/memo
 import { captureEntryMarker } from "../../extensions/memory-core/src/capture/render.js";
 import { dailyMemoryFile, homeProjectMemoryDir, memoryFile, memoryHomeDir } from "./paths.js";
 import { resolveProjectKey } from "./project-key.js";
+import { withMemoryFileLock } from "./memory-file-lock.js";
 import { withWriteProvenance } from "./write-provenance.js";
 import type { HostedModelRef } from "./model/config.js";
 import { completeThroughHost } from "./llm.js";
@@ -174,12 +175,28 @@ export function createCaptureDependencies(
       // openclaw's write-path provenance, taken by the writer. A human edit to the
       // file between two captures downgrades the next append to `untrusted`, which
       // is what keeps curated promotion honest.
+      //
+      // THE LOCK IS PART OF THE WRITE (2026-11-06, fixes `#131604` on this path).
+      // Two sessions of the same project can land a capture for the same day file
+      // within milliseconds of each other -- the plugin is loaded once per workspace,
+      // and a sweep in one window knows nothing about a sweep in another. Without a
+      // lock both read the same tail, both pass the marker check, and both append:
+      // the second append is not lost, it is *duplicated*, and upstream's fix for the
+      // same race in the promotion path (`short-term-promotion-apply.ts:398`) is a
+      // lock plus a conflict-checked commit. The marker alone cannot close it because
+      // the marker check happens before either write lands.
       await withWriteProvenance({
         memoryHome: memoryHomeDir(),
         absolutePath: target,
         sessionId: record.sessionId || undefined,
         append: async () => {
-          await appendCaptureEntry({ absolutePath: target, rendered, entryKey });
+          // Inside the lock: the append and the provenance record are one critical
+          // section, so a peer cannot slip between "appended" and "recorded who
+          // wrote it" either. `withMemoryFileLock` is upstream's own
+          // `withFileLock` with upstream's own promotion-path options.
+          await withMemoryFileLock(target, async () => {
+            await appendCaptureEntry({ absolutePath: target, rendered, entryKey });
+          });
         },
       });
       return target;
