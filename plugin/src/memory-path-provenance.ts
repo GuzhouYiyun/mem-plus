@@ -105,5 +105,11 @@ export async function resolveMemoryPathClassification(params: {
   // Workspace memory Markdown is owner-controlled. Flush-recorded provenance
   // still downgrades machine-written untrusted material during ingestion; the
   // index default must not fail closed the entire workspace.
-  return { curatedRoot, originClass: isWorkspaceMemory ? "agent" : "untrusted" };
+  // Companion (D2): USER.md is the user's own profile. A file with no recorded
+  // provenance was written by the owner, not by an agent, so it defaults to
+  // `owner` rather than `agent` -- an agent write later downgrades to
+  // `untrusted` through the ratchet, which is what keeps it from claiming
+  // owner-authored preference fields.
+  const isUserMd = curatedRoot && segments[0]?.toLowerCase() === "user.md";
+  return { curatedRoot, originClass: isUserMd ? "owner" : isWorkspaceMemory ? "agent" : "untrusted" };
 }

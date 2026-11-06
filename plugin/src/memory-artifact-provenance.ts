@@ -173,6 +173,10 @@ function toPublicProvenance(stored: StoredMemoryArtifactProvenance): MemoryArtif
   };
 }
 
+import { createLogger } from "./log.js";
+
+const log = createLogger("provenance");
+
 export async function recordMemoryArtifactWriteProvenance(params: {
   workspaceDir: string;
   relativePath: string;
@@ -198,6 +202,17 @@ export async function recordMemoryArtifactWriteProvenance(params: {
         (previous.originClass === "agent" && previous.fileHash === sha256Hex(params.contentBefore)))
         ? "agent"
         : "untrusted";
+    // D2: make the ratchet visible. A requested `agent` write that lands as
+    // `untrusted` is a downgrade, and staying silent is the defect (#153426).
+    if (params.originClass === "agent" && originClass === "untrusted") {
+      const reason =
+        !previous
+          ? "no prior provenance record"
+          : previous.originClass === "untrusted"
+            ? "prior provenance already untrusted"
+            : "content changed since last agent write (human edit or tainted turn)";
+      log(`provenance downgraded to untrusted: ${address.relativePath} (${reason})`);
+    }
     return {
       version: 1,
       workspaceKey: address.workspaceKey,

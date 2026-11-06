@@ -263,8 +263,9 @@ async function classify(
         contentBefore: text,
       });
     }
+    const isUserMd = path.basename(entry.file).toLowerCase() === "user.md";
     return {
-      originClass: stale ? "untrusted" : classification.originClass,
+      originClass: stale ? (isUserMd ? "owner" : "untrusted") : classification.originClass,
       sessionKind: recorded && !stale ? "interactive" : "unknown",
       observedAt: recorded && !stale ? recorded.observedAt : entry.mtime,
       curatedRoot: classification.curatedRoot,

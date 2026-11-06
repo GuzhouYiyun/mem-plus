@@ -32,6 +32,7 @@
 import type { DatabaseSync } from "node:sqlite";
 import { memoryHomeDir } from "./paths.js";
 import { discoverHomeFiles, discoverWikiFiles, reindexFiles } from "./memory-scan.js";
+import { pruneIndexRetention, INDEX_RETENTION_MAX_CHUNKS } from "./memory-index.js";
 import { readWikiConfig } from "./wiki/config.js";
 
 /** Upstream's recovery interval: the indexing timer re-checks sources every 5 min. */
@@ -115,11 +116,13 @@ export function createIndexReconciler(options: IndexReconcileOptions): IndexReco
         : null;
 
       const pruned = homeReport.pruned + (wikiReport?.pruned ?? 0);
-      if (homeReport.indexed > 0 || pruned > 0) {
+      const retained = pruneIndexRetention(options.db, INDEX_RETENTION_MAX_CHUNKS, memoryHomeDir());
+      if (homeReport.indexed > 0 || pruned > 0 || retained > 0) {
         options.log(
           `index reconcile: ${homeReport.indexed} memory file(s) re-indexed` +
             (wikiReport ? `, ${wikiReport.indexed} wiki page(s)` : "") +
-            (pruned > 0 ? `, ${pruned} document(s) removed from disk` : ""),
+            (pruned > 0 ? `, ${pruned} document(s) removed from disk` : "") +
+            (retained > 0 ? `, ${retained} chunk(s) pruned for retention` : ""),
         );
       }
 

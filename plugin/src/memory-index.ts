@@ -22,7 +22,7 @@
 //   snippet is not.
 import type { SQLInputValue } from "node:sqlite";
 import { DatabaseSync } from "node:sqlite";
-import { mkdirSync, statSync } from "node:fs";
+import { mkdirSync, renameSync, statSync } from "node:fs";
 import { createHash } from "node:crypto";
 import path from "node:path";
 import { bm25RankToScore } from "../../extensions/memory-core/src/memory/keyword-query.js";
@@ -33,7 +33,7 @@ import {
 import { memoryHomeDir, stateRoot } from "./paths.js";
 import { clearSource, writeSourceChunks } from "./memory-index-write.js";
 import { ensureMemoryIndexSchema } from "./memory-index-schema.js";
-import { sourceOf, WIKI_SOURCE, type IndexRoot } from "./memory-corpus.js";
+import { sourceOf, WIKI_SOURCE, type IndexRoot, type MemPlusSource } from "./memory-corpus.js";
 import type { MemoryEntryProvenance, MemorySearchResult } from "../../packages/memory-host-sdk/src/host/types.js";
 import {
   readCuratedMemoryTriggerCandidates,
@@ -1284,6 +1284,7 @@ export function search(params: {
   });
 }
 
+
 export function indexStats(db: DatabaseSync): IndexStats {
   const count = (sql: string): number => (db.prepare(sql).get() as { n: number }).n;
   let bytes = 0;
@@ -1302,3 +1303,83 @@ export function indexStats(db: DatabaseSync): IndexStats {
     bytes,
   };
 }
+
+/**
+ * Retention: keep the index bounded (D4).
+ */
+/**
+ * Retention: keep the index bounded (D4).
+ *
+ * Real policy beyond the skeleton: episodic daily sources are evicted oldest-first
+ * by (importance, mtime), curated files and wiki are never touched, and evicted
+ * source files are moved into `memory/archive/` rather than deleted so the
+ * "No hidden state / index rebuildable" contract survives (Phase 4 archive).
+ *
+ * Chain: docs/memory-chain.md §11 #114612 (unbounded index) and companion-plan
+ * §4 (archive, not delete).
+ */
+export function pruneIndexRetention(
+  db: DatabaseSync,
+  maxChunks: number,
+  memoryHome: string = memoryHomeDir(),
+): number {
+  const total = (db.prepare("SELECT COUNT(*) AS n FROM memory_index_chunks").get() as { n: number }).n;
+  if (total <= maxChunks) return 0;
+
+  const curated = new Set(["MEMORY.md", "USER.md", "memory.md", "user.md"]);
+  const sources = db
+    .prepare(
+      `SELECT s.path AS path, s.source AS source, s.mtime AS mtime,
+              COUNT(c.id) AS chunks, MAX(m.importance) AS importance
+         FROM memory_index_sources s
+         LEFT JOIN memory_index_chunks c ON c.path = s.path AND c.source = s.source
+         LEFT JOIN memory_index_chunk_recall_metadata m ON m.chunk_id = c.id
+        WHERE s.source = 'memory'
+        GROUP BY s.path, s.source`,
+    )
+    .all() as { path: string; source: string; mtime: number; chunks: number; importance: number | null }[];
+
+  const candidates = sources.filter((src) => {
+    if (curated.has(src.path)) return false;
+    if (src.path.startsWith("archive/")) return false;
+    // Only episodic daily sources are eligible: curated roots and DREAMS are
+    // already excluded above; anything not under memory/<slug>/ is global core.
+    if (!/^memory\/[^/]+\/\d{4}-\d{2}-\d{2}/.test(src.path)) return false;
+    return true;
+  });
+
+  // Evict the least valuable first: low importance, then oldest mtime.
+  candidates.sort((a, b) => {
+    const ia = a.importance ?? 0;
+    const ib = b.importance ?? 0;
+    if (ia !== ib) return ia - ib;
+    return a.mtime - b.mtime;
+  });
+
+  let current = total;
+  let removed = 0;
+  for (const src of candidates) {
+    if (current <= maxChunks) break;
+    const absolute = path.join(memoryHome, src.path);
+    const archivePath = path.join(memoryHome, "archive", src.path);
+    try {
+      try {
+        statSync(absolute);
+        mkdirSync(path.dirname(archivePath), { recursive: true });
+        renameSync(absolute, archivePath);
+      } catch (error) {
+        // Missing source file: index-only cleanup is still correct.
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+    } catch {
+      // If the file cannot be moved, leave it indexed rather than silently
+      // dropping rows that the next reconcile pass would just re-add.
+      continue;
+    }
+    removed += clearSource(db, src.path, src.source as MemPlusSource);
+    current = (db.prepare("SELECT COUNT(*) AS n FROM memory_index_chunks").get() as { n: number }).n;
+  }
+  return removed;
+}
+
+export const INDEX_RETENTION_MAX_CHUNKS = 50_000;
