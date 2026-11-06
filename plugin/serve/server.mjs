@@ -36,7 +36,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createServer, request as httpRequest } from "node:http";
-import { createWriteStream, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { createWriteStream, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
@@ -420,6 +420,84 @@ async function applyLatestNightly() {
   log(`runtime.json now pins ${tag} (digests from GitHub API, alignment)`);
 }
 
+/**
+ * LM「扩展包」语义的收尾清理（机主 2026-11-05 拍板按 LM 的定义改）：zip 是
+ * 暂存品不是公民——目录解压落位后 zip 没有任何消费者，整族的
+ * `llama-b*-bin-win-<fam>-x64.zip`（**含当前 tag**）连同同家族的其他 tag
+ * 目录（`llama-b*-win-<fam>-x64`）一起删。保留的只有：正在用的当前 tag
+ * 目录、其他变体家族（用户可能切回去）、不带 tag 的 cudart 共享包（跨 tag
+ * 复用，删了每次 nightly 更新都要重下 423 MB——它是缓存，不是暂存品）。
+ * zip 删掉的代价 = 目录半截损坏时没有本地重解的自愈，改走重下载；这正是
+ * LM 自己的行为（pack 装完即弃，修复 = 重新下载）。被运行中的 llama-server
+ * 锁住就跳过记日志——best-effort，下次对齐再清，绝不让清理弄崩准备流程。
+ */
+function sweepRuntimeOrphans(dir) {
+  const runtimeRoot = path.dirname(dir);
+  const family = releaseVariantString(config.variant);
+  const keep = new Set([path.basename(dir)]);
+  // 孤儿两类、两个正则：目录 `llama-b<tag>-win-<family>-x64`，zip
+  // `llama-b<tag>-bin-win-<family>-x64.zip`。isDir 决定按哪条式子匹配。
+  const dirRe = new RegExp(`^llama-b\\d+-win-${family.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}-x64$`);
+  const zipRe = new RegExp(`^llama-b\\d+-bin-win-${family.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}-x64\\.zip$`);
+  let entries;
+  try {
+    entries = readdirSync(runtimeRoot);
+  } catch (error) {
+    log(`runtime sweep skipped: ${error.message}`);
+    return;
+  }
+  let removed = 0;
+  for (const entry of entries) {
+    if (keep.has(entry)) continue;
+    const full = path.join(runtimeRoot, entry);
+    let isDir = false;
+    try {
+      isDir = statSync(full).isDirectory();
+    } catch {
+      continue; // 扫的刹那被删了，正合我意
+    }
+    if (!(isDir ? dirRe : zipRe).test(entry)) continue;
+    try {
+      rmSync(full, { recursive: true, force: true });
+      removed += 1;
+    } catch (error) {
+      log(`runtime sweep skip ${entry}: ${error.message}`);
+    }
+  }
+  if (removed > 0) log(`runtime sweep: removed ${removed} orphan(s) of ${family}`);
+}
+
+/**
+ * 同变体家族里「装过且还能跑」的最高 tag 目录——LM 的 localVersion 维度
+ * （机主 2026-11-05 拍板对齐 LM：装了旧版 ≠ 没装）。与 plugin/src/model/
+ * config.ts 的 `installedRuntimeTag` 同一算法，那边报装、这边回退运行，
+ * 不一致页面就会骗人。
+ */
+function findInstalledVariantDir(pinnedDir) {
+  const family = releaseVariantString(config.variant).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const famRe = new RegExp(`^llama-b(\\d+)-win-${family}-x64$`);
+  const runtimeRoot = path.dirname(pinnedDir);
+  let entries;
+  try {
+    entries = readdirSync(runtimeRoot);
+  } catch {
+    return null;
+  }
+  let best = null;
+  let bestTag = -1;
+  for (const entry of entries) {
+    const match = famRe.exec(entry);
+    if (!match) continue;
+    const n = Number(match[1]);
+    if (n <= bestTag) continue;
+    const full = path.join(runtimeRoot, entry);
+    if (!existsSync(path.join(full, "llama-server.exe"))) continue;
+    best = full;
+    bestTag = n;
+  }
+  return best && path.basename(best) !== path.basename(pinnedDir) ? best : null;
+}
+
 async function ensureRuntime() {
   let dir = runtimeDir();
   const exe = path.join(dir, "llama-server.exe");
@@ -441,7 +519,23 @@ async function ensureRuntime() {
     log(`latest alignment failed, continuing with ${RUNTIME.tag}`, error);
   }
   dir = runtimeDir(); // tag 可能已翻，路径必须重算
-  if (existsSync(path.join(dir, "llama-server.exe"))) return dir;
+  if (existsSync(path.join(dir, "llama-server.exe"))) {
+    sweepRuntimeOrphans(dir); // 新 tag 目录早就在盘上（比如上次下过），孤儿照样清
+    return dir;
+  }
+
+  // LM 语义（机主 2026-11-05 拍板：「已装」与「装的是钉死版」是两个维度）：
+  // 钉死版没在位、家族却有能跑的旧版 = 正常启动直接用它。不为一次 tag 漂移
+  // 卡死服务、也不让半夜的启动被迫下载 24 MB——换最新是准备动作（--ensure /
+  // 网页更新）的职责，启动对齐稍后自己把新版带来。回退目录不做 sweep：它
+  // 自己就是用中的那个。
+  if (!config.ensureOnly && !config.forcePrepare) {
+    const fallback = findInstalledVariantDir(dir);
+    if (fallback) {
+      log(`runtime: ${path.basename(dir)} not installed, running installed ${path.basename(fallback)}`);
+      return fallback;
+    }
+  }
 
   // 下载包清单：vulkan/cpu 各一个 zip；cuda 两个（官方把 cudart 拆成独立包，
   // 169 MB 构建 + 423 MB cudart，两个都要解到同一目录 llama-server 才能跑）。
@@ -488,7 +582,9 @@ async function ensureRuntime() {
   for (const pack of packs) {
     const zipPath = path.join(runtimeRoot, pack.file);
     if (!existsSync(zipPath) || statSync(zipPath).size === 0) {
-      const partPath = `${zipPath}.part`;
+      // 每进程独立 .part：一次启动按工作区装载 N 次、并发 N 个 --ensure，
+      // 共用 .part 会互踩（实测 rename ENOENT）。
+      const partPath = `${zipPath}.${process.pid}.part`;
       log(`downloading runtime ${pack.file} (${Math.round(pack.sizeBytes / 1e6)} MB) from GitHub releases`);
       await downloadTo(downloadUrl(pack.file), partPath);
       renameSync(partPath, zipPath);
@@ -517,6 +613,7 @@ async function ensureRuntime() {
   rmSync(dir, { recursive: true, force: true });
   renameSync(tmp, dir);
   log(`runtime ready: ${dir}`);
+  sweepRuntimeOrphans(dir);
   return dir;
 }
 

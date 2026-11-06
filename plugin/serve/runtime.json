@@ -1,18 +1,18 @@
 {
-  "tag": "b12098",
+  "tag": "b12138",
   "assets": {
     "vulkan": {
-      "sha256": "3d8f6c95b0a18c9b3c7bdfc36cf22400d3f0c03551a89e72f7b90dc42bac5e2a",
-      "sizeBytes": 37660090
+      "sha256": "5fd9523dc1d4ce634a697d760addf5722ec8f7f2dc722234c75124d506d3bb41",
+      "sizeBytes": 37677878
     },
     "cpu": {
-      "sha256": "8d142d409515ce7a0f873654170ef0071d945acd1918fd774d374840917bf211",
-      "sizeBytes": 24708083
+      "sha256": "aa345c7052ef2d03814a3d5a13bd55e70bc27057ee3021d8371199f6ae67e355",
+      "sizeBytes": 24728204
     },
     "cuda": {
       "variant": "cuda-13.4",
-      "sha256": "6399e31fd2e2f455288ce7d717331441708b21e9e57f1a0bb93233e47d1f398c",
-      "sizeBytes": 169174587,
+      "sha256": "55976a7f4a2d711e84b092bbf653fe29a1df538baad8fd5b35f6d214ccef13c1",
+      "sizeBytes": 170766413,
       "cudartSha256": "738f8c251ac22b70c3ae6f83a10cf222725df0395246a2cf58f32bdb85fbe668",
       "cudartSizeBytes": 423535356
     }

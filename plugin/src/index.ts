@@ -46,7 +46,7 @@ import {
   type CaptureCompleteOverride,
 } from "./capture-deps.js";
 import { createStorageOpenKeyedStore } from "./kv.js";
-import { readModelConfig, readRuntimeSpawnFlags, readServiceConfig, resolveEmbedAvailability, resolveRuntimeFile, runtimeCudartZipPath, runtimeDirPath, runtimeTag, runtimeZipPath, serverEntryPath, type RuntimeVariant } from "./model/config.js";
+import { readModelConfig, readRuntimeSpawnFlags, readServiceConfig, resolveEmbedAvailability, resolveRuntimeFile, runtimeCudartZipPath, runtimeDirPath, runtimeTag, runtimeZipPath, serverEntryPath, effectiveRuntimeDirPath, type RuntimeVariant } from "./model/config.js";
 import { readWikiConfig } from "./wiki/config.js";
 import { readWebConfig } from "./web/config.js";
 import { startWebServer } from "./web/server.js";
@@ -722,7 +722,7 @@ export default Plugin.define({
                     // 日志转进 mem-plus.log，进度由 preparing 集合驱动页面灯。
                     const child = spawn(
                       process.execPath.startsWith("node") ? process.execPath : "node",
-                      [entry, "--variant", variant, "--ensure"],
+                      [...nodeSystemCaArgs(), entry, "--variant", variant, "--ensure"],
                       { stdio: ["ignore", "pipe", "pipe"], windowsHide: true },
                     );
                     preparingVariants.add(variant);
@@ -762,7 +762,7 @@ export default Plugin.define({
                     if (!target) {
                       return { ok: false, detail: `不认识的文件：${name}` };
                     }
-                    if (variant === runningVariant() && name === path.basename(runtimeDirPath(variant))) {
+                    if (variant === runningVariant() && name === path.basename(effectiveRuntimeDirPath(variant))) {
                       return {
                         ok: false,
                         detail: "这是当前生效引擎正在使用的文件：先在下拉里切走，再删除它",

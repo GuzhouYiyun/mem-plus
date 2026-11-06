@@ -210,6 +210,48 @@ export function runtimeCudartZipPath(): string {
   return path.join(stateRoot(), "runtime", `cudart-llama-bin-win-${variantFileSuffix("cuda")}-x64.zip`);
 }
 
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * 同变体家族里「装过且还能跑」的最高 tag——LM 的 `localVersion` 维度（机主
+ * 2026-11-05 拍板对齐 LM：装了旧版 ≠ 没装，两维要分开报）。钉死 tag 的目录
+ * 在位则返回钉死值；否则扫 `llama-b<N>-win-<变体串>-x64` 里带
+ * llama-server.exe 的最高 N；家族什么都没有 → null。与 server.mjs 的
+ * `findInstalledVariantDir` 同一算法——那边是运行侧的回退，这里是报装侧的
+ * 实况，两边不一致页面就会骗人（同 runtimeDirPath 改名要跟着改的约定）。
+ */
+export function installedRuntimeTag(variant: RuntimeVariant = "vulkan"): string | null {
+  if (existsSync(path.join(runtimeDirPath(variant), "llama-server.exe"))) return runtimeTag();
+  const re = new RegExp(`^llama-b(\\d+)-win-${escapeRegExp(variantFileSuffix(variant))}-x64$`);
+  let best: number | null = null;
+  try {
+    for (const entry of readdirSync(runtimeFilesDir(), { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const match = re.exec(entry.name);
+      if (!match) continue;
+      if (!existsSync(path.join(runtimeFilesDir(), entry.name, "llama-server.exe"))) continue;
+      const n = Number(match[1]);
+      if (best === null || n > best) best = n;
+    }
+  } catch {
+    return null; // runtime/ 还没出生 = 该家族确实没装过
+  }
+  return best === null ? null : `b${best}`;
+}
+
+/**
+ * 服务实际会用的运行时目录：钉死版在位用它，否则回退家族最新——与
+ * server.mjs `ensureRuntime` 的正常启动回退一一对应。家族也空时返回钉死
+ * 路径原样（调用方自己 existsSync，形状不变）。
+ */
+export function effectiveRuntimeDirPath(variant: RuntimeVariant = "vulkan"): string {
+  const installed = installedRuntimeTag(variant);
+  if (installed === null || installed === runtimeTag()) return runtimeDirPath(variant);
+  return path.join(stateRoot(), "runtime", `llama-${installed}-win-${variantFileSuffix(variant)}-x64`);
+}
+
 /** runtime 落地目录本身（`<stateRoot>/runtime`）——「已下载文件」列表从这里枚举。 */
 export function runtimeFilesDir(): string {
   return path.join(stateRoot(), "runtime");
@@ -475,8 +517,8 @@ export function readServiceConfig(options: unknown): ServiceConfig {
 /**
  * spawn 时刻活读的开关（auto-prepare 与引擎变体）。装载期捕获值打底，
  * config.jsonc 里页面写过的值覆盖——页面改完**下次 spawn** 即生效，不必等
- * 插件重载。变体也活读（机主 2026-11-05 拍板「选中即生效」，对齐 LM）：
- * select 写完配置立即重启推理服务，重启拉起的 spawn 读到的就是新值。
+ * 插件重载。变体也活读：select 只写配置，服务已经在跑才顺手重启换引擎
+ * （机主 2026-11-06 定，照 LM Studio：选中不等于起服务）。
  * 文件读失败（无 settings 文件）→ 原样返回捕获值。
  */
 export function readRuntimeSpawnFlags(captured: ServiceConfig): {

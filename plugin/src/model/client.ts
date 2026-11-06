@@ -325,9 +325,8 @@ export function createServiceClient(
     }
 
     // auto-prepare 开关与引擎变体都在 spawn 时活读 config.jsonc（Runtime 页
-    // 改完，下次 spawn 即生效，不必等插件重载）。变体活读是 select 即时生效
-    // 的地基（机主 2026-11-05 拍板，对齐 LM「选中即生效」）：select 写完配置
-    // 立即重启服务，重启拉起的这次 spawn 读到的就是新变体。
+    // 改完，下次 spawn 即生效，不必等插件重载）。select 只写配置，服务已经在
+    // 跑才顺手重启换引擎（机主 2026-11-06 定，照 LM Studio：选中不等于起服务）。
     const spawnFlags = readRuntimeSpawnFlags(service);
     const extraArgs = [
       ...(spawnFlags.autoPrepareRuntime ? [] : ["--no-auto-prepare"]),
