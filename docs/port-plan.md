@@ -3584,6 +3584,61 @@ pinned/latest 双语义就此收档。
   跨 nightly cos=1.0,两版并存期间没有任何正确性差别,只是列表里多一条待清
   孤儿,交给 sweep。
 
+## 已知缺陷 D1:并发 flush/capture 写竞争(2026-11-06)
+
+对应 `docs/memory-chain.md` §11 的 flush race(`#131604`)。上游在提升路径上修过
+(`extensions/memory-core/src/short-term-promotion-apply.ts:398`):`withFileLock`
++ `withMemoryWorkspaceLock` 双锁,锁内重读 store 与源文件、逐候选比对指纹,
+只提交未被别人动过的候选。mem-plus 的 capture/flush 写路径当时完全无锁——
+`appendCaptureEntry`(`extensions/memory-core/src/capture/write.ts:48`)是裸的
+read-modify-append,唯一的防线是写前的 marker 检查,而 marker 检查发生在两次写
+之间,两个都在锁外,因此拦不住并发。
+
+**结果**:
+
+- 锁落在**目标日文件**上,不是 memory home。上游的提升锁本身就是 per-file
+  (`resolveMemoryPromotionLockTarget` 哈希 workspace 成一个路径,再对那一个路径
+  `withFileLock`),所以这不是发明粒度,是照它。`withMemoryWorkspaceLock` 没有
+  采用:它锁整个 home,会把三个项目的写入互相堵死——同项目同日文件的竞争才是
+  这个缺陷,跨项目的写入本来就没有共享文件。
+- 锁参数照抄上游 `MEMORY_WRITE_LOCK_OPTIONS`(`short-term-promotion-apply.ts:64`):
+  `retries 100 / factor 1.2 / 25-250ms`、`stale 120_000`、`staleRecovery:
+  "fail-closed"`。fail-closed 的含义:锁拿不到就是写失败,caller 看到失败,
+  不是看到"写成功了但条目丢了"。
+- 临界区包住 append 与 provenance 记录两件事(锁在 `withWriteProvenance` 的
+  `append` 回调内)。`withWriteProvenance` 是先读 before、再 append、再读 after,
+  然后按 `contentBefore` 的哈希决定 originClass 是否保持 `agent`——这两步不同时
+  进临界区,别人的一次写入就能嵌在中间,让这条记录的 downgrade 判断失真。
+- 覆盖两条写路径:`capture-deps.ts` 的 `writeEntry`(插件恒传的主路径)与
+  `flush-run.ts` 的 append fallback(fallback 是同一形状的同一文件写入,留一扇
+  没锁的门等于没修)。
+- 验证:bun 直驱新模块 `withMemoryFileLock`,三个并发 writer 打同一个日文件,
+  错峰启动下进入顺序 A→B→C 严格串行,三次 append 全部落盘,sidecar 释放后无
+  残留。门禁:`tsc -p tsconfig.plugin.json` 4240 = 基线(`plugin/`+`extensions/`
+  +`bootstrap` 0 错)、`tsc -p tsconfig.capture.json` 331 = 基线(自有 0 错)、
+  `web` `tsc` 0、`audit-npm-pack.mjs --check` no drift、api-e2e/files-e2e ALL PASS。
+
+**经验**:
+
+- `openclaw/plugin-sdk/file-lock` 这条 import 链在本树是可用的,但**可用不等于
+  已经注册**:alias 由 `plugin/scripts/link-openclaw-alias.mjs` 按
+  `src/plugin-sdk/` 的源清单生成,`src/plugin-sdk/file-lock.ts` 在册,所以
+  postinstall 之后 `node_modules/openclaw/plugin-sdk/file-lock.ts` 必然存在。
+  新加一个 import 之前,先确认它在册,不要凭"extensions 已经在用"推断——那是
+  `extensions/` 自己的事。
+- 锁 smoke 第一版的断言写错了:`/A\(\d+\) B\(\d+\) C\(\d+\)/` 断言三个固定顺序,
+  而锁只保证互斥、不保证谁先进,于是把"锁有效"测成了"锁无效"。并发断言只能测
+  **不变量**(进入临界区期间只有一个 holder、全部条目都落盘),不能测顺序。
+
+**设计理念**:
+
+- 锁不放进 `appendCaptureEntry` 自己:它是 vendored 的 openclaw 原文件,上游没有
+  在那里加锁(上游锁在调用侧),改 vendored 文件会让下一次对上游的字节比对失真。
+  锁放调用侧,与上游同一形状。
+- marker 检查保留。锁是新的第一道,marker 退成第二道:它在单进程内仍然免费,
+  而且能挡住"同一条目被重放"这种与并发无关的情况。删掉它是拿一个不需要的
+  行为变化换零收益。
+
 ## Runtime 选中不再起服务:照 LM 的默认引擎语义(2026-11-06)
 
 **结果**:
@@ -3682,6 +3737,3 @@ pinned/latest 双语义就此收档。
 - 三道门里 `serviceUp` 是唯一碰外部的,所以它被放在最后:零缺失时一次 COUNT
   就返回,服务不在跑时只留一行日志——兜底扫描永远不该是"顺手把 4 GB 模型拉起来"
   的那个动作。
-
-
-
