@@ -3504,3 +3504,200 @@ pinned/latest 双语义就此收档。
 - 快照开 autoEmbed 不改上游语义:上游(`manager-index-preparation.ts:79`)
   索引完成即嵌,embedMissing 本来就是 mem-plus 因预算而加的节流层;快照
   当场补零向量只是把「可搜索」的时间点拉回上游的水位,不是新增行为。
+
+## LM 语义的运行时版本清理(2026-11-05)
+
+**结果**:
+
+- 机主拍板「按 LM 的定义改」:zip 是暂存品、版本按带版本号目录区分、旧版本
+  自动删。mem-plus 落地为 server.mjs `sweepRuntimeOrphans`:解压 rename 成功
+  后与「新 tag 目录已在盘上」的早退路径各调一次,扫 state root 的 runtime/,
+  删**同变体家族**的其他 tag 目录(`llama-b*-win-<fam>-x64`)与整族 zip
+  (`llama-b*-bin-win-<fam>-x64.zip`,**含当前 tag 的**——机主追问「zip 为
+  啥还在」后按 LM 彻底看齐:解包即弃);保留的只有当前 tag 目录、其他家族、
+  不带 tag 的 cudart 共享包(跨 tag 复用,删了每次更新重下 423 MB,它是缓存
+  不是暂存品)。被锁就跳过记日志,best-effort。
+- 冒烟 PASS（定稿形状）:早退路径夹具 5 件孤儿(2 旧目录+2 旧 zip+1 **当前
+  tag 的 zip**)全删,只剩当前目录与 cudart;强制重下载路径解压后当前 zip
+  也被 sweep 清走;cpu 家族全程不动。
+- 门禁:node --check 0、plugin/capture tsc 自有 0、audit no drift、api-e2e
+  44/44、files-e2e 21/21、exe 重打 smoke 18/18、temp/两注册表键已清。
+
+**经验**:
+
+- zip 文件名带 tag(`llama-b12125-bin-win-vulkan-x64.zip`),**cudart 包不带**
+  (`cudart-llama-bin-win-cuda-13.4-x64.zip`)——按 `^llama-b\d+` 匹配天然
+  放过它,不必特判。反过来说 cudart 才是真「共享暂存品」,跨 tag 复用。
+- 离线快路径(exe 在位即回,零网络动作)不能挂 sweep:正常服务启动每次扫
+  盘删目录,会把「启动绝不联外部状态变化」的不变量弄脏。清理只挂在**准备
+  动作**(--ensure / 网页下载)之后,与 LM 的 autoDelete 发生在更新完成后
+  同构。
+
+**设计理念**:
+
+- LM 解包即弃 zip,mem-plus 原样照抄(机主 2026-11-05 追问「zip 为啥还在」
+  后定的):目录落位后 zip 没有消费者,当前 tag 的也删。代价如实写进注释:
+  目录半截损坏时没有「本地校验重解不联网」的自愈,改走重下载——LM 的修复
+  路径本来就是重新下载 pack。安装器预置的 zip 同样在首跑解压后被清掉。
+- cuda 家族按完整变体串匹配(`cuda-13.4`),跨 CUDA 大版本的旧目录不算孤儿
+  不自动删——那是「另一个变体家族」,删除决定权留给用户(Runtime 页列表已有)。
+- LRU 语义简化为「只认当前 tag」:mem-plus 同一时刻只运行一个引擎目录,
+  LM 的多后端并存 LRU 在此没有对应物,按语义等价而非机制照抄。
+
+## 装了旧版 ≠ 没装:LM 的两维版本状态(2026-11-05)
+
+**结果**:
+
+- 机主指出:runtime/ 里有 b12121-cpu,Runtime 页 CPU 行却报「未下载」。
+  根因是状态只有一维——`installed: existsSync(runtimeDirPath(v))` 查的是
+  **钉死 tag** 的目录,装了旧版被误报成没装。LM 的 pack 状态是两维:
+  `localVersion` 有值即已装,`remoteVersion !== localVersion` 显示「可更新」
+  箭头;装了旧版永远算装、永远能用。
+- 落地:config.ts 新增 `installedRuntimeTag`(家族内带 exe 的最高 tag)与
+  `effectiveRuntimeDirPath`(钉死版在位用它,否则回退家族最新);server.mjs
+  正常启动同款回退(`findInstalledVariantDir`,--ensure/--force-prepare 不回退);
+  API 行加 `installedVersion`/`updateAvailable`,页面三态:已安装 / 已安装
+  {v}+可更新+「更新」按钮 / 未下载;release 三道门(inUse 列表、API 层、
+  index 闭包)全部改比 effective 目录——回退运行中不再能从列表删掉活 exe。
+- 实测三分支:正常启动钉死版缺+旧版在位 → 回退日志、零下载、不触发
+  auto-prepare 门;--ensure → 对齐 b12125、下载真 cpu 包、解压、sweep 清掉
+  假旧版;config 层 8 断言全过(空盘/旧版/双版取最高/钉死优先/家族隔离/
+  半截目录不认)。门禁全绿、smoke 18/18。
+
+**经验**:
+
+- 顺手抓到 TLS 漏网点:index.ts `prepare` 的 spawn(第 662 行)没传
+  `--use-system-ca`——上轮只改了 service 与 align 两处,同一修复必须搜全
+  spawn 点,漏一处就是「网页更新按钮在这台机器上悄悄对齐失败」。
+- 「已装」的判据从目录存在改成 **目录存在且带 llama-server.exe**:半截目录
+  (解压失败的 .tmp 改名残留等)不算装,回退也不选它。
+
+**设计理念**:
+
+- 回退只放正常启动,不放准备动作:启动的职责是「用盘上能跑的引擎活着」,
+  准备的职责才是「拿最新」。tag 漂移因此卡不死服务,半夜的启动也不会被迫
+  下载 24 MB——更新交给启动对齐/--ensure,与 LM「local 能用、update 后台推」
+  同构。
+- 报装侧(config.ts)与运行侧(server.mjs)必须同一算法:页面与实况不一致,
+  显示就成了骗人。runtimeDirPath 改名要两边跟着改的老约定,扩到了家族扫描。
+- 钉死版在位时优先报钉死值(即使家族里有更高旧版):embedderId 不含 tag、
+  跨 nightly cos=1.0,两版并存期间没有任何正确性差别,只是列表里多一条待清
+  孤儿,交给 sweep。
+
+## 已知缺陷 D1:并发 flush/capture 写竞争(2026-11-06)
+
+对应 `docs/memory-chain.md` §11 的 flush race(`#131604`)。上游在提升路径上修过
+(`extensions/memory-core/src/short-term-promotion-apply.ts:398`):`withFileLock`
++ `withMemoryWorkspaceLock` 双锁,锁内重读 store 与源文件、逐候选比对指纹,
+只提交未被别人动过的候选。mem-plus 的 capture/flush 写路径当时完全无锁——
+`appendCaptureEntry`(`extensions/memory-core/src/capture/write.ts:48`)是裸的
+read-modify-append,唯一的防线是写前的 marker 检查,而 marker 检查发生在两次写
+之间,两个都在锁外,因此拦不住并发。
+
+**结果**:
+
+- 锁落在**目标日文件**上,不是 memory home。上游的提升锁本身就是 per-file
+  (`resolveMemoryPromotionLockTarget` 哈希 workspace 成一个路径,再对那一个路径
+  `withFileLock`),所以这不是发明粒度,是照它。`withMemoryWorkspaceLock` 没有
+  采用:它锁整个 home,会把三个项目的写入互相堵死——同项目同日文件的竞争才是
+  这个缺陷,跨项目的写入本来就没有共享文件。
+- 锁参数照抄上游 `MEMORY_WRITE_LOCK_OPTIONS`(`short-term-promotion-apply.ts:64`):
+  `retries 100 / factor 1.2 / 25-250ms`、`stale 120_000`、`staleRecovery:
+  "fail-closed"`。fail-closed 的含义:锁拿不到就是写失败,caller 看到失败,
+  不是看到"写成功了但条目丢了"。
+- 临界区包住 append 与 provenance 记录两件事(锁在 `withWriteProvenance` 的
+  `append` 回调内)。`withWriteProvenance` 是先读 before、再 append、再读 after,
+  然后按 `contentBefore` 的哈希决定 originClass 是否保持 `agent`——这两步不同时
+  进临界区,别人的一次写入就能嵌在中间,让这条记录的 downgrade 判断失真。
+- 覆盖两条写路径:`capture-deps.ts` 的 `writeEntry`(插件恒传的主路径)与
+  `flush-run.ts` 的 append fallback(fallback 是同一形状的同一文件写入,留一扇
+  没锁的门等于没修)。
+- 验证:bun 直驱新模块 `withMemoryFileLock`,三个并发 writer 打同一个日文件,
+  错峰启动下进入顺序 A→B→C 严格串行,三次 append 全部落盘,sidecar 释放后无
+  残留。门禁:`tsc -p tsconfig.plugin.json` 4240 = 基线(`plugin/`+`extensions/`
+  +`bootstrap` 0 错)、`tsc -p tsconfig.capture.json` 331 = 基线(自有 0 错)、
+  `web` `tsc` 0、`audit-npm-pack.mjs --check` no drift、api-e2e/files-e2e ALL PASS。
+
+**经验**:
+
+- `openclaw/plugin-sdk/file-lock` 这条 import 链在本树是可用的,但**可用不等于
+  已经注册**:alias 由 `plugin/scripts/link-openclaw-alias.mjs` 按
+  `src/plugin-sdk/` 的源清单生成,`src/plugin-sdk/file-lock.ts` 在册,所以
+  postinstall 之后 `node_modules/openclaw/plugin-sdk/file-lock.ts` 必然存在。
+  新加一个 import 之前,先确认它在册,不要凭"extensions 已经在用"推断——那是
+  `extensions/` 自己的事。
+- 锁 smoke 第一版的断言写错了:`/A\(\d+\) B\(\d+\) C\(\d+\)/` 断言三个固定顺序,
+  而锁只保证互斥、不保证谁先进,于是把"锁有效"测成了"锁无效"。并发断言只能测
+  **不变量**(进入临界区期间只有一个 holder、全部条目都落盘),不能测顺序。
+
+**设计理念**:
+
+- 锁不放进 `appendCaptureEntry` 自己:它是 vendored 的 openclaw 原文件,上游没有
+  在那里加锁(上游锁在调用侧),改 vendored 文件会让下一次对上游的字节比对失真。
+  锁放调用侧,与上游同一形状。
+- marker 检查保留。锁是新的第一道,marker 退成第二道:它在单进程内仍然免费,
+  而且能挡住"同一条目被重放"这种与并发无关的情况。删掉它是拿一个不需要的
+  行为变化换零收益。
+
+## 索引恢复扫描:补上 openclaw 的 5 分钟兜底(2026-11-06)
+
+**结果**:
+
+- 新增 `plugin/src/index-reconcile.ts`:`createIndexReconciler`,一个 5 分钟
+  `setInterval`(`unref`,不占事件循环),每趟跑 `discoverHomeFiles` +
+  `discoverWikiFiles` + 两次 `reindexFiles`(home 带 `memoryHome` 与 model,
+  wiki 不带 model),由 `unchangedSources` 的 bytes+mtime+class+model 跳过键
+  兜底——没变就只 stat 不读。
+- 向量补齐的门只有三道:`vectorsEnabled`(关向量就整块跳过)、
+  `missingVectorCount > 0`(一次 COUNT,零缺失连 HTTP 都不发)、
+  `serviceUp()` 用 `probeService`(只探活,不启动)。三道都过才
+  `scheduleEmbed` → `embedWholeIndex(EMBED_BUDGET)` 循环到一批装不满为止。
+- 接线在 `plugin/src/index.ts`:`embedWholeIndex` 与 `disposeIndexReconcile`
+  都在 retrieval 块内绑定,`unload()` 里 `disposeIndexReconcile()` 收尾。
+
+**实测**(bun 直驱 `createIndexReconciler`,temp `XDG_CONFIG_HOME`):
+
+| 场景 | 结果 |
+|---|---|
+| 手写 `memory/<project>/2026-11-06.md` 后跑一趟 | sources 0→1,`memory_search` text 命中该文件 |
+| 同一文件再跑一趟 | 0 条重索引(skip 键生效),sources 不变 |
+| 删掉文件再跑一趟 | sources 1→0(prune 生效) |
+| `missingVectors=3`、服务没在跑 | 1 次 probe,0 次 embed,日志"3 chunk(s) without vectors, no service running" |
+| `missingVectors=2`、服务在跑 | 1 次 probe,1 次 embed |
+| `vectorsEnabled=false` | 0 次 probe、0 次 embed(整块跳过) |
+| wiki 页落盘 | sources +1,`corpus:"wiki"` 命中 |
+| 真 `setup()` + `unload()` | `plugin loaded` / `ready` / unload 无错,索引打开 |
+
+**经验**:
+
+- 探针第一批 `rmSync` 全报 EBUSY:SQLite 的 WAL 还没关就删目录。探针里
+  `db.close()` 之后再延迟删,或者干脆让临时目录留下手动清——不要因此判成
+  "文件被锁住所以索引失败",那是清理时机不是功能缺陷。
+- 真 `setup()` 的 stub ctx 要三件才过得去:`session.hook`(recall-inject 装
+  hook)、`storage.scan`(启动 sweep 读 KV)、`session.context/messages`。少一个
+  就在无关位置抛错,容易错怪到新代码。
+
+**设计理念**:
+
+- 这补的是 mem-plus 相对 openclaw 最实的一个缺口:openclaw 有 chokidar 文件
+  监视,mem-plus 只有写入路径显式 `scheduleAutoEmbed`——用户手改 MEMORY.md、
+  在编辑器里改日文件、往 wiki 目录丢页,都不会被索引,且失败方向最坏:旧的
+  照样返回,新的凭空消失,没有任何报错。5 分钟恢复扫描是上游自己对这个问题的
+  答案("native watchers also perform a full recovery scan every five minutes")。
+- 故意没加 fs.watch。chokidar 式监视能把手改文件的延迟从 5 分钟压到 1.5 秒,
+  但要引一个依赖、要在三个 OpenCode 进程里协调同一棵树的观察者,而 5 分钟扫描
+  已经覆盖了同一批漏网文件。这里取"正确且便宜",不取"更快且更贵"。
+- 间隔与门槛都不可配,与上游一致:`resolveSyncConfig`
+  (`src/agents/memory-search.ts:280-294`) 返回硬编码常量、函数连 `cfg` 都不收,
+  `memory.search.sync.watchDebounceMs` 在 doctor 里只出现在 retired 清单
+  (`legacy-config-migrations.runtime.retired-media.ts:200,222`),没有任何读取
+  路径。给它开一个配置项是发明上游没有的行为。
+- `embedWholeIndex` 不复用 `repairEmbedder` 的循环:后者查的是 stale(换过
+  embedderId 的旧行),这里查的是 missing(还没向量的新行),两个问题、两套轮次
+  与一套"没进展就停"的判据。合成一个会把两个判据搅浑。
+- 三道门里 `serviceUp` 是唯一碰外部的,所以它被放在最后:零缺失时一次 COUNT
+  就返回,服务不在跑时只留一行日志——兜底扫描永远不该是"顺手把 4 GB 模型拉起来"
+  的那个动作。
+
+
+
