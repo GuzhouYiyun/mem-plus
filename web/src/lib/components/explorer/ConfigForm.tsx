@@ -584,20 +584,11 @@ function FieldRow({
   // it cannot know which ones the form manages -- absence is no longer the signal.
   const effective = value === undefined ? field.defaultValue : value;
   const isDefault = effective === field.defaultValue;
+  // A modelFile row shows the FOLDER the listing came from, not advice: it is
+  // where the dropdown gets its names and where a replacement file goes.
+  // `field.help` stays as the line for every other kind, and as the fallback
+  // for a modelFile row when the listing never arrived.
   const helpLine = field.kind === "modelFile" && modelFiles ? modelFiles.dir : field.help;
-  // `model.dir` is a path box: what it says and what the plugin resolved can differ
-  // (blank means a fallback the reader picks). Show the resolved folder beside it,
-  // the way a model host names where the files actually live. `/api/model-files`
-  // reports `readModelConfig`'s own `modelDir`, so this is the directory the
-  // embed service reads -- not a second opinion.
-  const resolvedDir =
-    field.key === "model.dir"
-      ? resolvedPaths?.modelDir ?? modelFiles?.dir ?? null
-      : field.key === "web.dir"
-      ? resolvedPaths?.webDir ?? null
-      : field.key === "wiki.dir"
-      ? resolvedPaths?.wikiDir ?? null
-      : null;
 
   return (
     <div className="grid gap-1.5 sm:grid-cols-[minmax(0,15rem)_minmax(0,1fr)] sm:items-start sm:gap-4">
@@ -628,6 +619,7 @@ function FieldRow({
             models={models}
             modelsAvailable={modelsAvailable}
             modelFiles={modelFiles}
+            resolvedPaths={resolvedPaths}
             disabled={disabled}
             onChange={onChange}
           />
@@ -644,17 +636,7 @@ function FieldRow({
             </Button>
           ) : null}
         </div>
-        {/* A modelFile row shows the FOLDER the listing came from, not advice:
-            it is where the dropdown gets its names and where a replacement file
-            goes. `field.help` stays as the line for every other kind, and as the
-            fallback for a modelFile row when the listing never arrived. */}
         {helpLine ? renderHelpLine(helpLine, helpLine === field.help) : null}
-        {resolvedDir && resolvedDir !== helpLine ? (
-          <p className="flex flex-wrap items-baseline gap-1.5 text-xs text-muted-foreground">
-            <span>{t("cfg-dir-current")}：</span>
-            <code className="break-all">{resolvedDir}</code>
-          </p>
-        ) : null}
       </div>
     </div>
   );
@@ -676,6 +658,7 @@ function Control({
   models,
   modelsAvailable,
   modelFiles,
+  resolvedPaths,
   disabled,
   onChange,
 }: {
@@ -686,6 +669,7 @@ function Control({
   models: ModelOption[] | null;
   modelsAvailable: boolean;
   modelFiles: ModelFileEntries | null;
+  resolvedPaths: { modelDir: string; webDir: string; wikiDir: string } | null;
   disabled: boolean;
   onChange: (next: unknown) => void;
 }) {
@@ -791,13 +775,26 @@ function Control({
 
   if (field.kind === "directory") {
     const current = typeof value === "string" ? value : "";
+    // The box shows what the plugin will actually use: the configured value, or
+    // the resolved default when the key is absent. No muted line underneath, no
+    // "leave blank for default" hint -- the path belongs in the box, as if the
+    // person typed it.
+    const resolved =
+      field.key === "model.dir"
+        ? resolvedPaths?.modelDir ?? null
+        : field.key === "web.dir"
+          ? resolvedPaths?.webDir ?? null
+          : field.key === "wiki.dir"
+            ? resolvedPaths?.wikiDir ?? null
+            : null;
+    const display = current || resolved || "";
     return (
       <div className="flex w-full items-center gap-2">
         <Input
           id={id}
           disabled={disabled}
           className="sm:max-w-md"
-          value={current}
+          value={display}
           onChange={(event) => onChange(event.target.value)}
         />
         <Button
