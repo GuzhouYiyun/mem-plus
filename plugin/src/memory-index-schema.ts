@@ -55,6 +55,30 @@ import { encodeMemoryEmbedding } from "../../packages/memory-host-sdk/src/host/e
 const TOKENIZE_CLAUSE = "";
 
 /**
+ * The `YYYY-MM-DD` in a day file's basename, or null when the name has no date.
+ *
+ * Upstream's own daily-file pattern, `dreaming-ingestion-state.ts:15`
+ * (`DAILY_MEMORY_FILENAME_RE = /^(\d{4}-\d{2}-\d{2})(?:-[^/]+)?\.md$/i`), transcribed
+ * verbatim rather than imported: that module drags `dreaming-state`'s workspace-entry
+ * closure and two plugin-sdk aliases in for one regex, and transcription-with-citation is
+ * already this layer's documented pattern when the import closure outweighs the fact
+ * (see the two transcribed upstream functions in `memory-index.ts`'s read-path note).
+ *
+ * THE SUFFIX HALF IS THE POINT. mem-plus's capture writer names day files
+ * `YYYY-MM-DD-<slug>.md`, and the previous exact-`YYYY-MM-DD.md` reading of this name
+ * hid 576 of the 637 indexed chunks from `since`/`until` -- measured on the 0.3.4
+ * install, 2026-11-07. Upstream always parsed both shapes; the filter now matches.
+ *
+ * Lives here, next to the `day` column it feeds, because the column and this function
+ * are the single date derivation -- see {@link ensureMemoryIndexSchema}.
+ */
+export function dayOf(relativePath: string): string | null {
+  const base = relativePath.slice(relativePath.lastIndexOf("/") + 1);
+  const match = /^(\d{4}-\d{2}-\d{2})(?:-[^/]+)?\.md$/iu.exec(base);
+  return match?.[1] ?? null;
+}
+
+/**
  * Create or reconcile every table and virtual table the index needs.
  *
  * Upstream's own builders are idempotent: `ensureMemoryChunkFtsSchema` drops and
@@ -120,6 +144,47 @@ export function ensureMemoryIndexSchema(db: DatabaseSync): void {
     CREATE INDEX IF NOT EXISTS idx_memory_index_chunks_source
       ON ${MEMORY_INDEX_CHUNKS_TABLE}(source);
   `);
+
+  // THE `day` COLUMN -- mem-plus's own addition, and deliberate.
+  //
+  //   `memory_index.ts`'s since/until used to derive the date in SQL with
+  //   `substr(path, -13, 10)` plus a GLOB, which only sees a bare `YYYY-MM-DD.md`
+  //   basename. That reading disagreed with what this host actually writes
+  //   (`memory/<slug>/YYYY-MM-DD-<topic>.md`) and filtered 90% of the capture corpus
+  //   out of every date query -- measured 2026-11-07 on the 0.3.4 install: 576 of 637
+  //   chunks carried suffixed names, and a windowed search returned empty while the
+  //   same query without a window returned hits.
+  //
+  //   A suffixed basename puts the date at a variable offset from the end of the path
+  //   (it depends on the slug length), so no fixed substr can extract it in SQL. The
+  //   extraction therefore happens once, in {@link dayOf}, at index-write time, and the
+  //   filter compares the stored column. One derivation means the "SQL twin must agree
+  //   with the TypeScript one" hazard the old code carried in a comment is gone by
+  //   construction: there is no second twin left to drift.
+  //
+  //   Undated rows store `''`. That is load-bearing, not a nullable convenience: `''`
+  //   sorts below every ISO date, so an undated file fails every `since` the same way
+  //   the old GLOB made it fail every filter -- see the 'MEMORY.md' probe in
+  //   `memory-index.ts`. A NULL would need an explicit `IS NOT NULL` added to each
+  //   comparison to get there; `''` gets it for free.
+  const sourceColumns = db
+    .prepare("SELECT name FROM pragma_table_info('memory_index_sources')")
+    .all() as { name: string }[];
+  if (!sourceColumns.some((column) => column.name === "day")) {
+    db.exec("ALTER TABLE memory_index_sources ADD COLUMN day TEXT NOT NULL DEFAULT ''");
+  }
+  // Backfill, cheap enough to run on every open instead of becoming a versioned
+  // migration: after the ALTER every row is `''`, and afterwards only undated files
+  // still match (a handful of root and wiki rows). Recomputing those each time keeps
+  // this self-healing without a schema stamp; a dated file always writes its day
+  // through `writeSourceChunks`.
+  const pendingDays = db
+    .prepare("SELECT rowid AS rid, path FROM memory_index_sources WHERE day = ''")
+    .all() as { rid: number; path: string }[];
+  if (pendingDays.length > 0) {
+    const setDay = db.prepare("UPDATE memory_index_sources SET day = ? WHERE rowid = ?");
+    for (const row of pendingDays) setDay.run(dayOf(row.path) ?? "", row.rid);
+  }
 }
 
 /** Upstream's `MemorySource` table name for the revision triggers. */

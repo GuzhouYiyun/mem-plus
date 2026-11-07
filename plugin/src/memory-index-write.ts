@@ -39,7 +39,7 @@
 //   carry `untrusted` while the curated rows carry `agent` in the same database.
 import type { DatabaseSync } from "node:sqlite";
 import { hashText } from "../../packages/memory-host-sdk/src/host/hash.js";
-import { chunkEmbeddingColumn } from "./memory-index-schema.js";
+import { chunkEmbeddingColumn, dayOf } from "./memory-index-schema.js";
 import { chunkMemorySource, DEFAULT_MEMORY_CHUNKING } from "./memory-chunking.js";
 import type { MemPlusSource } from "./memory-corpus.js";
 
@@ -166,11 +166,16 @@ export function writeSourceChunks(params: {
   //   a KNN lookup. The live index holds 1 996 units across 24 documents, and a bounded scan over
   //   that is not a cost worth a native extension and a new setting. If that ever changes, the
   //   fix is upstream's own loader plus a dependency decision, not a revived local branch.
+  // `day` is written here rather than derived in SQL: a `YYYY-MM-DD-<topic>.md` basename
+  // puts the date at a variable offset from the end of the path (it depends on the slug
+  // length), so no fixed `substr` can extract it in a query. `ensureMemoryIndexSchema`
+  // owns the column and its backfill; this is the write half. DO UPDATE re-states it so
+  // a rebuild pass self-heals any row written before the column existed.
   const upsertSource = db.prepare(
-    `INSERT INTO memory_index_sources (path, source, hash, mtime, size)
-     VALUES (?, ?, ?, ?, ?)
+    `INSERT INTO memory_index_sources (path, source, hash, mtime, size, day)
+     VALUES (?, ?, ?, ?, ?, ?)
      ON CONFLICT (path, source) DO UPDATE SET hash = excluded.hash,
-       mtime = excluded.mtime, size = excluded.size`,
+       mtime = excluded.mtime, size = excluded.size, day = excluded.day`,
   );
 
   const now = params.mtime || Date.now();
@@ -212,7 +217,7 @@ export function writeSourceChunks(params: {
       insertRecall.run(id, chunk.importance, chunk.triggers, chunk.projectKey);
       written += 1;
     }
-    upsertSource.run(relativePath, source, params.hash, params.mtime, params.bytes);
+    upsertSource.run(relativePath, source, params.hash, params.mtime, params.bytes, dayOf(relativePath) ?? "");
     if (own) db.exec("COMMIT");
   } catch (error) {
     if (own) db.exec("ROLLBACK");

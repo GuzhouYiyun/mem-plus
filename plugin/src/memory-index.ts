@@ -32,7 +32,7 @@ import {
 } from "../../extensions/memory-core/src/memory/hybrid.js";
 import { memoryHomeDir, stateRoot } from "./paths.js";
 import { clearSource, writeSourceChunks } from "./memory-index-write.js";
-import { ensureMemoryIndexSchema } from "./memory-index-schema.js";
+import { dayOf, ensureMemoryIndexSchema } from "./memory-index-schema.js";
 import { sourceOf, WIKI_SOURCE, type IndexRoot, type MemPlusSource } from "./memory-corpus.js";
 import type { MemoryEntryProvenance, MemorySearchResult } from "../../packages/memory-host-sdk/src/host/types.js";
 import {
@@ -161,9 +161,12 @@ export type SearchFilters = {
  *     search result: it partitions files, it says nothing about openclaw's project identity
  *     (which is the normalised `origin` remote and arrives separately as `projectKey`).
  *     Only used to filter and to count projects in the tool header.
- *   `day` -- the `YYYY-MM-DD` in the basename, derived. Upstream has no date on a search
- *     result; recency is temporal decay (`halfLifeDays`), which reads file mtimes. This
- *     exists solely so `since`/`until` can be applied, and for the tool header.
+ *   `day` -- the `YYYY-MM-DD` in the basename, derived by `dayOf`
+ *     (`memory-index-schema.ts`), which reads both `YYYY-MM-DD.md` and the
+ *     `YYYY-MM-DD-<topic>.md` shape the capture writer produces. Upstream has no date
+ *     on a search result; recency is temporal decay (`halfLifeDays`), which reads file
+ *     mtimes. This exists for the tool header, and it agrees with `since`/`until` by
+ *     construction: the same function wrote the `day` column they compare against.
  */
 export type SearchHit = MemorySearchResult & {
   /** The chunk row id. Never shown to the model; see the note above. */
@@ -408,7 +411,9 @@ export function toMatchExpression(query: string): string | null {
 type FilterSql = { readonly clause: string; readonly params: readonly SQLInputValue[] };
 
 /**
- * The three filters that survive, all derived from the columns upstream actually has.
+ * The three filters that survive. `corpus` and `project` read columns upstream's
+ * chunk tables actually have; `day` reads the one column mem-plus adds to
+ * `memory_index_sources` (see `memory-index-schema.ts`).
  *
  * `kind`, `entryType` and `tag` are gone. They were predicates on mem-plus's own `units`
  * columns; upstream's chunk table has no equivalent, and inventing one would be a
@@ -421,19 +426,28 @@ type FilterSql = { readonly clause: string; readonly params: readonly SQLInputVa
  *               upstream concept, so it is a path predicate. The slug is escaped as a LIKE
  *               pattern because a project directory name can contain `_`, which is a LIKE
  *               wildcard -- without the escape, project `a_b` would also match `aXb`.
- *   day      -> the date in the basename. `YYYY-MM-DD.md` is 13 characters, so the date is
- *               `substr(path, -13, 10)` and ISO dates order lexicographically.
+ *   day      -> the `day` column on `memory_index_sources`, written at index time by
+ *               `dayOf` (`memory-index-schema.ts`), which accepts both shapes upstream's
+ *               `DAILY_MEMORY_FILENAME_RE` names day files in: `YYYY-MM-DD.md` and
+ *               `YYYY-MM-DD-<topic>.md`. ISO dates order lexicographically, so the
+ *               comparison is a plain `>=`/`<=` on that column, joined by path and
+ *               source. A fixed `substr(path, -13, 10)` could not express the suffixed
+ *               shape -- with a topic suffix the date sits at a variable distance from
+ *               the end of the path -- and it hid 576 of the 637 indexed chunks from
+ *               every date filter on the 0.3.4 install (measured 2026-11-07).
  *
- * THE GLOB IS LOAD-BEARING, AND A PROBE FOUND IT
- *   Without it, `substr('MEMORY.md', -13, 10)` is the whole string `MEMORY.md` -- only 9
+ * EXCLUDING UNDATED FILES IS LOAD-BEARING, AND A PROBE FOUND IT
+ *   Without a gate, `substr('MEMORY.md', -13, 10)` is the whole string `MEMORY.md` -- only 9
  *   characters exist -- and `'MEMORY.md' >= '2026-11-01'` is TRUE, because `'M'` (0x4D)
  *   sorts above `'2'` (0x32). So every curated file, the ones with no date at all, passed
  *   every `since` and `until` filter ever asked for. A date filter that silently admits
  *   undated content is worse than no filter: the result looks filtered and is not.
  *
- *   The GLOB is the SQL twin of `dayOf` below, which is the same predicate in TypeScript:
- *   ten digits around two dashes, and nothing else. Both must agree, or a chunk read back
- *   through one path carries a `day` the other path would have filtered away.
+ *   The gate moved but did not go away: `dayOf` returns null for an undated name and the
+ *   sources row stores `''`, which sorts below every ISO date, so `ms.day >= ?` rejects
+ *   it exactly the way the GLOB used to. And because the filter and the per-hit `day`
+ *   label now read the same one function, the old hazard of a SQL twin drifting from the
+ *   TypeScript twin is gone by construction -- there is no second twin left to drift.
  *
  * `currentProjectOnly` keeps the old semantics: this project's files plus the global ones
  * at the memory-home root, which are not under `memory/` and so carry no slug.
@@ -465,24 +479,18 @@ function filtersSql(
     params.push(`${escapeLike(`memory/${filters.project}/`)}%`);
   }
   if (filters.since) {
-    parts.push(`(${dateBasenameGlob(prefix)} AND substr(${prefix}.path, -13, 10) >= ?)`);
+    parts.push(
+      `EXISTS (SELECT 1 FROM memory_index_sources ms WHERE ms.path = ${prefix}.path AND ms.source = ${prefix}.source AND ms.day >= ?)`,
+    );
     params.push(filters.since);
   }
   if (filters.until) {
-    parts.push(`(${dateBasenameGlob(prefix)} AND substr(${prefix}.path, -13, 10) <= ?)`);
+    parts.push(
+      `EXISTS (SELECT 1 FROM memory_index_sources ms WHERE ms.path = ${prefix}.path AND ms.source = ${prefix}.source AND ms.day <= ?)`,
+    );
     params.push(filters.until);
   }
   return { clause: parts.length > 0 ? ` AND ${parts.join(" AND ")}` : "", params };
-}
-
-/**
- * A basename of exactly `YYYY-MM-DD.md`, as a SQL predicate over `path`.
- *
- * The SQL twin of {@link dayOf}, and it has to agree with it exactly: a chunk read back
- * through one path carries a `day` the other path would have filtered away.
- */
-function dateBasenameGlob(prefix: string): string {
-  return `substr(${prefix}.path, -13, 10) GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'`;
 }
 
 /** `_` and `%` are LIKE wildcards; a project slug may legitimately contain either. */
@@ -494,13 +502,6 @@ function escapeLike(value: string): string {
 function projectOf(relativePath: string): string {
   const match = /^memory\/([^/]+)\//u.exec(relativePath);
   return match?.[1] ?? "";
-}
-
-/** The `YYYY-MM-DD` in a day file's basename, or null when the name has no date. */
-function dayOf(relativePath: string): string | null {
-  const base = relativePath.slice(relativePath.lastIndexOf("/") + 1);
-  const match = /^(\d{4}-\d{2}-\d{2})\.md$/u.exec(base);
-  return match?.[1] ?? null;
 }
 
 /**
