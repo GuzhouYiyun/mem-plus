@@ -98,7 +98,6 @@ export const translations = {
     "prompt-file-note-agents": "项目说明：仓库怎么干活——命令、目录结构、验证门禁、约定。",
     "prompt-file-missing": "未注入",
     "prompt-file-present": "已注入",
-    "label-injected-from": "工作区 {workspace} · 记忆库 {home}",
     "btn-cancel": "取消",
     "btn-save": "保存更改",
     "toast-update-failed": "更新记忆失败",

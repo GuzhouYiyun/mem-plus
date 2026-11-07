@@ -595,7 +595,7 @@ function FieldRow({
   // genuinely empty -- no configured value and no resolved path either.
   const isDefault =
     field.kind === "directory"
-      ? typeof value !== "string" || value === ""
+      ? dirDisplay(field, value, resolvedPaths) === ""
       : effective === field.defaultValue;
 
   return (
@@ -656,6 +656,28 @@ function renderHelpLine(line: string, asText: boolean) {
     return <p className="text-sm leading-relaxed text-muted-foreground">{line}</p>;
   }
   return <code className="block break-all text-xs leading-relaxed text-muted-foreground">{line}</code>;
+}
+
+/** The three directory keys map one-to-one onto the resolved-paths answer. */
+function resolvedDirPath(field: ConfigField, resolvedPaths: { modelDir: string; webDir: string; wikiDir: string } | null): string | null {
+  return field.key === "model.dir"
+    ? resolvedPaths?.modelDir ?? null
+    : field.key === "web.dir"
+      ? resolvedPaths?.webDir ?? null
+      : field.key === "wiki.dir"
+        ? resolvedPaths?.wikiDir ?? null
+        : null;
+}
+
+/**
+ * What a directory box actually displays: the configured value if the person
+ * typed one, otherwise the resolved default path -- never help text, and the
+ * badge logic in FieldRow reads this too, so "default" only shows when the
+ * box would really render empty.
+ */
+function dirDisplay(field: ConfigField, value: unknown, resolvedPaths: { modelDir: string; webDir: string; wikiDir: string } | null): string {
+  const current = typeof value === "string" ? value : "";
+  return current || resolvedDirPath(field, resolvedPaths) || "";
 }
 
 function Control({
@@ -782,20 +804,11 @@ function Control({
   }
 
   if (field.kind === "directory") {
-    const current = typeof value === "string" ? value : "";
     // The box shows what the plugin will actually use: the configured value, or
     // the resolved default when the key is absent. No muted line underneath, no
     // "leave blank for default" hint -- the path belongs in the box, as if the
     // person typed it.
-    const resolved =
-      field.key === "model.dir"
-        ? resolvedPaths?.modelDir ?? null
-        : field.key === "web.dir"
-          ? resolvedPaths?.webDir ?? null
-          : field.key === "wiki.dir"
-            ? resolvedPaths?.wikiDir ?? null
-            : null;
-    const display = current || resolved || "";
+    const display = dirDisplay(field, value, resolvedPaths);
     return (
       <div className="flex w-full items-center gap-2">
         <Input

@@ -23,18 +23,16 @@ import type { PromptFile } from "$lib/types";
 export function DreamsView() {
   const { t } = useI18n();
   const [file, setFile] = useState<PromptFile | null>(null);
-  const [memoryHome, setMemoryHome] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
-    const result = await fetchAPI<{ file: PromptFile; memoryHome: string }>("/api/dreams");
+    const result = await fetchAPI<{ file: PromptFile }>("/api/dreams");
     setLoading(false);
     if (result.success && result.data) {
       setFile(result.data.file ?? null);
-      setMemoryHome(result.data.memoryHome ?? "");
     } else {
       setError(result.error ?? t("toast-update-failed"));
     }
@@ -98,10 +96,6 @@ export function DreamsView() {
             </div>
 
             <p className="text-[12px] break-all text-muted-foreground/90">{file.path}</p>
-
-            <p className="text-[12px] break-all text-muted-foreground/80">
-              {t("label-injected-from", { workspace: "-", home: memoryHome })}
-            </p>
 
             <p className="text-[13px] leading-6 text-muted-foreground">{t("prompt-file-note-dreams")}</p>
           </div>

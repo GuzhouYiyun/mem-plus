@@ -22,8 +22,6 @@ import type { PromptFile } from "$lib/types";
 export function PromptFilesView() {
   const { t } = useI18n();
   const [files, setFiles] = useState<PromptFile[]>([]);
-  const [memoryHome, setMemoryHome] = useState("");
-  const [workspaceDir, setWorkspaceDir] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
@@ -34,17 +32,11 @@ export function PromptFilesView() {
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
-    const result = await fetchAPI<{
-      files: PromptFile[];
-      memoryHome: string;
-      workspaceDir: string;
-    }>("/api/prompt-files");
+    const result = await fetchAPI<{ files: PromptFile[] }>("/api/prompt-files");
     setLoading(false);
     if (result.success && result.data) {
       const loaded = result.data.files ?? [];
       setFiles(loaded);
-      setMemoryHome(result.data.memoryHome ?? "");
-      setWorkspaceDir(result.data.workspaceDir ?? "");
       // Land on something useful: the first file that exists, else the first one.
       setSelected((prev) =>
         prev && loaded.some((file) => file.name === prev)
@@ -159,7 +151,7 @@ export function PromptFilesView() {
                 />
                 <span className="whitespace-nowrap">{file.name}</span>
                 <span className="whitespace-nowrap text-[11px] opacity-65">
-                  {file.exists ? formatBytes(file.bytes ?? 0) : t("prompt-file-missing")}
+                  {file.exists ? formatBytes(file.bytes ?? 0) : null}
                 </span>
               </button>
             );
@@ -197,12 +189,6 @@ export function PromptFilesView() {
             </div>
 
             <p className="text-[12px] break-all text-muted-foreground/90">{current.path}</p>
-
-            {memoryHome || workspaceDir ? (
-              <p className="text-[12px] break-all text-muted-foreground/80">
-                {t("label-injected-from", { workspace: workspaceDir, home: memoryHome })}
-              </p>
-            ) : null}
 
             <p className="text-[13px] leading-6 text-muted-foreground">
               {t(`prompt-file-note-${current.name.replace(/\.md$/i, "").toLowerCase()}`)}
