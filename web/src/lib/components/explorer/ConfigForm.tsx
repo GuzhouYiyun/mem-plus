@@ -583,12 +583,20 @@ function FieldRow({
   // writes the default value explicitly -- the server never deletes keys, because
   // it cannot know which ones the form manages -- absence is no longer the signal.
   const effective = value === undefined ? field.defaultValue : value;
-  const isDefault = effective === field.defaultValue;
   // A modelFile row shows the FOLDER the listing came from, not advice: it is
   // where the dropdown gets its names and where a replacement file goes.
   // `field.help` stays as the line for every other kind, and as the fallback
   // for a modelFile row when the listing never arrived.
   const helpLine = field.kind === "modelFile" && modelFiles ? modelFiles.dir : field.help;
+  // The "默认" badge answers "did the person set this, or is it the plugin's
+  // default?". For a directory box the answer is visible in the box itself: the
+  // resolved path sits there as if typed, so a badge beside it would say the
+  // opposite of what the box shows. The badge only appears when the box is
+  // genuinely empty -- no configured value and no resolved path either.
+  const isDefault =
+    field.kind === "directory"
+      ? typeof value !== "string" || value === ""
+      : effective === field.defaultValue;
 
   return (
     <div className="grid gap-1.5 sm:grid-cols-[minmax(0,15rem)_minmax(0,1fr)] sm:items-start sm:gap-4">
