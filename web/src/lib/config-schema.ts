@@ -130,7 +130,7 @@ export const CONFIG_SECTIONS: readonly ConfigSection[] = [
         // One picker, two consumers: extraction and the pre-compaction flush both
         // run through `captureDeps`, which is built from this key. The flush used
         // to have its own `flush.model`; see plugin/src/flush-config.ts.
-        help: "留空 = 用 OpenCode 当前的默认模型。条目抽取与压缩前落盘共用。",
+        help: "留空则沿用 OpenCode 默认模型。抽取与压缩前落盘共用此值。",
       },
       { heading: "文件" },
       {
@@ -138,7 +138,7 @@ export const CONFIG_SECTIONS: readonly ConfigSection[] = [
         label: "模型目录",
         kind: "directory",
         defaultValue: "",
-        help: "留空 = 仓库里的 models/，安装版则用记忆库目录下的 models/。",
+        help: "留空则用仓库内的 models/；安装版用记忆库目录下的 models/。",
       },
       {
         key: "model.embedPath",
@@ -153,14 +153,14 @@ export const CONFIG_SECTIONS: readonly ConfigSection[] = [
         // Only reached when the directory listing is unavailable (old server,
         // missing folder): the fallback is typing, and this line then explains
         // what the box takes.
-        help: "留空 = 模型目录下的 bge-m3-Q8_0.gguf。写了路径又找不到 = 明确的坏配置。",
+        help: "留空则用模型目录下的 bge-m3-Q8_0.gguf。指定的文件不存在时向量检索不可用。",
       },
       {
         key: "model.embed",
         label: "向量检索",
         kind: "boolean",
         defaultValue: true,
-        help: "关掉就是纯关键词检索（索引里没有向量）。",
+        help: "关闭后索引不含向量，仅关键词检索。",
       },
       {
         // Not a setting: a control the page draws, placed right after the switch that
@@ -185,7 +185,7 @@ export const CONFIG_SECTIONS: readonly ConfigSection[] = [
           integrated: "核显",
         },
         defaultValue: "auto",
-        help: "没有 CPU 回退：独显 > 核显，都不行时服务拒绝启动。独显只试 NVIDIA·Apple 的后端，AMD/Intel 的独显走 vulkan，请选「自动」。",
+        help: "无 CPU 回退：独显优先于核显，两者均不可用时服务拒绝启动。独显仅尝试 NVIDIA 与 Apple 后端；AMD/Intel 独显走 vulkan，请选「自动」。",
       },
       {
         key: "model.gpuLayers",
@@ -206,7 +206,7 @@ export const CONFIG_SECTIONS: readonly ConfigSection[] = [
         defaultValue: "auto",
         min: 0,
         max: 999,
-        help: "留空 = auto（按当前显存算）。也可以直接写 0–999 的整数。",
+        help: "留空则为 auto，按当前显存自动决定。也可直接填 0–999 的整数。",
       },
       {
         key: "model.vramPadding",
@@ -223,7 +223,7 @@ export const CONFIG_SECTIONS: readonly ConfigSection[] = [
         defaultValue: null,
         min: 0,
         max: 64,
-        help: "额外预留的显存（GB）。显卡同时跑游戏等程序时调大，防止向量模型算好比预留多、一加载就把显存挤爆（引擎自身的 auto 只看打分那一刻的空闲量）。",
+        help: "额外预留的显存，单位 GB。显卡同时运行其他程序时调大，防止向量模型占用超出预留。引擎自身的 auto 仅参考打分那一刻的空闲量。",
       },
       {
         key: "model.contextSize",
@@ -249,7 +249,7 @@ export const CONFIG_SECTIONS: readonly ConfigSection[] = [
         min: 0,
         max: 128,
         allowZero: true,
-        help: "0 = 由运行时决定。推理本身跑在 GPU 上，这里是主机侧工作。",
+        help: "0 表示由运行时决定。推理在 GPU 上执行，此值仅影响主机侧工作。",
       },
       {
         key: "model.logLevel",
@@ -271,7 +271,7 @@ export const CONFIG_SECTIONS: readonly ConfigSection[] = [
         label: "服务地址",
         kind: "text",
         defaultValue: "",
-        help: "留空 = 发现端口上的推理服务，没有就自己启动一个。填了它 = 用你自己起的服务，插件不再启动。",
+        help: "留空则自动发现端口上的推理服务，没有就自行启动。填了它表示使用你自己起的服务，插件不再启动。",
       },
       {
         key: "service.host",
@@ -286,14 +286,14 @@ export const CONFIG_SECTIONS: readonly ConfigSection[] = [
         defaultValue: 4748,
         min: 1,
         max: 65535,
-        help: "推理服务的起始端口，被占用时递增。网页占 4747，两者不会撞。",
+        help: "推理服务的起始端口，被占用时递增。网页占用 4747，两者不会冲突。",
       },
       {
         key: "service.autostart",
         label: "自动启动",
         kind: "boolean",
         defaultValue: true,
-        help: "关掉后，没有服务在听时插件不会自己拉起推理进程。",
+        help: "关闭后，没有服务在听时插件不会自行拉起推理进程。",
       },
       {
         key: "service.idleMinutes",
@@ -302,7 +302,7 @@ export const CONFIG_SECTIONS: readonly ConfigSection[] = [
         defaultValue: 5,
         min: 0,
         max: 1440,
-        help: "空闲多少分钟后推理进程退出，0 = 不退出。",
+        help: "空闲多少分钟后推理进程退出。0 表示不退出。",
       },
       {
         key: "service.startTimeoutMs",
@@ -311,7 +311,7 @@ export const CONFIG_SECTIONS: readonly ConfigSection[] = [
         defaultValue: 30000,
         min: 1000,
         max: 300000,
-        help: "等新启动的服务报健康的最长时间，毫秒。超时日志报 `service did not become healthy`。",
+        help: "等待新启动的服务报健康的最长时间，单位毫秒。超时时日志输出 `service did not become healthy`。",
       },
       { heading: "网页" },
       {
@@ -319,7 +319,7 @@ export const CONFIG_SECTIONS: readonly ConfigSection[] = [
         label: "启用",
         kind: "boolean",
         defaultValue: true,
-        help: "关掉 = 不开 4747 端口。agent 不需要这个页面，只有人看。",
+        help: "关闭后不开启 4747 端口。agent 不需要此页面，仅面向人类用户。",
       },
       {
         key: "web.port",
@@ -328,21 +328,21 @@ export const CONFIG_SECTIONS: readonly ConfigSection[] = [
         defaultValue: 4747,
         min: 1,
         max: 65535,
-        help: "被占用时自动往上找，实际端口见日志 `memory browser at` 一行。",
+        help: "被占用时自动向上查找，实际端口见日志 `memory browser at` 一行。",
       },
       {
         key: "web.host",
         label: "监听地址",
         kind: "text",
         defaultValue: "127.0.0.1",
-        help: "只听本机即可。改成非回环地址必须同时设密码，否则任何能连上这个端口的人都能读记忆、改注入文件。",
+        help: "仅监听本机。改为非回环地址时必须同时设置密码，否则任何能连接该端口的人都可读取记忆并修改注入文件。",
       },
       {
         key: "web.dir",
         label: "前端目录",
         kind: "directory",
         defaultValue: "",
-        help: "留空 = 插件目录旁的 web/dist。",
+        help: "留空则用插件目录旁的 web/dist。",
       },
       { heading: "文档语料" },
       {
@@ -350,14 +350,14 @@ export const CONFIG_SECTIONS: readonly ConfigSection[] = [
         label: "启用语料",
         kind: "boolean",
         defaultValue: true,
-        help: "关掉 = wiki 目录的文件不进索引，memory_wiki_import 不再注册。",
+        help: "关闭后 wiki 目录的文件不进索引，memory_wiki_import 不再注册。",
       },
       {
         key: "wiki.dir",
         label: "目录",
         kind: "directory",
         defaultValue: "",
-        help: "留空 = ~/.config/opencode/mem-plus/wiki。",
+        help: "留空则用 ~/.config/opencode/mem-plus/wiki。",
       },
       // No `flush.*` fields. Pre-compaction flush is always on -- it is the memory
       // organ's own function, not a feature to toggle (owner's decision, 2026-11-04;
@@ -372,7 +372,7 @@ export const CONFIG_SECTIONS: readonly ConfigSection[] = [
         label: "启用",
         kind: "boolean",
         defaultValue: true,
-        help: "问题里出现召回意图（「之前怎么做的」「查一下」等）时，自动派一轮带工具的检索。",
+        help: "问题中出现召回意图（如「之前怎么做的」「查一下」）时，自动派一轮带工具的检索。",
       },
       {
         key: "recall.mode",
@@ -385,7 +385,7 @@ export const CONFIG_SECTIONS: readonly ConfigSection[] = [
           off: "关闭",
         },
         defaultValue: "escalate",
-        help: "escalate = 只在提问像是要找记忆时才召回；always = 每轮都召回，更准也更费。",
+        help: "escalate 仅在提问像是要找记忆时才召回；always 每轮都召回，更准也更费。",
       },
       {
         key: "recall.promptStyle",
@@ -411,7 +411,7 @@ export const CONFIG_SECTIONS: readonly ConfigSection[] = [
         defaultValue: 220,
         min: 40,
         max: 1000,
-        help: "召回结果压成摘要后的最大字符数。",
+        help: "召回结果摘要的最大字符数。",
       },
       {
         key: "recall.circuitBreakerMaxTimeouts",
@@ -420,7 +420,7 @@ export const CONFIG_SECTIONS: readonly ConfigSection[] = [
         defaultValue: 3,
         min: 1,
         max: 20,
-        help: "连续这么多次超时后暂停深度召回一段时间。",
+        help: "连续超时达到该次数后暂停深度召回一段时间。",
       },
       {
         key: "recall.circuitBreakerCooldownMs",
@@ -429,7 +429,7 @@ export const CONFIG_SECTIONS: readonly ConfigSection[] = [
         defaultValue: 60000,
         min: 5000,
         max: 600000,
-        help: "熔断后暂停多久，毫秒。按模型计，不是按会话。",
+        help: "熔断后暂停的时间，单位毫秒。按模型计，不按会话。",
       },
       { heading: "长期记忆晋升" },
       {
@@ -478,7 +478,7 @@ export const CONFIG_SECTIONS: readonly ConfigSection[] = [
         defaultValue: -1,
         min: -1,
         max: 1000,
-        help: "留空或 -1 = 不限。",
+        help: "留空或填 -1 均表示不限。",
       },
       {
         key: "promotion.maxAgeDays",

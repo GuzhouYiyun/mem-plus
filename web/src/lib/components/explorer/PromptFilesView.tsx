@@ -130,15 +130,11 @@ export function PromptFilesView() {
         </Alert>
       ) : null}
 
-      {/* Tab strip. It scrolls sideways on narrow windows but without scrollbar
-          chrome -- `overflow-x: auto` also makes overflow-y compute to auto, which
-          is what put that arrow widget at the end of the row. The count and the
-          refresh button sit outside the scroller so they never slide away. */}
-      <div className="flex shrink-0 items-center gap-2 border-b border-border">
+      <div className="flex shrink-0 flex-wrap items-center gap-2 rounded-xl border border-border bg-card/70 p-1.5">
         <div
           role="tablist"
           aria-label={t("tab-prompt-files")}
-          className="flex flex-1 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+          className="flex min-w-0 flex-1 gap-1 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
         >
           {files.map((file) => {
             const active = file.name === current?.name;
@@ -151,27 +147,27 @@ export function PromptFilesView() {
                 onClick={() => selectTab(file.name)}
                 title={file.path}
                 className={[
-                  "-mb-px flex shrink-0 items-center gap-2 rounded-t-lg border px-4 py-2 text-xs font-medium transition-colors",
+                  "flex shrink-0 items-center gap-2 rounded-lg px-3 py-1.5 text-[12px] font-medium transition-colors",
                   active
-                    ? "border-border border-b-transparent bg-card text-foreground"
-                    : "border-transparent bg-muted/40 text-muted-foreground hover:bg-muted hover:text-foreground",
+                    ? "bg-background text-foreground shadow-[inset_0_0_0_1px_var(--border)]"
+                    : "text-muted-foreground hover:bg-muted/70 hover:text-foreground",
                 ].join(" ")}
               >
                 <span
                   aria-hidden="true"
-                  className={`size-2 shrink-0 rounded-full ${file.exists ? "bg-primary" : "bg-muted-foreground/40"}`}
+                  className={`size-1.5 shrink-0 rounded-full ${file.exists ? "bg-primary" : "bg-muted-foreground/35"}`}
                 />
                 <span className="whitespace-nowrap">{file.name}</span>
-                <span className="whitespace-nowrap text-[0.6875rem] opacity-70">
+                <span className="whitespace-nowrap text-[11px] opacity-65">
                   {file.exists ? formatBytes(file.bytes ?? 0) : t("prompt-file-missing")}
                 </span>
               </button>
             );
           })}
         </div>
-        <div className="flex shrink-0 items-center gap-1.5 pe-1 text-xs text-muted-foreground">
+        <div className="flex shrink-0 items-center gap-1.5 px-1 text-[12px] text-muted-foreground">
           <span>{t("text-prompt-files-present", { present, total: files.length })}</span>
-          <Button variant="outline" size="icon" onClick={load} aria-label={t("btn-refresh")}>
+          <Button variant="ghost" size="icon" onClick={load} aria-label={t("btn-refresh")}>
             <RefreshCw className={`size-4 ${loading ? "animate-spin" : ""}`} />
           </Button>
         </div>
@@ -180,11 +176,11 @@ export function PromptFilesView() {
       {current ? (
         <section
           role="tabpanel"
-          className="flex min-h-0 flex-1 flex-col rounded-b-xl border border-t-0 bg-card"
+          className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-border bg-card shadow-[0_1px_0_color-mix(in_oklab,var(--border)_55%,transparent)]"
         >
-          <div className="shrink-0 space-y-3 p-4">
+          <div className="shrink-0 space-y-2.5 border-b border-border/70 bg-muted/20 px-4 py-4 md:px-5">
             <div className="flex flex-wrap items-center gap-2">
-              <span className="text-base font-medium">{current.name}</span>
+              <span className="text-[15px] font-semibold tracking-tight">{current.name}</span>
               {current.exists ? (
                 <Badge variant="secondary">{t("prompt-file-present")}</Badge>
               ) : (
@@ -193,58 +189,49 @@ export function PromptFilesView() {
                 </Badge>
               )}
               {current.exists ? (
-                <span className="ms-auto text-sm tabular-nums text-muted-foreground">
+                <span className="ms-auto text-[12px] tabular-nums text-muted-foreground">
                   {formatBytes(current.bytes ?? 0)}
                   {current.modifiedAt ? ` / ${formatDate(current.modifiedAt)}` : ""}
                 </span>
               ) : null}
             </div>
 
-            <p className="text-sm break-all text-muted-foreground">{current.path}</p>
+            <p className="text-[12px] break-all text-muted-foreground/90">{current.path}</p>
 
             {memoryHome || workspaceDir ? (
-              <p className="text-sm break-all text-muted-foreground">
+              <p className="text-[12px] break-all text-muted-foreground/80">
                 {t("label-injected-from", { workspace: workspaceDir, home: memoryHome })}
               </p>
             ) : null}
 
-            {/* One plain sentence on what this file is for. Keyed by file name
-                (prompt-file-note-agents, -soul, -identity, -user, -bootstrap,
-                -memory) so the descriptions live with the other UI strings. */}
-            <p className="text-sm text-muted-foreground">
+            <p className="text-[13px] leading-6 text-muted-foreground">
               {t(`prompt-file-note-${current.name.replace(/\.md$/i, "").toLowerCase()}`)}
             </p>
           </div>
 
-          {/* The only scrolling part of this view. `min-h-0` is what lets it shrink
-              below its content size instead of pushing the action bar off. */}
-          {/* `pr-4` past the shared `px-4` gives the scrollbar its own gap; see
-              the note in MemoryList. */}
-          <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-4 [scrollbar-gutter:stable]">
+          <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-4 py-4 [scrollbar-gutter:stable] md:px-5">
             {editing ? (
               <Textarea
                 value={draft}
                 onChange={(e) => setDraft(e.target.value)}
                 spellCheck={false}
-                className="h-full min-h-64 resize-none font-mono text-sm leading-relaxed"
+                className="h-full min-h-[20rem] resize-none border-border/80 bg-background/50 font-mono text-[13px] leading-relaxed"
                 aria-label={current.name}
               />
             ) : current.exists ? (
               current.truncated ? null : (
                 <div
-                  className="markdown-content prose max-w-none text-base leading-relaxed"
+                  className="markdown-content prose max-w-none text-[14px] leading-7"
                   // The markdown is sanitized in renderMarkdown (DOMPurify).
                   dangerouslySetInnerHTML={{ __html: renderMarkdown(current.content ?? "") }}
                 />
               )
             ) : (
-              <p className="text-sm text-muted-foreground">{t("prompt-file-absent")}</p>
+              <p className="text-[13px] text-muted-foreground">{t("prompt-file-absent")}</p>
             )}
           </div>
 
-          {/* The action bar is a sibling of the scroll area, not a sticky overlay:
-              it is always the bottom row of the panel, whatever the text is doing. */}
-          <div className="flex shrink-0 flex-wrap items-center gap-2 border-t border-border px-4 py-3">
+          <div className="flex shrink-0 flex-wrap items-center gap-2 border-t border-border/70 bg-muted/10 px-4 py-3 md:px-5">
             {current.truncated ? (
               <span className="text-xs text-muted-foreground">{t("prompt-file-truncated")}</span>
             ) : editing ? (

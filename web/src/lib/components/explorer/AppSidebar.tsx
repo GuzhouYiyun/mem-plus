@@ -18,6 +18,9 @@ type Props = {
   runtimeLabel: string;
   themeLabel: string;
   closeLabel: string;
+  memoryGroupLabel: string;
+  configGroupLabel: string;
+  systemGroupLabel: string;
   onOpenChange?: (open: boolean) => void;
 };
 
@@ -32,6 +35,9 @@ export function AppSidebar({
   runtimeLabel,
   themeLabel,
   closeLabel,
+  memoryGroupLabel,
+  configGroupLabel,
+  systemGroupLabel,
   onOpenChange,
 }: Props) {
   const theme = useTheme();
@@ -59,10 +65,18 @@ export function AppSidebar({
 
   function navClass(active: boolean) {
     return cn(
-      "flex w-full items-center gap-2.5 rounded-xl px-3 py-2 text-sm transition-colors",
+      "flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-[13px] transition-colors",
       active
-        ? "bg-sidebar-accent text-sidebar-accent-foreground"
-        : "text-sidebar-foreground/80 hover:bg-sidebar-accent/70 hover:text-sidebar-accent-foreground"
+        ? "bg-sidebar-accent text-sidebar-accent-foreground shadow-[inset_0_0_0_1px_color-mix(in_oklab,var(--sidebar-border)_80%,transparent)]"
+        : "text-sidebar-foreground/78 hover:bg-sidebar-accent/65 hover:text-sidebar-accent-foreground"
+    );
+  }
+
+  function groupLabel(text: string) {
+    return (
+      <div className="px-3 pb-1 pt-3 text-[11px] font-medium tracking-wide text-sidebar-foreground/45">
+        {text}
+      </div>
     );
   }
 
@@ -71,7 +85,7 @@ export function AppSidebar({
       {open ? (
         <button
           type="button"
-          className="fixed inset-0 z-40 bg-black/50 md:hidden"
+          className="fixed inset-0 z-40 bg-black/45 backdrop-blur-[1px] md:hidden"
           aria-label={closeLabel}
           onClick={() => setOpen(false)}
         />
@@ -79,7 +93,7 @@ export function AppSidebar({
 
       <aside
         className={cn(
-          "inset-y-0 start-0 z-50 flex h-svh w-64 shrink-0 flex-col border-e border-sidebar-border bg-sidebar text-sidebar-foreground transition-transform duration-200",
+          "inset-y-0 start-0 z-50 flex h-svh w-[15.5rem] shrink-0 flex-col border-e border-sidebar-border bg-sidebar/95 text-sidebar-foreground backdrop-blur transition-transform duration-200",
           "fixed md:sticky md:top-0 md:translate-x-0!",
           open ? "translate-x-0" : "max-md:-translate-x-full max-md:rtl:translate-x-full"
         )}
@@ -87,10 +101,13 @@ export function AppSidebar({
         <div className="flex items-center gap-2 px-4 py-4">
           <a
             href={ROUTES.home}
-            className="flex min-w-0 flex-1 items-center gap-2 rounded-lg transition-colors hover:opacity-90"
+            className="flex min-w-0 flex-1 items-center gap-2.5 rounded-lg transition-opacity hover:opacity-90"
             onClick={(e) => onNavClick(e, ROUTES.home)}
           >
-            <span className="truncate text-sm font-medium tracking-wide text-sidebar-primary">
+            <span className="grid size-7 place-items-center rounded-lg border border-sidebar-border bg-sidebar-accent/60 text-sidebar-primary">
+              <Sparkles className="size-3.5" />
+            </span>
+            <span className="truncate text-[13px] font-semibold tracking-wide text-sidebar-foreground">
               {brand}
             </span>
           </a>
@@ -105,16 +122,17 @@ export function AppSidebar({
           </Button>
         </div>
 
-        <Separator className="bg-sidebar-border" />
+        <Separator className="bg-sidebar-border/80" />
 
-        <nav className="flex flex-1 flex-col gap-1 p-3" aria-label="Main">
+        <nav className="flex flex-1 flex-col gap-0.5 overflow-y-auto p-2.5" aria-label="Main">
+          {groupLabel(memoryGroupLabel)}
           <a
             href={ROUTES.promptFiles}
             className={navClass(currentView === "promptFiles")}
             aria-current={currentView === "promptFiles" ? "page" : undefined}
             onClick={(e) => onNavClick(e, ROUTES.promptFiles)}
           >
-            <FileText className="size-4 shrink-0" />
+            <FileText className="size-4 shrink-0 opacity-80" />
             <span className="truncate text-start">{promptFilesLabel}</span>
           </a>
           <a
@@ -123,49 +141,45 @@ export function AppSidebar({
             aria-current={currentView === "dreams" ? "page" : undefined}
             onClick={(e) => onNavClick(e, ROUTES.dreams)}
           >
-            <Sparkles className="size-4 shrink-0" />
+            <Moon className="size-4 shrink-0 opacity-80" />
             <span className="truncate text-start">{dreamsLabel}</span>
           </a>
-          {/* Before 设置, and the order is deliberate: both entries are the same
-              settings -- this one as the file's own JSON, 设置 below it as the
-              labelled form. The file is the ground truth of what is configured,
-              so it leads and the shaped view follows it. */}
-          <a
-            href={ROUTES.configFile}
-            className={navClass(currentView === "configFile")}
-            aria-current={currentView === "configFile" ? "page" : undefined}
-            onClick={(e) => onNavClick(e, ROUTES.configFile)}
-          >
-            <FileJson className="size-4 shrink-0" />
-            <span className="truncate text-start">{configFileLabel}</span>
-          </a>
+
+          {groupLabel(configGroupLabel)}
           <a
             href={ROUTES.config}
             className={navClass(currentView === "config")}
             aria-current={currentView === "config" ? "page" : undefined}
             onClick={(e) => onNavClick(e, ROUTES.config)}
           >
-            <FileCog className="size-4 shrink-0" />
+            <FileCog className="size-4 shrink-0 opacity-80" />
             <span className="truncate text-start">{configLabel}</span>
           </a>
-          {/* Last, and deliberately after 设置: 运行时 is where you go when
-              something is wrong (runtime missing, service down, stale vectors),
-              not a place most visits need. */}
+          <a
+            href={ROUTES.configFile}
+            className={navClass(currentView === "configFile")}
+            aria-current={currentView === "configFile" ? "page" : undefined}
+            onClick={(e) => onNavClick(e, ROUTES.configFile)}
+          >
+            <FileJson className="size-4 shrink-0 opacity-80" />
+            <span className="truncate text-start">{configFileLabel}</span>
+          </a>
+
+          {groupLabel(systemGroupLabel)}
+          {/* Runtime diagnostics: route/view unchanged. */}
           <a
             href={ROUTES.runtime}
             className={navClass(currentView === "runtime")}
             aria-current={currentView === "runtime" ? "page" : undefined}
             onClick={(e) => onNavClick(e, ROUTES.runtime)}
           >
-            <Cpu className="size-4 shrink-0" />
+            <Cpu className="size-4 shrink-0 opacity-80" />
             <span className="truncate text-start">{runtimeLabel}</span>
           </a>
         </nav>
 
-        {/* Bottom row: just the theme/GitHub pair, on the right. */}
-        <div className="mt-auto flex items-center justify-end p-3">
-          <div className="flex items-center rounded-lg border border-sidebar-border/80 bg-card/70">
-
+        <div className="mt-auto flex items-center justify-end border-t border-sidebar-border/70 p-3">
+          <div className="flex items-center rounded-lg border border-sidebar-border/80 bg-background/35">
             <button
               type="button"
               className="inline-flex size-8 items-center justify-center rounded-s-lg text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
@@ -173,11 +187,7 @@ export function AppSidebar({
               aria-label={themeLabel}
               title={themeLabel}
             >
-              {isDark ? (
-                <Moon className="size-4 rounded-md p-0.5" />
-              ) : (
-                <Sun className="size-4 rounded-md p-0.5" />
-              )}
+              {isDark ? <Moon className="size-4" /> : <Sun className="size-4" />}
             </button>
             <a
               href="https://github.com/GuzhouYiyun/mem-plus"

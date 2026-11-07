@@ -80,10 +80,13 @@ export default function App() {
           runtimeLabel={t("tab-runtime")}
           themeLabel={t("nav-theme")}
           closeLabel={t("nav-close")}
+          memoryGroupLabel={t("nav-group-memory")}
+          configGroupLabel={t("nav-group-config")}
+          systemGroupLabel={t("nav-group-system")}
         />
 
-        <div className="flex min-w-0 flex-1 flex-col">
-          <div className="z-30 flex shrink-0 items-center gap-2 border-b border-border bg-background/95 px-3 py-2 backdrop-blur md:hidden">
+        <div className="flex min-w-0 flex-1 flex-col bg-[radial-gradient(1200px_400px_at_20%_-10%,color-mix(in_oklab,var(--primary)_8%,transparent),transparent_60%)]">
+          <div className="z-30 flex shrink-0 items-center gap-2 border-b border-border/80 bg-background/90 px-3 py-2 backdrop-blur md:hidden">
             <Button
               variant="ghost"
               size="icon-sm"
@@ -94,17 +97,19 @@ export default function App() {
             </Button>
             <a
               href={ROUTES.promptFiles}
-              className="truncate text-sm tracking-wide text-primary"
+              className="truncate text-[13px] font-medium text-foreground"
               onClick={onHomeClick}
             >
               {t("brand")}
             </a>
           </div>
 
-          <div className="mx-auto flex w-full max-w-6xl flex-1 flex-col gap-4 overflow-y-auto overflow-x-hidden p-4 [scrollbar-gutter:stable] md:p-6">
-            <div className="flex shrink-0 flex-wrap items-center justify-between gap-2">
-              <h1 className="text-base tracking-wide text-primary">{viewTitle}</h1>
-            </div>
+          <div className="mx-auto flex w-full max-w-[76rem] flex-1 flex-col gap-5 overflow-y-auto overflow-x-hidden px-4 py-5 [scrollbar-gutter:stable] md:px-8 md:py-7">
+            <header className="flex shrink-0 items-end justify-between gap-3 border-b border-border/60 pb-3">
+              <div className="min-w-0">
+                <h1 className="truncate text-[1.05rem] font-semibold tracking-tight text-foreground">{viewTitle}</h1>
+              </div>
+            </header>
 
             <div className="flex min-h-0 flex-1 flex-col">
               {currentView === "dreams" ? (

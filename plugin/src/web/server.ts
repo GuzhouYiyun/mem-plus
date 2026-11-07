@@ -46,6 +46,7 @@ import {
   handlePickDirectory,
   handlePromptFiles,
   handleRuntimeStatus,
+  handleUpdateCheck,
   saveSettings,
   reindexMemory,
   repairVectors,
@@ -530,6 +531,7 @@ export async function startWebServer(
         if (pathname === "/api/prompt-files") return handlePromptFiles(api.workspaceDir);
         if (pathname === "/api/dreams") return handleDreams();
         if (pathname === "/api/config") return handlePluginConfig();
+        if (pathname === "/api/update-check") return await handleUpdateCheck();
         if (pathname === "/api/resolved-paths") return await handleResolvedPaths();
         if (pathname === "/api/model-files") return handleModelFiles();
         if (pathname === "/api/models") return handleModelList(api.listModels);

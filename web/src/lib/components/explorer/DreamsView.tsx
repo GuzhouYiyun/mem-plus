@@ -63,11 +63,11 @@ export function DreamsView() {
       ) : null}
 
       {file ? (
-        <section className="flex min-h-0 flex-1 flex-col rounded-xl border border-border bg-card">
-          <div className="shrink-0 space-y-3 p-4">
+        <section className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-border bg-card shadow-[0_1px_0_color-mix(in_oklab,var(--border)_55%,transparent)]">
+          <div className="shrink-0 space-y-2.5 border-b border-border/70 bg-muted/20 px-4 py-4 md:px-5">
             <div className="flex flex-wrap items-center gap-2">
               <Moon className="size-4 shrink-0 text-muted-foreground" />
-              <span className="text-base font-medium">{file.name}</span>
+              <span className="text-[15px] font-semibold tracking-tight">{file.name}</span>
               {exists ? (
                 <Badge variant="secondary">{t("dreams-present")}</Badge>
               ) : (
@@ -76,18 +76,18 @@ export function DreamsView() {
                 </Badge>
               )}
               {entries.length > 0 ? (
-                <span className="text-sm tabular-nums text-muted-foreground">
+                <span className="text-[12px] tabular-nums text-muted-foreground">
                   {t("text-dream-entries", { count: entries.length })}
                 </span>
               ) : null}
               {exists ? (
-                <span className="ms-auto text-sm tabular-nums text-muted-foreground">
+                <span className="ms-auto text-[12px] tabular-nums text-muted-foreground">
                   {formatBytes(file.bytes ?? 0)}
                   {file.modifiedAt ? ` / ${formatDate(file.modifiedAt)}` : ""}
                 </span>
               ) : null}
               <Button
-                variant="outline"
+                variant="ghost"
                 size="icon"
                 onClick={load}
                 aria-label={t("btn-refresh")}
@@ -97,41 +97,41 @@ export function DreamsView() {
               </Button>
             </div>
 
-            <p className="text-sm break-all text-muted-foreground">{file.path}</p>
+            <p className="text-[12px] break-all text-muted-foreground/90">{file.path}</p>
 
-            <p className="text-sm break-all text-muted-foreground">
+            <p className="text-[12px] break-all text-muted-foreground/80">
               {t("label-injected-from", { workspace: "-", home: memoryHome })}
             </p>
 
-            <p className="text-sm text-muted-foreground">{t("prompt-file-note-dreams")}</p>
+            <p className="text-[13px] leading-6 text-muted-foreground">{t("prompt-file-note-dreams")}</p>
           </div>
 
-          <div className="min-h-0 flex-1 space-y-3 overflow-y-auto overflow-x-hidden px-4 [scrollbar-gutter:stable]">
+          <div className="min-h-0 flex-1 space-y-3 overflow-y-auto overflow-x-hidden px-4 py-4 [scrollbar-gutter:stable] md:px-5">
             {!exists ? (
-              <p className="text-sm text-muted-foreground">{t("dreams-absent")}</p>
+              <p className="text-[13px] text-muted-foreground">{t("dreams-absent")}</p>
             ) : file.truncated ? (
-              <p className="text-sm text-muted-foreground">{t("prompt-file-truncated")}</p>
+              <p className="text-[13px] text-muted-foreground">{t("prompt-file-truncated")}</p>
             ) : entries.length === 0 ? (
-              <p className="text-sm text-muted-foreground">{t("dreams-no-entries")}</p>
+              <p className="text-[13px] text-muted-foreground">{t("dreams-no-entries")}</p>
             ) : (
               <>
                 {entries.map((entry, i) => (
                   <article
                     key={`${entry.date}-${i}`}
-                    className="space-y-2 rounded-lg border border-border bg-background/40 p-3"
+                    className="space-y-2 rounded-xl border border-border/80 bg-background/35 p-4"
                   >
                     <div className="flex items-center gap-1.5">
-                      <Sparkles className="size-3.5 shrink-0 text-muted-foreground" />
+                      <Sparkles className="size-3.5 shrink-0 text-primary/80" />
                       {entry.date ? (
-                        <span className="text-sm">{entry.date}</span>
+                        <span className="text-[13px] font-medium">{entry.date}</span>
                       ) : (
-                        <span className="text-sm text-muted-foreground">
+                        <span className="text-[13px] text-muted-foreground">
                           {t("dreams-undated")}
                         </span>
                       )}
                     </div>
                     <div
-                      className="markdown-content prose max-w-none text-base leading-relaxed"
+                      className="markdown-content prose max-w-none text-[14px] leading-7"
                       // The markdown is sanitized in renderMarkdown (DOMPurify).
                       dangerouslySetInnerHTML={{ __html: renderMarkdown(entry.narrative) }}
                     />
@@ -139,13 +139,13 @@ export function DreamsView() {
                 ))}
 
                 {parsed.deepSleep ? (
-                  <article className="space-y-2 rounded-lg border border-border bg-background/40 p-3">
+                  <article className="space-y-2 rounded-xl border border-border/80 bg-muted/20 p-4">
                     <div className="flex items-center gap-1.5">
                       <Moon className="size-3.5 shrink-0 text-muted-foreground" />
-                      <span className="text-sm">{t("dreams-deep-heading")}</span>
+                      <span className="text-[13px] font-medium">{t("dreams-deep-heading")}</span>
                     </div>
                     <div
-                      className="markdown-content prose max-w-none text-base leading-relaxed"
+                      className="markdown-content prose max-w-none text-[14px] leading-7"
                       // The markdown is sanitized in renderMarkdown (DOMPurify).
                       dangerouslySetInnerHTML={{ __html: renderMarkdown(parsed.deepSleep) }}
                     />

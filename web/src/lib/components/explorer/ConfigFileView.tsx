@@ -45,18 +45,18 @@ export function ConfigFileView() {
     <div className="flex min-h-0 flex-1 flex-col gap-3">
       <ConfigAlerts error={cfg.error} saved={cfg.saved} restartNeeded={cfg.config?.restartNeeded === true} />
 
-      <div className="flex shrink-0 flex-wrap items-center gap-2 rounded-xl border border-border bg-card px-4 py-2.5">
+      <div className="flex shrink-0 flex-wrap items-center gap-2 rounded-xl border border-border bg-card/80 px-4 py-2.5 shadow-[0_1px_0_color-mix(in_oklab,var(--border)_45%,transparent)]">
         <FileJson className="size-4 shrink-0 text-muted-foreground" />
-        <span className="truncate text-sm text-muted-foreground">{cfg.config?.path ?? "-"}</span>
+        <span className="truncate text-[12px] text-muted-foreground/90">{cfg.config?.path ?? "-"}</span>
         {cfg.exists ? (
-          <span className="text-xs text-muted-foreground/70">
+          <span className="text-[11px] text-muted-foreground/70">
             {t("cfg-file-meta", {
               bytes: String(cfg.config?.bytes ?? 0),
               when: cfg.config?.modifiedAt ? formatDate(cfg.config.modifiedAt) : "-",
             })}
           </span>
         ) : null}
-        <Button variant="outline" size="icon" className="ms-auto" onClick={cfg.load} aria-label={t("btn-refresh")}>
+        <Button variant="ghost" size="icon" className="ms-auto" onClick={cfg.load} aria-label={t("btn-refresh")}>
           <RefreshCw className={`size-4 ${cfg.loading ? "animate-spin" : ""}`} />
         </Button>
       </div>
@@ -72,9 +72,9 @@ export function ConfigFileView() {
       ) : (
         <>
           <div className="grid min-h-0 flex-1 gap-4 md:grid-cols-2">
-            <ConfigJsonPreview draft={cfg.draft} className="order-2 max-h-[40vh] md:order-1 md:max-h-none" />
-            <section className="order-1 flex min-h-0 flex-col rounded-xl border border-border bg-card md:order-2">
-              <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-4 py-3 [scrollbar-gutter:stable]">
+            <ConfigJsonPreview draft={cfg.draft} className="order-2 max-h-[40vh] overflow-hidden md:order-1 md:max-h-none" />
+            <section className="order-1 flex min-h-0 flex-col overflow-hidden rounded-xl border border-border bg-card shadow-[0_1px_0_color-mix(in_oklab,var(--border)_55%,transparent)] md:order-2">
+              <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-4 py-3 [scrollbar-gutter:stable] md:px-5">
                 <ConfigFormFields
                   draft={cfg.draft}
                   secrets={cfg.secrets}
@@ -89,7 +89,7 @@ export function ConfigFileView() {
             </section>
           </div>
 
-          <div className="shrink-0 rounded-xl border border-border bg-card">
+          <div className="shrink-0 overflow-hidden rounded-xl border border-border bg-card shadow-[0_1px_0_color-mix(in_oklab,var(--border)_55%,transparent)]">
             <ConfigActions
               saving={cfg.saving}
               dirty={cfg.dirty}

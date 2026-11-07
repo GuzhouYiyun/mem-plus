@@ -30,6 +30,7 @@ import { markConfigRestartNeeded, readPluginConfig, savePluginConfig } from "./c
 import { readWebConfig } from "./config.js";
 import { readWikiConfig } from "../wiki/config.js";
 import { DREAMS_FILE_NAME, MEMORY_FILE_NAME, memoryHomeDir, projectSlug } from "../paths.js";
+import { checkForUpdate } from "../update-check.js";
 
 export type MemoryApiDeps = {
   /** The plugin's open index, or null when this OpenCode build has no node:sqlite. */
@@ -1276,6 +1277,24 @@ export function handleMemoryStats(db: DatabaseSync | null): Response {
     vectors: stats.vectors,
     bytes: stats.bytes,
   });
+}
+
+/**
+ * GET /api/update-check — is there a newer mem-plus release?
+ *
+ * One anonymous GitHub API call, cached briefly so a page refresh or a second
+ * OpenCode window does not burn the per-IP budget. The check never downloads
+ * or applies anything: the installer is the only artifact a user can run, so
+ * the loop closes on the Releases URL the response carries.
+ */
+export async function handleUpdateCheck(): Promise<Response> {
+  try {
+    const result = await checkForUpdate();
+    return ok(result);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    return fail(`检查更新失败：${detail}`, 502);
+  }
 }
 
 
