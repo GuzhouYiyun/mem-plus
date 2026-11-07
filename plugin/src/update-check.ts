@@ -77,6 +77,8 @@ function newerThan(a: string, b: string): boolean {
  * what changes between checks is rarely the version: a page refresh or a
  * second OpenCode window hitting the same plugin process would otherwise spend
  * two of the budget. A `force` flag busts it for the manual refresh button.
+ * Successes only -- a failed call leaves nothing cached, so the next page load
+ * retries instead of replaying the null.
  */
 let cache: { version: string; result: UpdateCheckResult } | null = null;
 
@@ -123,6 +125,12 @@ export async function checkForUpdate(force = false): Promise<UpdateCheckResult> 
     updateAvailable: latest !== null && newerThan(latest, current),
     releaseUrl,
   };
-  cache = { version: current, result };
+  // Cache successes only. A mortal GitHub blip (the repo's own notes list the
+  // intermittently blocked 443 with api.github.com answering) must not be
+  // pinned to the current version forever: the next page load retries, and the
+  // version key keeps spending the anonymous 60/h budget only on answers.
+  if (latest !== null) {
+    cache = { version: current, result };
+  }
   return result;
 }
