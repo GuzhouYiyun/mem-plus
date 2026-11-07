@@ -33,7 +33,7 @@ export const translations = {
     "cfg-model-none": "没有匹配的模型",
     "cfg-model-follow-default": "跟随 OpenCode 默认模型",
     "cfg-embedpath-none": "无",
-    "cfg-dir-current": "当前目录",
+    
     "cfg-parse-error-at": "第 {offset} 字符：{what}",
     "cfg-parse-errors": "配置文件有 {count} 处语法错误，先用编辑器修好。",
     "cfg-file-absent-hint": "mem-plus 的配置文件不在预期位置。下面这个页面无法写入。",
