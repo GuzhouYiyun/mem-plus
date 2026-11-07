@@ -138,7 +138,7 @@ export const CONFIG_SECTIONS: readonly ConfigSection[] = [
         label: "模型目录",
         kind: "directory",
         defaultValue: "",
-        help: "留空则用仓库内的 models/；安装版用记忆库目录下的 models/。",
+        help: "",
       },
       {
         key: "model.embedPath",
@@ -342,7 +342,7 @@ export const CONFIG_SECTIONS: readonly ConfigSection[] = [
         label: "前端目录",
         kind: "directory",
         defaultValue: "",
-        help: "留空则用插件目录旁的 web/dist。",
+        help: "",
       },
       { heading: "文档语料" },
       {
@@ -357,7 +357,7 @@ export const CONFIG_SECTIONS: readonly ConfigSection[] = [
         label: "目录",
         kind: "directory",
         defaultValue: "",
-        help: "留空则用 ~/.config/opencode/mem-plus/wiki。",
+        help: "",
       },
       // No `flush.*` fields. Pre-compaction flush is always on -- it is the memory
       // organ's own function, not a feature to toggle (owner's decision, 2026-11-04;
