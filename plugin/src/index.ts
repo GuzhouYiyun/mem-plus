@@ -61,6 +61,7 @@ import { createAutoEmbedScheduler } from "./auto-embed.js";
 import { createIndexReconciler } from "./index-reconcile.js";
 import { completeThroughHost } from "./llm.js";
 import { buildStandingIntentTool } from "./standing-intents.js";
+import { maybeCapturePreferences } from "./preference-capture.js";
 import { installMemoryInjection } from "./recall-inject.js";
 import { recallToolsFor, readDeepRecallConfig } from "./deep-recall.js";
 import { runPromotionRound } from "./promotion.js";
@@ -77,6 +78,7 @@ import {
 import {
   BOOTSTRAP_FILENAMES,
   buildProjectContextSection,
+  fitCuratedToBudget,
   loadBootstrapContextFiles,
   readContextFile,
 } from "./bootstrap-context.js";
@@ -1110,7 +1112,7 @@ export default Plugin.define({
     await ctx.session.hook("context", async (event) => {
       const sessionID = (event as { sessionID?: string }).sessionID;
       try {
-        const files = await loadBootstrapContextFiles(workspaceDir, instructionFileNames);
+        const files = await loadBootstrapContextFiles(workspaceDir, instructionFileNames, log);
         const homeMemoryPath = path.join(memoryHomeDir(), DEFAULT_MEMORY_FILENAME);
         if (typeof sessionID === "string" && sessionID.length > 0) {
           // Upstream's `filterProjectScopedCuratedContextFiles`, applied to the file
@@ -1126,10 +1128,18 @@ export default Plugin.define({
             // Through upstream's identity cache (`readContextFile`): a stat per model
             // request, a read only when the file actually changed.
             const rawMemory = await readContextFile(homeMemoryPath);
+            // Upstream's #45415 -- a global MEMORY.md past the injection budget was
+            // silently cut mid-entry. The whole file used to ride into the prompt
+            // unfiltered here; now it is fitted the same block-safe way the
+            // workspace files are (see `fitCuratedToBudget`).
             const memoryContent =
               rawMemory === undefined
                 ? ""
-                : filterProjectScopedCuratedContext(rawMemory, activeProjectKeys(sessionID));
+                : fitCuratedToBudget(
+                    DEFAULT_MEMORY_FILENAME,
+                    filterProjectScopedCuratedContext(rawMemory, activeProjectKeys(sessionID)),
+                    log,
+                  );
             if (memoryContent.trim().length > 0) {
               files.push({
                 name: DEFAULT_MEMORY_FILENAME,
@@ -1429,6 +1439,17 @@ export default Plugin.define({
         void capture
           .onUserPrompt({ sessionId: sessionID, messageId: inboxID, content: text })
           .catch((error: unknown) => log("landing failed", error));
+        // Phase 3 item 1: the preference pass. Detached like capture -- the gate
+        // is regex-only, so an ordinary message costs nothing and a durable one
+        // costs one small model call that can fail silently. Never awaited here:
+        // the inbox handler runs on the turn's own critical path.
+        void maybeCapturePreferences({
+          ctx,
+          workspaceDir,
+          text,
+          model: modelConfig.hostedModel,
+          log,
+        });
         return;
       }
 

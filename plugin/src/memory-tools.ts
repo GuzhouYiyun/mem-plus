@@ -38,6 +38,8 @@ import {
   type SearchHit,
   type SearchMode,
 } from "./memory-index.js";
+import { readSearchConfig } from "./search-config.js";
+import { parseQueryTimeWindow } from "./time-window.js";
 import { discoverHomeFiles, discoverWikiFiles, reindexFiles } from "./memory-scan.js";
 import { memoryHomeDir } from "./paths.js";
 import { recordRetrievalRecalls } from "./promotion.js";
@@ -459,9 +461,31 @@ async function runSearch(
     };
   }
 
+  const searchCfg = readSearchConfig(deps.options);
+
+  // Phase 3 item 2: deterministic time expansion. A query that names a period
+  // ("上个月定的方案", "in 2025") searches that window even when the caller passed
+  // no dates -- the date filter only ever matches `YYYY-MM-DD.md` day files, so
+  // the expansion scopes episodic memory and cannot hide curated entries behind
+  // a wrong guess: an unrecognised phrase leaves the filters untouched. Explicit
+  // `since`/`until` always win over a derived window.
+  const explicitSince = str(input, "since");
+  const explicitUntil = str(input, "until");
+  let derived: ReturnType<typeof parseQueryTimeWindow> = null;
+  if (
+    searchCfg.timeExpansion &&
+    explicitSince === undefined &&
+    explicitUntil === undefined
+  ) {
+    derived = parseQueryTimeWindow(query);
+    if (derived) {
+      deps.log(`time window "${derived.phrase}" -> ${derived.since}..${derived.until}`);
+    }
+  }
+
   const filters: SearchFilters = {
-    since: str(input, "since"),
-    until: str(input, "until"),
+    since: explicitSince ?? derived?.since,
+    until: explicitUntil ?? derived?.until,
     project: projectFilter,
     currentProjectOnly: scope === SCOPE_PROJECT,
     corpus: readCorpus(input),
@@ -477,6 +501,7 @@ async function runSearch(
     currentProject: projectSlug(deps.workspaceDir),
     queryVector,
     model: deps.model ?? "fts-only",
+    halfLifeDays: searchCfg.halfLifeDays,
     onError: (message: string) => errors.push(message),
   });
 

@@ -110,6 +110,13 @@ const CONFIG_TEMPLATE = `{
     // "minUniqueQueries": 3,
     // "limit": 10,
     // "maxAgeDays": 90
+  },
+
+  // 检索（Phase 3）：排序的时间衰减半衰期与查询时间窗推导。
+  // 默认值都写在代码里（search-config.ts：30 天、开启），取消注释即覆盖。
+  "search": {
+    // "halfLifeDays": 30,
+    // "timeExpansion": true
   }
 }
 `;

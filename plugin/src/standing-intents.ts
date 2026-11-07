@@ -31,11 +31,13 @@
 //   `AgentToolResult`. OpenCode's is `(input, context)` returning `{ content, metadata }`.
 //   `jsonResult` already produced the text half; this only re-labels it.
 import os from "node:os";
+import type { DatabaseSync } from "node:sqlite";
 import { createStandingIntentExecutor } from "../../extensions/memory-core/src/standing-intents-tool.js";
 import { matchStandingIntents } from "../../extensions/memory-core/src/standing-intents.js";
 import { buildStandingIntentContext } from "../../extensions/memory-core/src/standing-intents-model.js";
 import type { MemoryTool } from "./memory-tools.js";
 import { projectSlug } from "./paths.js";
+import { search, toMatchExpression } from "./memory-index.js";
 
 /** openclaw keys intents by agent; OpenCode runs one agent per plugin instance. */
 const AGENT_ID = "main";
@@ -149,10 +151,64 @@ export function buildStandingIntentTool(params: {
  * Never throws: a failed lookup omits the block rather than the turn, which is the
  * degradation upstream's own catch relies on.
  */
+/**
+ * Phase 3 item 3, the intent x memory link: when a standing intent fires, look up
+ * what the index knows about its subject and hand the model the reminder *with*
+ * the memory behind it -- "you asked me to mention X when Y ships", plus the
+ * entry that says what X is. Keyword lane only: this runs inside the per-prompt
+ * decision hook, so it must not need the embedding service. The floor is
+ * `RANKING.minScore`'s number (0.35) applied to raw text scores rather than the
+ * fused hybrid scale, which makes it *looser* than the hybrid floor -- accepted
+ * deliberately, because this block is advisory, short, and labelled as such.
+ */
+const RELATED_MIN_SCORE = 0.35;
+const RELATED_PER_INTENT = 2;
+const RELATED_TOTAL_MAX = 3;
+const RELATED_SNIPPET_CHARS = 200;
+
+async function findRelatedMemories(
+  db: DatabaseSync,
+  intents: readonly { description: string; triggerKeywords: string[] }[],
+  workspaceDir: string,
+): Promise<string> {
+  const seen = new Set<string>();
+  const lines: string[] = [];
+  for (const intent of intents) {
+    if (lines.length >= RELATED_TOTAL_MAX) break;
+    const query = [intent.description, ...(intent.triggerKeywords ?? []).slice(0, 3)]
+      .join(" ")
+      .slice(0, 240);
+    if (!toMatchExpression(query)) continue;
+    const hits = await search({
+      db,
+      query,
+      mode: "text",
+      filters: { corpus: "memory" },
+      limit: RELATED_PER_INTENT,
+      currentProject: projectSlug(workspaceDir),
+      model: "fts-only",
+    });
+    for (const hit of hits) {
+      if (lines.length >= RELATED_TOTAL_MAX) break;
+      if (hit.score < RELATED_MIN_SCORE) continue;
+      const key = `${hit.source}:${hit.path}:${hit.startLine}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const snippet = hit.snippet.replace(/\s+/g, " ").trim().slice(0, RELATED_SNIPPET_CHARS);
+      if (snippet.length === 0) continue;
+      lines.push(`- ${snippet} (${hit.path})`);
+    }
+  }
+  if (lines.length === 0) return "";
+  return `Related memory from the index (keyword match, may not be current):\n${lines.join("\n")}`;
+}
+
 export async function matchStandingIntentsForPrompt(params: {
   workspaceDir: string;
   prompt: string;
   log: (message: string, detail?: unknown) => void;
+  /** Index handle; without it the block is just upstream's reminder text. */
+  db?: DatabaseSync | null;
 }): Promise<string> {
   try {
     const fired = await matchStandingIntents({
@@ -162,7 +218,16 @@ export async function matchStandingIntentsForPrompt(params: {
       senderId: localUser(),
       channel: projectSlug(params.workspaceDir),
     });
-    return buildStandingIntentContext(fired) ?? "";
+    const context = buildStandingIntentContext(fired) ?? "";
+    if (fired.length === 0 || !params.db) return context;
+    let related = "";
+    try {
+      related = await findRelatedMemories(params.db, fired, params.workspaceDir);
+    } catch (error) {
+      // The link is an enrichment; a failed lookup costs it, never the reminder.
+      params.log("intent memory link failed", error);
+    }
+    return related.length > 0 ? `${context}\n\n${related}` : context;
   } catch (error) {
     params.log("standing intent match failed", error);
     return "";

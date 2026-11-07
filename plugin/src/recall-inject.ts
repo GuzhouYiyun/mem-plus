@@ -144,6 +144,8 @@ export async function installMemoryInjection(params: {
           workspaceDir: params.workspaceDir,
           prompt: message,
           log: params.log,
+          // Phase 3 item 3: the fired-reminder block gets its index linkage.
+          db: params.db,
         }),
       });
       // Upstream's turn taint, recorded at the seam where the recall is decided and keyed

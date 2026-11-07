@@ -1,6 +1,7 @@
 import { readFile, stat } from "node:fs/promises";
 import type { Stats } from "node:fs";
 import path from "node:path";
+import { compactMemoryForBudget } from "../../extensions/memory-core/src/memory-budget.js";
 import { readWorkspaceFileCache, writeWorkspaceFileCache } from "./workspace-file-cache.js";
 
 /**
@@ -36,7 +37,11 @@ import { readWorkspaceFileCache, writeWorkspaceFileCache } from "./workspace-fil
  *
  * Everything the memory plugin actually depends on -- the filename list and
  * order, the per-file and total character budgets, the heartbeat-block scrub, and
- * the section text -- is preserved byte for byte.
+ * the section text -- is preserved byte for byte. One deliberate addition sits on
+ * top: curated files (`MEMORY.md`, `USER.md`) are fitted to the per-file budget by
+ * whole generated blocks instead of a raw character slice, which is the fix for
+ * openclaw's #45415 (a MEMORY.md past 20k was cut mid-entry, silently). The
+ * budgets themselves -- 20_000 per file, 60_000 total -- are unchanged.
  */
 
 /** Canonical bootstrap filenames in prompt order. */
@@ -139,6 +144,56 @@ export async function readContextFile(filePath: string): Promise<string | undefi
 }
 
 /**
+ * Fit one curated file's content into the per-file injection budget (#45415,
+ * companion-plan §3 Phase 3 item 4).
+ *
+ * Uses upstream's own compaction rule (`compactMemoryForBudget`,
+ * `memory-budget.ts:180`): only *fully generated* promotion blocks are droppable,
+ * oldest first, and owner/human text is never evicted by the compactor. The
+ * `newSection: ""` shape is the write-side contract's read-side mirror -- the
+ * injection side owns no new content, it only asks "what fits".
+ *
+ * When even the preserved blocks exceed the budget the compactor honestly
+ * returns oversized content; the last resort is a cut at a line boundary, not at
+ * an arbitrary character, so an entry can never be delivered half-written.
+ */
+const budgetFitWarned = new Set<string>();
+
+export function fitCuratedToBudget(
+  name: string,
+  content: string,
+  log: (message: string, detail?: unknown) => void,
+): string {
+  if (content.length <= MAX_CHARS_PER_FILE) return content;
+  const compacted = compactMemoryForBudget({
+    existingMemory: content,
+    newSection: "",
+    budgetChars: MAX_CHARS_PER_FILE,
+  });
+  if (compacted.compacted.length <= MAX_CHARS_PER_FILE) {
+    const key = `${name}:blocks:${compacted.compacted.length}`;
+    if (!budgetFitWarned.has(key)) {
+      budgetFitWarned.add(key);
+      log(
+        `injection budget: ${name} over ${MAX_CHARS_PER_FILE} chars, ${compacted.droppedDates.length} generated block(s) withheld from injection`,
+      );
+    }
+    return compacted.compacted;
+  }
+  const cut = compacted.compacted.slice(0, MAX_CHARS_PER_FILE);
+  const lineBreak = cut.lastIndexOf("\n");
+  const clipped = lineBreak > 0 ? cut.slice(0, lineBreak) : cut;
+  const key = `${name}:clip:${clipped.length}`;
+  if (!budgetFitWarned.has(key)) {
+    budgetFitWarned.add(key);
+    log(
+      `injection budget: ${name} exceeds ${MAX_CHARS_PER_FILE} chars of non-generated content; injected up to a line boundary`,
+    );
+  }
+  return clipped;
+}
+
+/**
  * Read the bootstrap files that exist in `dir`, in prompt order, honouring both
  * character budgets. Missing files are skipped rather than rendered as empty
  * headings. Reads go through `readContextFile` (upstream's identity cache).
@@ -146,6 +201,7 @@ export async function readContextFile(filePath: string): Promise<string | undefi
 export async function loadBootstrapContextFiles(
   dir: string,
   names: readonly string[] = BOOTSTRAP_FILENAMES,
+  log?: (message: string, detail?: unknown) => void,
 ): Promise<ContextFile[]> {
   const wanted = BOOTSTRAP_FILENAMES.filter((name) => names.includes(name));
   const result: ContextFile[] = [];
@@ -157,7 +213,11 @@ export async function loadBootstrapContextFiles(
     const content = await readContextFile(fullPath);
     if (content === undefined) continue; // absent, unreadable, or a directory: nothing to inject
     const truncated =
-      content.length > MAX_CHARS_PER_FILE ? content.slice(0, MAX_CHARS_PER_FILE) : content;
+      content.length > MAX_CHARS_PER_FILE
+        ? name === "MEMORY.md" || name === "USER.md"
+          ? fitCuratedToBudget(name, content, log ?? (() => {}))
+          : content.slice(0, MAX_CHARS_PER_FILE)
+        : content;
     if (truncated.length === 0) continue;
     remainingTotal -= truncated.length;
     result.push({ name, path: fullPath, content: truncated });

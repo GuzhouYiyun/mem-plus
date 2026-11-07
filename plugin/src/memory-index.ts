@@ -1152,6 +1152,12 @@ export async function fuseRankings(params: {
   vector: readonly SearchHit[];
   limit: number;
   currentProject?: string;
+  /**
+   * Override for the temporal-decay half-life (companion-plan Phase 3 item 2,
+   * `search.halfLifeDays` in config). Absent means upstream's 30 days
+   * (`RANKING.halfLifeDays`, itself `memory-search.ts:122`).
+   */
+  halfLifeDays?: number;
   /** Test hook for the time-dependent decay. */
   nowMs?: number;
 }): Promise<SearchHit[]> {
@@ -1209,7 +1215,10 @@ export async function fuseRankings(params: {
     keyword,
     vectorWeight: RANKING.vectorWeight,
     textWeight: RANKING.textWeight,
-    temporalDecay: { enabled: true, halfLifeDays: RANKING.halfLifeDays },
+    temporalDecay: {
+      enabled: true,
+      halfLifeDays: params.halfLifeDays ?? RANKING.halfLifeDays,
+    },
     mmr: { enabled: true, lambda: RANKING.mmrLambda },
     // The current project ranks above other projects (x1.15) and below nothing
     // (x0.9). Cross-project search stays the default because the index is shared.
@@ -1251,6 +1260,8 @@ export function search(params: {
    */
   model: string;
   onError?: (message: string) => void;
+  /** Forwarded to the fusion's temporal decay; absent keeps upstream's 30 days. */
+  halfLifeDays?: number;
   /** Test hook for the time-dependent decay. */
   nowMs?: number;
 }): Promise<SearchHit[]> {
@@ -1280,6 +1291,7 @@ export function search(params: {
     vector,
     limit: params.limit,
     currentProject: params.currentProject,
+    halfLifeDays: params.halfLifeDays,
     nowMs: params.nowMs,
   });
 }
