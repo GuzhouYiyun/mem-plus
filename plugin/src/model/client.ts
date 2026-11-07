@@ -84,7 +84,7 @@ export type MemPlusService = {
  * is waiting on the embed model would leave the request running to completion --
  * and an embed on this hardware is seconds, not milliseconds.
  */
-function postJson(
+export function postJson(
   url: string,
   body: unknown,
   timeoutMs: number,

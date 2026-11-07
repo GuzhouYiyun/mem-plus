@@ -47,6 +47,7 @@
 //   behaviour it wraps -- which tools, how many rounds, what counts as a usable answer --
 //   follows upstream's settings.
 import { resolveRecallEscalationDecision } from "../../extensions/active-memory/escalation.js";
+import type { RecallIntentGate } from "./recall-intent-embed.js";
 // Nine constants that used to be transcribed into this file are now read from upstream's own
 // `types.ts`, which is vendored in this tree and byte-identical to upstream (the only
 // difference is line endings: upstream LF, this checkout CRLF). Two constants and the whole
@@ -452,6 +453,11 @@ export async function runDeepRecall(params: {
   searchQuery: string;
   hasStrongLaneOneHit: boolean;
   model?: HostedModelRef;
+  /**
+   * Embed fallback for the upstream regex gate's misses (`recall-intent-embed.ts`).
+   * Absent = upstream's coverage as-is. Never called when the regexes hit.
+   */
+  intentEmbedGate?: RecallIntentGate;
   log: (message: string, detail?: unknown) => void;
 }): Promise<DeepRecallOutcome> {
   const { config } = params;
@@ -469,6 +475,14 @@ export async function runDeepRecall(params: {
   // log when the call failed fast, 8 s when it did not answer), for recall coverage the gate
   // itself does not have. Upstream accepts its zh-Hans group's lower match rate as-is. See
   // docs/port-plan.md "长会话恢复/响应变慢:四条修复(2026-11-04)".
+  //
+  // DIVERGENCE 2026-11-08 (docs/memory-chain.md §Lane 2, "嵌入兜底门"): when upstream's
+  // regexes miss, a LOCAL bge-m3 embedding gate gets one chance to escalate. This is the
+  // sanctioned third path after the translation gate was removed for critical-path cost:
+  // the embed is ~69 ms p50 against an already-running local service, never a model call,
+  // never a service autostart, and never on the path when it is not warm (see
+  // recall-intent-embed.ts for the calibration and the discipline). `escalation.ts` stays
+  // byte-identical; a regex hit short-circuits the gate entirely.
   const resolved = resolveRecallEscalationDecision({
     mode: config.mode,
     message: params.message,
@@ -477,7 +491,17 @@ export async function runDeepRecall(params: {
 
   if (resolved === "mode-off") return { context: buildRecallOutcomePrefix("skipped-no-recall-intent") };
   if (resolved === "strong-lane-one-hit") return { context: null, reason: resolved };
-  if (resolved !== "recall") return { context: buildRecallOutcomePrefix("skipped-no-recall-intent") };
+  if (resolved === "no-recall-intent" && params.intentEmbedGate) {
+    // The regex lane declined; the embed fallback answers with a plain boolean and
+    // swallows every failure into `false`. Its cost is on the ORDER of the lane-one
+    // trigger lookup that ran just before this, not on the order of the nested agent
+    // an escalation opens.
+    if (!(await params.intentEmbedGate.evaluate(params.message))) {
+      return { context: buildRecallOutcomePrefix("skipped-no-recall-intent") };
+    }
+  } else if (resolved !== "recall") {
+    return { context: buildRecallOutcomePrefix("skipped-no-recall-intent") };
+  }
 
   // The original message feeds the search, as upstream's does. Upstream's `buildQuery` widens
   // the query with the recent conversation tail for the model's benefit; the index itself is

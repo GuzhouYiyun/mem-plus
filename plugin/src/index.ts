@@ -63,6 +63,7 @@ import { completeThroughHost } from "./llm.js";
 import { buildStandingIntentTool } from "./standing-intents.js";
 import { maybeCapturePreferences } from "./preference-capture.js";
 import { installMemoryInjection } from "./recall-inject.js";
+import { createRecallIntentGate } from "./recall-intent-embed.js";
 import { recallToolsFor, readDeepRecallConfig } from "./deep-recall.js";
 import { runPromotionRound } from "./promotion.js";
 import { runSelfGeneratedRehearsalRound } from "./rehearsal.js";
@@ -391,6 +392,20 @@ export default Plugin.define({
 
     const localService = service;
 
+    // 嵌入兜底门（2026-11-08，memory-chain §Lane 2）：只在正则落空时被判一次。
+    // 向量化不可用（无模型/fts-only）就没有这个门——召回退回上游 4/13 的覆盖面。
+    // prepare 走后台：URL 来自 probeService，绝不自启 llama-server（撤翻译门时
+    // 定下的关键路径纪律，见 recall-intent-embed.ts 头注）。
+    const recallIntentGate =
+      service && vectorsUsable
+        ? createRecallIntentGate({
+            service: serviceConfig,
+            embedModelPath: modelConfig.embedModelPath,
+            log,
+          })
+        : null;
+    void recallIntentGate?.prepare().catch((error) => log("recall-intent gate prepare failed", error));
+
     /**
      * 正在跑的引擎变体：本插件 spawn 的真身（client 活读配置后记录，仅子进程
      * 活着时有值）；服务没在跑时回落到活读配置 = 下次 spawn 会用的值。
@@ -571,6 +586,7 @@ export default Plugin.define({
         workspaceDir,
         log,
         options,
+        intentEmbedGate: recallIntentGate ?? undefined,
         recallTools: () => recallToolsFor(readDeepRecallConfig(options), retrieval),
       });
       memoryInjection = injection;

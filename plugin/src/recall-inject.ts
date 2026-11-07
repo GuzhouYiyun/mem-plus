@@ -84,6 +84,8 @@ export async function installMemoryInjection(params: {
   log: (message: string, detail?: unknown) => void;
   /** Lane 2's tool allowlist, resolved from the tools the agent already has. */
   recallTools?: () => readonly import("./memory-tools.js").MemoryTool[];
+  /** Embed fallback for the upstream recall-intent regexes; see `recall-intent-embed.ts`. */
+  intentEmbedGate?: import("./recall-intent-embed.js").RecallIntentGate;
   options?: unknown;
 }): Promise<{ dispose: () => Promise<void> }> {
   const verdicts = new Map<string, Verdict>();
@@ -130,6 +132,7 @@ export async function installMemoryInjection(params: {
         conversationContext: message,
         searchQuery: message,
         hasStrongLaneOneHit: trigger.hasStrongHit,
+        intentEmbedGate: params.intentEmbedGate,
         log: params.log,
       });
       verdicts.set(event.sessionID, {
