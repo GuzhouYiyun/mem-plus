@@ -15,6 +15,7 @@ export const translations = {
     "nav-group-memory": "记忆",
     "nav-group-config": "配置",
     "nav-group-system": "系统",
+    "btn-edit": "编辑",
     "btn-clear-secret": "清除",
     "btn-reset-default": "恢复默认",
     "btn-discard": "放弃改动",
