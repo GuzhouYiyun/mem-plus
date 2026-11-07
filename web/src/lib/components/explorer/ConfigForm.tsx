@@ -90,6 +90,9 @@ export function useConfigFile() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // "The read failed" is not "the file is absent". Without this a dead server
+  // renders as the create-a-file card and invites a POST nobody should make.
+  const [loadFailed, setLoadFailed] = useState(false);
   const [saved, setSaved] = useState<string | null>(null);
   const [models, setModels] = useState<ModelOption[] | null>(null);
   const [modelsAvailable, setModelsAvailable] = useState(true);
@@ -103,8 +106,10 @@ export function useConfigFile() {
     setLoading(false);
     if (!result.success || !result.data) {
       setError(result.error ?? t("toast-update-failed"));
+      setLoadFailed(true);
       return;
     }
+    setLoadFailed(false);
     setConfig(result.data);
     setDraft(result.data.options ?? {});
   }, [t]);
@@ -215,6 +220,7 @@ export function useConfigFile() {
     modelFiles,
     resolvedPaths,
     exists,
+    loadFailed,
     parseErrors,
     secrets,
     dirty,

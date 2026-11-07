@@ -105,6 +105,7 @@ export const translations = {
     "btn-refresh": "刷新",
     "update-checking": "检查更新…",
     "update-current": "当前版本",
+    "update-check-failed": "更新检查失败：服务或网络不可达。点刷新重试。",
     "update-available": "有新版本 {latest} 可用（当前 {current}）",
     "update-download": "下载安装包",
     "tab-runtime": "运行时",

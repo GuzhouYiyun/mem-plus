@@ -61,7 +61,7 @@ export function ConfigFileView() {
         </Button>
       </div>
 
-      {!cfg.exists ? (
+      {cfg.loadFailed ? null : !cfg.exists ? (
         <div className="rounded-xl border border-border bg-card p-4">
           <ConfigFileNotice config={cfg.config} saving={cfg.saving} onCreate={() => void cfg.save(true)} />
         </div>

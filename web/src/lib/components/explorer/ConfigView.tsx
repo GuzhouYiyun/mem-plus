@@ -56,7 +56,7 @@ export function ConfigView() {
         </div>
 
         <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-4 pb-3 pt-3 [scrollbar-gutter:stable] md:px-5">
-          {!cfg.exists ? (
+          {cfg.loadFailed ? null : !cfg.exists ? (
             <ConfigFileNotice config={cfg.config} saving={cfg.saving} onCreate={() => void cfg.save(true)} />
           ) : cfg.parseErrors.length > 0 ? (
             <ConfigParseErrors parseErrors={cfg.parseErrors} />

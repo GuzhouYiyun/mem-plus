@@ -47,7 +47,14 @@ export async function fetchAPI<T = unknown>(
     if (response.status === 401) {
       return { success: false, error: "无权访问：页面令牌缺失或不对，请刷新页面重试" };
     }
-    return (await response.json()) as ApiResult<T>;
+    // A response that is not JSON at all (an empty 502 from a proxy, a dead
+    // socket) would otherwise surface as `Failed to execute 'json' on
+    // 'Response'` -- browser jargon a reader cannot act on.
+    try {
+      return (await response.json()) as ApiResult<T>;
+    } catch {
+      return { success: false, error: "服务响应无法解析。多半是插件刚更新还没生效，刷新页面或重启 OpenCode 试试。" };
+    }
   } catch (error) {
     return {
       success: false,

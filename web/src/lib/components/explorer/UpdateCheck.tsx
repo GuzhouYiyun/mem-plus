@@ -31,7 +31,12 @@ export function UpdateCheck() {
     setChecking(true);
     const result = await fetchAPI<UpdateCheckData>("/api/update-check");
     setChecking(false);
-    if (result.success && result.data) setData(result.data);
+    if (result.success && result.data) {
+      setData(result.data);
+    } else {
+      // Leave data null: the render handles it as a visible failure line,
+      // not as a vanishing banner.
+    }
   }
 
   useEffect(() => {
@@ -47,7 +52,26 @@ export function UpdateCheck() {
     );
   }
 
-  if (!data) return null;
+  if (!data) {
+    return (
+      <Alert variant="destructive" className="shrink-0">
+        <TriangleAlert />
+        <AlertDescription>
+          <span>{t("update-check-failed")}</span>
+          <Button
+            size="sm"
+            variant="ghost"
+            className="ms-2"
+            onClick={check}
+            disabled={checking}
+          >
+            <RefreshCw className={`size-4 ${checking ? "animate-spin" : ""}`} />
+            {t("btn-refresh")}
+          </Button>
+        </AlertDescription>
+      </Alert>
+    );
+  }
 
   if (data.updateAvailable) {
     return (
