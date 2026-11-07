@@ -446,29 +446,16 @@ async function runSearch(
     }
   }
 
-  // Text mode needs at least one word FTS5 can look up. A query of nothing but
-  // punctuation or bare operators is not an empty corpus, and reporting it as
-  // "no memory matched" is the one answer that teaches the model that memories
-  // are gone. Checked after the mode is settled, because a keywordless query is
-  // perfectly valid in vector mode.
-  if (mode === "text" && !toMatchExpression(query)) {
-    return {
-      content:
-        `The query "${query}" has no searchable words in it. ` +
-        'Use mode "hybrid" or "vector" for a query with no keywords, or pass real words ' +
-        "(punctuation and the bare words AND / OR / NOT are dropped).",
-      metadata: { available: true, error: "no searchable terms" },
-    };
-  }
-
-  const searchCfg = readSearchConfig(deps.options);
-
   // Phase 3 item 2: deterministic time expansion. A query that names a period
   // ("上个月定的方案", "in 2025") searches that window even when the caller passed
-  // no dates -- the date filter only ever matches `YYYY-MM-DD.md` day files, so
-  // the expansion scopes episodic memory and cannot hide curated entries behind
-  // a wrong guess: an unrecognised phrase leaves the filters untouched. Explicit
-  // `since`/`until` always win over a derived window.
+  // no dates -- and the phrase itself comes out of the keyword terms (residual),
+  // because FTS ANDs terms and a leftover "上个月" must not be demanded inside
+  // chunks the window already scopes. The date filter excludes undated files for
+  // every window alike, so an expansion scopes episodic day files and cannot hide
+  // curated entries behind a wrong guess: an unrecognised phrase leaves the
+  // filters untouched. Explicit `since`/`until` always win over a derived window,
+  // and then the caller's words are the caller's business -- no stripping.
+  const searchCfg = readSearchConfig(deps.options);
   const explicitSince = str(input, "since");
   const explicitUntil = str(input, "until");
   let derived: ReturnType<typeof parseQueryTimeWindow> = null;
@@ -482,6 +469,7 @@ async function runSearch(
       deps.log(`time window "${derived.phrase}" -> ${derived.since}..${derived.until}`);
     }
   }
+  const termQuery = derived ? derived.residual : query;
 
   const filters: SearchFilters = {
     since: explicitSince ?? derived?.since,
@@ -491,10 +479,29 @@ async function runSearch(
     corpus: readCorpus(input),
   };
 
+  // Text mode needs at least one word FTS5 can look up. A query of nothing but
+  // punctuation or bare operators is not an empty corpus, and reporting it as
+  // "no memory matched" is the one answer that teaches the model that memories
+  // are gone. Checked after the mode is settled, because a keywordless query is
+  // perfectly valid in vector mode -- and after the time phrase is cut, because
+  // "上个月" alone is exactly that: the window is derived, nothing is left to
+  // search, and the honest answer is a notice, not an empty hit list.
+  if (mode === "text" && !toMatchExpression(termQuery)) {
+    return {
+      content:
+        `The query "${query}" has no searchable words left` +
+        (derived ? ` after the time phrase "${derived.phrase}" is cut` : "") +
+        `. ` +
+        'Use mode "hybrid" or "vector" for a query with no keywords, or pass real words ' +
+        "(punctuation and the bare words AND / OR / NOT are dropped).",
+      metadata: { available: true, error: "no searchable terms" },
+    };
+  }
+
   const errors: string[] = [];
   const ranked = await search({
     db,
-    query,
+    query: termQuery,
     mode,
     filters,
     limit,
@@ -519,7 +526,7 @@ async function runSearch(
   // nothing has ever reached `MEMORY.md`.
   void recordRetrievalRecalls({
     memoryHome: memoryHomeDir(),
-    query,
+    query: termQuery,
     results: hits as unknown as MemorySearchResult[],
   });
 

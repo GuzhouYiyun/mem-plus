@@ -28,6 +28,16 @@ export type TimeWindow = {
   readonly until: string;
   /** The matched phrase, for the log line. */
   readonly phrase: string;
+  /**
+   * The query with the matched phrase cut out, for the keyword lane. WHY THIS
+   * EXISTS: FTS terms are ANDed, and the phrase is a term like any other --
+   * `memory_search {"上个月 记忆"}` required chunks to literally contain the token
+   * 上个月 on top of the window it had already bought, and matched nothing. Measured
+   * live 2026-11-07 even after the day-column fix: the window was derived and the
+   * corpus carried the hits; the residual term killed the query. The window is the
+   * phrase's translation; the term is not paid for twice.
+   */
+  readonly residual: string;
 };
 
 const DAY_MS = 86_400_000;
@@ -192,7 +202,11 @@ export function parseQueryTimeWindow(query: string, nowMs: number = Date.now()):
     const match = query.match(rule.pattern);
     if (!match) continue;
     const bounds = rule.window(nowMs, match);
-    return { ...bounds, phrase: match[0].trim() };
+    const at = match.index ?? 0;
+    const residual = `${query.slice(0, at)} ${query.slice(at + match[0].length)}`
+      .replace(/\s+/gu, " ")
+      .trim();
+    return { ...bounds, phrase: match[0].trim(), residual };
   }
   return null;
 }
