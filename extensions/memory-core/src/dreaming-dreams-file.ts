@@ -442,6 +442,47 @@ export async function dedupeDreamDiaryEntries(params: {
   });
 }
 
+/**
+ * mem-plus divergence (2026-11-08): one diary entry per local day.
+ *
+ * Upstream appends a block on every REM run, so two sweeps in one day (two windows
+ * crossing the day boundary, a manual trigger after the scheduled one, or a crash
+ * mid-sweep) leave two entries for the same night. A diary is one entry per day for
+ * a person, and the second run is the more complete one: it reads the same memories
+ * later, with more of the day captured. So the block for the day is replaced in
+ * place instead of appended, and the newest narrative wins.
+ *
+ * The match is on the day (everything before ` at ` in `formatNarrativeDate`'s
+ * output), not the whole date line: two runs differ in their time-of-day, and that
+ * is exactly the difference being collapsed. Backfill blocks (`formatBackfillDiaryDate`
+ * has no ` at ` and no time) never match a narrative date line.
+ * See `docs/memory-chain.md` §5 and `docs/port-plan.md` 2026-11-08.
+ */
+function diaryDayOf(dateLine: string): string {
+  const at = dateLine.indexOf(" at ");
+  return (at > 0 ? dateLine.slice(0, at) : dateLine).trim();
+}
+
+function replaceDiaryBlockForDay(
+  blocks: string[],
+  dateStr: string,
+  narrative: string,
+): boolean {
+  const day = diaryDayOf(dateStr);
+  for (let i = 0; i < blocks.length; i += 1) {
+    const firstLine =
+      blocks[i]
+        ?.split("\n")
+        .map((line) => line.trim())
+        .find((line) => line.length > 0) ?? "";
+    if (!/^\*[^*].*\*$/.test(firstLine)) continue;
+    if (diaryDayOf(firstLine.slice(1, -1)) !== day) continue;
+    blocks[i] = `*${dateStr}*\n\n${narrative.trim()}`;
+    return true;
+  }
+  return false;
+}
+
 export async function appendNarrativeEntry(params: {
   workspaceDir: string;
   narrative: string;
@@ -470,6 +511,15 @@ export async function appendNarrativeEntry(params: {
         return { content: existing, result: undefined, shouldWrite: false };
       }
       let updated: string;
+      // mem-plus divergence (2026-11-08): same-day narrative replaces the day's
+      // block instead of appending a second one; see `replaceDiaryBlockForDay`.
+      const dayBlocks = readDiaryBlocks(existing);
+      if (dayBlocks && replaceDiaryBlockForDay(dayBlocks, dateStr, params.narrative)) {
+        return {
+          content: replaceDiaryContent(existing, joinDiaryBlocks(dayBlocks)),
+          result: dreamsPath,
+        };
+      }
       if (existing.includes(DIARY_START_MARKER) && existing.includes(DIARY_END_MARKER)) {
         const endIdx = existing.lastIndexOf(DIARY_END_MARKER);
         updated = existing.slice(0, endIdx) + entry + "\n" + existing.slice(endIdx);

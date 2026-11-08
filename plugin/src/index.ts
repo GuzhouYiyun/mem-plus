@@ -64,6 +64,7 @@ import { buildStandingIntentTool } from "./standing-intents.js";
 import { maybeCapturePreferences } from "./preference-capture.js";
 import { installMemoryInjection } from "./recall-inject.js";
 import { createRecallIntentGate } from "./recall-intent-embed.js";
+import { withMemoryFileLock } from "./memory-file-lock.js";
 import { recallToolsFor, readDeepRecallConfig } from "./deep-recall.js";
 import { runPromotionRound } from "./promotion.js";
 import { runSelfGeneratedRehearsalRound } from "./rehearsal.js";
@@ -1209,18 +1210,28 @@ export default Plugin.define({
         const now = Date.now();
         const today = formatMemoryDreamingDay(now);
         const marker = dreamingMarker();
-        let last = "";
-        try {
-          const fs = await import("node:fs/promises");
-          last = (await fs.readFile(marker, "utf8")).trim();
-        } catch {
-          // First run: no marker yet, treat as a new day.
-        }
-        if (last === today) return;
-        // Record the attempt first so a failed sweep does not retrigger every turn.
-        const { mkdir, writeFile } = await import("node:fs/promises");
+        // 2026-11-08：领取代次必须原子。原先是"读 marker → 写 marker"，两个
+        // 窗口同时跨过日界时都读到昨天，于是各跑一遍 sweep、各写一篇日记
+        // （DREAMS.md 里同一天两篇的成因）。现在读与写都在同一个文件锁里，
+        // 只有一个窗口能把 marker 从昨天改成今天，另一个直接返回。锁只罩住
+        // "读 + 改"，不罩 sweep 本身：sweep 要调模型，可达分钟级，占锁会挡住
+        // 另一个窗口的正常写入。中途崩溃仍按原语义"当天不再重试"。
+        const { mkdir } = await import("node:fs/promises");
         await mkdir(path.dirname(marker), { recursive: true });
-        await writeFile(marker, today, "utf8");
+        const claimed = await withMemoryFileLock(marker, async () => {
+          const fs = await import("node:fs/promises");
+          let last = "";
+          try {
+            last = (await fs.readFile(marker, "utf8")).trim();
+          } catch {
+            // First run: no marker yet, treat as a new day.
+          }
+          if (last === today) return false;
+          // Record the attempt first so a failed sweep does not retrigger every turn.
+          await fs.writeFile(marker, today, "utf8");
+          return true;
+        });
+        if (!claimed) return;
 
         // STAGE 2: consolidation's model call also moves to the user's OpenCode model, so
         // it no longer waits on `localService.ready()` -- a promotion round used to be
