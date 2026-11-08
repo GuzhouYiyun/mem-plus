@@ -313,6 +313,13 @@ export const CONFIG_SECTIONS: readonly ConfigSection[] = [
         max: 300000,
         help: "等待新启动的服务报健康的最长时间，单位毫秒。超时时日志输出 `service did not become healthy`。",
       },
+      {
+        key: "service.pauseOnBattery",
+        label: "电池时暂停",
+        kind: "boolean",
+        defaultValue: true,
+        help: "用电池时不自动启动推理服务、暂停全部后台向量嵌入（已排队的文档插电后续跑）；已运行服务上的单条查询嵌入不受影响，服务空闲后自行退出。关闭后电池上照常嵌入。仅 Windows 生效。",
+      },
       { heading: "网页" },
       {
         key: "web.enabled",

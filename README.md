@@ -121,6 +121,7 @@ New-Item -ItemType Directory -Force "$env:USERPROFILE\.config\opencode\mem-plus\
 | `model.*` | — | 模型相关，见[模型](#模型) |
 | `service.port` | `4748` | 推理服务起始端口，被占用时递增 |
 | `service.idleMinutes` | `5` | 推理服务空闲退出时间，`0` 为不退出 |
+| `service.pauseOnBattery` | `true` | 用电池时不自动启动推理服务、暂停后台向量嵌入（插电后续跑）；仅 Windows，探测不了时按市电处理 |
 | `web.port` | `4747` | 记忆浏览器端口，被占用时递增 |
 | `wiki.dir` | `~/.config/opencode/mem-plus/wiki` | 文档语料目录，递归读取其中的 markdown |
 | `wiki.enabled` | `true` | `false` 时文档语料不进入索引，`memory_wiki_import` 不再注册 |

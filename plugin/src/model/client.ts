@@ -21,6 +21,7 @@ import { existsSync } from "node:fs";
 import { request as httpRequest } from "node:http";
 import type { ModelConfig, RuntimeVariant, ServiceConfig } from "./config.js";
 import { readRuntimeSpawnFlags, serverEntryPath } from "./config.js";
+import { isBatteryPaused } from "./power.js";
 
 export type ClientLog = (message: string, detail?: unknown) => void;
 
@@ -316,6 +317,17 @@ export function createServiceClient(
     if (!service.autostart) {
       throw new Error(
         `no mem-plus service on ${service.host}:${service.port}-${service.port + PORT_SCAN_RANGE - 1} and autostart is off`,
+      );
+    }
+
+    // 电池暂停门（model/power.ts，fail-open）：隐式路径的冷启动一律不在
+    // 电池上拉起多 GB 模型——embed、repair 的 ready() 都从这里过。热服务在
+    // 上面的发现分支就已返回，不受此门影响（电池上的 70 ms 查询嵌入照放行）。
+    // Runtime 页的下载/重启按钮在 index.ts 调用点预检并返回明确中文文案，
+    // 不依赖这条英文 throw；设置关掉（pauseOnBattery=false）时这里直通。
+    if (await isBatteryPaused(service)) {
+      throw new Error(
+        "autostart paused on battery (service.pauseOnBattery): plug in, or turn the setting off",
       );
     }
 

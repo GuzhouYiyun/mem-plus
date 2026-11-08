@@ -492,6 +492,18 @@ export type ServiceConfig = {
    * nightly，见 server.mjs applyLatestNightly 与 index.ts 的启动对齐）。
    */
   readonly autoPrepareRuntime: boolean;
+  /**
+   * 电池上暂停嵌入（默认开，机主 2026-11-08 拍板：电池=不跑 bge）。
+   *
+   * 开着时在电池上：不冷启动推理服务（`connect()` 的 autostart 分支拒绝
+   * spawn，Runtime 页手动启动/重启按钮在调用点返回明确文案）、后台批量
+   * 全停（auto-embed 队列原地保留 30 s 重臂、reconcile 不探测服务、向量
+   * 修复 postponed、意图门例句库不冷建）。**不拦**的（有意）：热服务上的
+   * 单条查询嵌入与意图门微嵌入（~70 ms，省不了电反伤召回），以及显式
+   * `memory_reindex`。判定与实测见 `model/power.ts`；fail-open：探测不了
+   * 一律当市电。
+   */
+  readonly pauseOnBattery: boolean;
 };
 
 export function readServiceConfig(options: unknown): ServiceConfig {
@@ -511,6 +523,8 @@ export function readServiceConfig(options: unknown): ServiceConfig {
     startTimeoutMs: readNumber(nested["startTimeoutMs"], 30_000, 1_000, 300_000),
     runtimeVariant: readRuntimeVariant(nested["runtimeVariant"]) ?? "vulkan",
     autoPrepareRuntime: nested["autoPrepareRuntime"] !== false,
+    // 缺省即开：显式 false 才关（与 autostart 同形）。
+    pauseOnBattery: nested["pauseOnBattery"] !== false,
   };
 }
 

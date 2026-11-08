@@ -28,6 +28,7 @@ import { createHash } from "node:crypto";
 import { stateRoot } from "./paths.js";
 import { probeService, postJson } from "./model/client.js";
 import { embedderIdFor, type ServiceConfig } from "./model/config.js";
+import { isBatteryPaused } from "./model/power.js";
 
 /** 高于此且过锚点对比才升级深召回。0.65 是校准拐点：再降 FP 抬头。 */
 const THRESHOLD = 0.65;
@@ -187,6 +188,7 @@ export function createRecallIntentGate(params: {
   let url: string | null = params.service.url ?? null;
   let preparing: Promise<boolean> | null = null;
   let lastFailureLogged = false;
+  let pauseLogged = false;
 
   async function embedText(text: string): Promise<readonly number[]> {
     if (!url) throw new Error("intent gate: no service url");
@@ -230,6 +232,20 @@ export function createRecallIntentGate(params: {
     if (preparing) return preparing;
     preparing = (async () => {
       try {
+        // 电池暂停门（model/power.ts，fail-open）：例句库冷建是 53 条 ≈4 s
+        // 的批量 GPU 活，不在电池上烧；`evaluate` 的单条消息嵌入不走这里
+        // （热服务上 ~70 ms，放行，且它在消息路径上——这里只拦后台 prepare，
+        // 每回合一记日志，不逐条刷）。
+        if (await isBatteryPaused(params.service)) {
+          if (!pauseLogged) {
+            pauseLogged = true;
+            params.log(
+              "recall-intent gate: paused on battery, exemplar bank deferred (service.pauseOnBattery)",
+            );
+          }
+          return false;
+        }
+        pauseLogged = false;
         if (!url) {
           const found = await probeService(params.service);
           if (!found) return false;

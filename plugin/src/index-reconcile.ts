@@ -65,6 +65,13 @@ export type IndexReconcileOptions = {
   serviceUp: () => Promise<boolean>;
   /** Queue a background embed pass over the whole index. */
   scheduleEmbed: () => void;
+  /**
+   * 电池暂停判定（`isBatteryPaused`，见 model/power.ts）。缺省 = 不检查。
+   * 门在 `serviceUp` **之前**：探测会刷新服务的 `lastUsedAt`（server.mjs 对
+   * 每个请求都刷），先探测再判门的话热服务在电池上永远退不掉，VRAM/内存
+   * 一直被占。暂停时整段返回，日志与「no service running」同形。
+   */
+  pausedOnBattery?: () => Promise<boolean>;
 };
 
 export type IndexReconciler = {
@@ -131,6 +138,11 @@ export function createIndexReconciler(options: IndexReconcileOptions): IndexReco
       // costs one COUNT and no HTTP at all.
       const missing = options.missingVectors();
       if (missing === 0) return;
+      // 电池暂停：见 IndexReconcileOptions.pausedOnBattery——门必须在探测之前。
+      if (options.pausedOnBattery && (await options.pausedOnBattery())) {
+        options.log(`index reconcile: ${missing} chunk(s) without vectors, paused on battery`);
+        return;
+      }
       if (!(await options.serviceUp())) {
         // Honest about why nothing happened, and it is not an error: the next
         // pass asks again, which is what makes a service that was down during a

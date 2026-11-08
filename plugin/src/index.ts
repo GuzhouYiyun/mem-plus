@@ -47,6 +47,7 @@ import {
 } from "./capture-deps.js";
 import { createStorageOpenKeyedStore } from "./kv.js";
 import { readModelConfig, readRuntimeSpawnFlags, readServiceConfig, resolveEmbedAvailability, resolveRuntimeFile, runtimeCudartZipPath, runtimeDirPath, runtimeTag, runtimeZipPath, serverEntryPath, effectiveRuntimeDirPath, type RuntimeVariant } from "./model/config.js";
+import { isBatteryPaused } from "./model/power.js";
 import { readWikiConfig } from "./wiki/config.js";
 import { readWebConfig } from "./web/config.js";
 import { startWebServer } from "./web/server.js";
@@ -496,6 +497,8 @@ export default Plugin.define({
         log,
         enabled: retrieval.available && vectorsUsable,
         budget: EMBED_BUDGET,
+        // 电池暂停：队列原地保留（auto-embed.ts 的 run() 预检）。
+        pausedOnBattery: () => isBatteryPaused(serviceConfig),
       });
       scheduleAutoEmbed = (file) => autoEmbed.schedule(memoryRelativePath(file));
       disposeAutoEmbed = autoEmbed.dispose;
@@ -540,6 +543,9 @@ export default Plugin.define({
         // multi-GB model into memory, so the question is "is one already up",
         // answered by the same `probeService` the Runtime page uses.
         serviceUp: async () => (await probeService(serviceConfig)) !== null,
+        // 电池暂停：门在 serviceUp 探测之前（探测会刷 lastUsedAt，见
+        // IndexReconcileOptions.pausedOnBattery 的注释）。
+        pausedOnBattery: () => isBatteryPaused(serviceConfig),
         scheduleEmbed: () => {
           // Fire-and-forget: the pass that scheduled it has nothing to report to.
           void embedWholeIndex(EMBED_BUDGET).catch((error) =>
@@ -561,7 +567,15 @@ export default Plugin.define({
           db: index,
           retrieval,
           embedderId: modelConfig.embedderId,
-          serviceReady: () => localService?.ready() ?? Promise.resolve(false),
+          // 电池暂停也走 false：热服务上 ready() 会成功，修复是后台批量
+          // 重嵌，电池上不开跑（postponed 到下次启动/插电后的手动触发）。
+          serviceReady: async () => {
+            if (await isBatteryPaused(serviceConfig)) {
+              log("embedder repair postponed: paused on battery (service.pauseOnBattery)");
+              return false;
+            }
+            return localService?.ready() ?? false;
+          },
           log,
         }).finally(() => {
           if (embedderRepairInFlight === pending) embedderRepairInFlight = null;
@@ -672,6 +686,15 @@ export default Plugin.define({
                   activeTag: runtimeTagAtLoad,
                   probe: () => probeService(serviceConfig),
                   download: async (force: boolean): Promise<RuntimeAction> => {
+                    // 电池暂停预检放在最前：不能先拆了运行时再拒绝启动
+                    // （force 分支第一步就是 dispose + 删 zip）。文案必须
+                    // 明说原因——落到下面 ready() 的通用超时话术就是假话。
+                    if (await isBatteryPaused(serviceConfig)) {
+                      return {
+                        ok: false,
+                        detail: "电池暂停中（service.pauseOnBattery）：插电或关闭该设置后再启动服务",
+                      };
+                    }
                     // 擦的对象 = 会用到它的那一个变体；在 dispose 之前取值
                     // （dispose 后 spawn 真身消失，只剩活读配置）。
                     const variant = runningVariant();
@@ -701,6 +724,13 @@ export default Plugin.define({
                     };
                   },
                   restart: async (): Promise<RuntimeAction> => {
+                    // 电池暂停预检：同 download，先于 dispose，且给明确文案。
+                    if (await isBatteryPaused(serviceConfig)) {
+                      return {
+                        ok: false,
+                        detail: "电池暂停中（service.pauseOnBattery）：插电或关闭该设置后再重启服务",
+                      };
+                    }
                     const before = await probeService(serviceConfig);
                     await localService.dispose();
                     const started = await localService.ready();
