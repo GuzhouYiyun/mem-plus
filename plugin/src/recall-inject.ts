@@ -25,7 +25,12 @@
 import { resolveTriggerRecall } from "./trigger-recall.js";
 import { prepareProjectMemoryBootstrap } from "./project-memory.js";
 import { matchStandingIntentsForPrompt } from "./standing-intents.js";
-import { runDeepRecall, readDeepRecallConfig } from "./deep-recall.js";
+import {
+  runDeepRecall,
+  readDeepRecallConfig,
+  buildRecallOutcomePrefix,
+} from "./deep-recall.js";
+import type { RecallPushLane } from "./recall-push.js";
 import { asSessionMessage, type PluginContext, type SessionMessageView } from "./opencode.js";
 import { activeProjectKeys, prepareActiveProjectKey } from "./project-key.js";
 import { noteDeepRecall } from "./recall-taint.js";
@@ -71,6 +76,7 @@ type Verdict = {
   readonly project?: string;
   readonly standing?: string;
   readonly deep?: string;
+  readonly push?: string;
 };
 
 /**
@@ -86,6 +92,11 @@ export async function installMemoryInjection(params: {
   recallTools?: () => readonly import("./memory-tools.js").MemoryTool[];
   /** Embed fallback for the upstream recall-intent regexes; see `recall-intent-embed.ts`. */
   intentEmbedGate?: import("./recall-intent-embed.js").RecallIntentGate;
+  /**
+   * Relevance push (`recall-push.ts`): fills exactly the turns where the
+   * escalation gate declined for lack of recall intent. Absent = no push lane.
+   */
+  recallPush?: RecallPushLane;
   options?: unknown;
 }): Promise<{ dispose: () => Promise<void> }> {
   const verdicts = new Map<string, Verdict>();
@@ -135,6 +146,21 @@ export async function installMemoryInjection(params: {
         intentEmbedGate: params.intentEmbedGate,
         log: params.log,
       });
+      // Relevance push (recall-push.ts): fires only when lane 1 missed AND the
+      // escalation gate's own verdict was "this turn did not ask for past
+      // context" — the exact gap the push lane fills. A turn where either
+      // recall lane already spoke gets no second block from this one.
+      const push =
+        params.recallPush &&
+        !trigger.hasStrongHit &&
+        deep.context === buildRecallOutcomePrefix("skipped-no-recall-intent")
+          ? await params.recallPush.evaluate({
+              db: params.db,
+              sessionID: event.sessionID,
+              message,
+              activeProjectKeys,
+            })
+          : undefined;
       verdicts.set(event.sessionID, {
         trigger: trigger.context,
         project: prepareProjectMemoryBootstrap({
@@ -143,6 +169,7 @@ export async function installMemoryInjection(params: {
           log: params.log,
         }),
         deep: deep.context ?? undefined,
+        push,
         standing: await matchStandingIntentsForPrompt({
           workspaceDir: params.workspaceDir,
           prompt: message,
@@ -175,8 +202,17 @@ export async function installMemoryInjection(params: {
     // seam -- the first is upstream's bootstrap file, the second memory-core's -- so
     // they bracket that pair: project memory first, being what the host would have
     // injected before anything was decided, standing intents last, being the only
-    // block that acts rather than informs.
-    for (const text of [verdict.project, verdict.trigger, verdict.deep, verdict.standing]) {
+    // block that acts rather than informs. The push block (`recall-push.ts`, no
+    // upstream counterpart) sits after deep recall and before standing: it is
+    // background reference, so it follows the escalation verdict it complements
+    // and never displaces the one block that acts.
+    for (const text of [
+      verdict.project,
+      verdict.trigger,
+      verdict.deep,
+      verdict.push,
+      verdict.standing,
+    ]) {
       if (text) pushSystemText(event.system, text);
     }
   });
@@ -185,6 +221,7 @@ export async function installMemoryInjection(params: {
     dispose: async () => {
       await prompt.dispose();
       await context.dispose();
+      params.recallPush?.clear();
       verdicts.clear();
     },
   };

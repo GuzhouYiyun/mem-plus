@@ -438,6 +438,34 @@ export const CONFIG_SECTIONS: readonly ConfigSection[] = [
         max: 600000,
         help: "熔断后暂停的时间，单位毫秒。按模型计，不按会话。",
       },
+      { heading: "相关性推送" },
+      // `recallPush.*` 读的是配置根的 `recallPush` 对象（plugin/src/recall-push.ts 的
+      // readRecallPushConfig 一级合并），不是 `recall.*` 的子键。
+      {
+        key: "recallPush.enabled",
+        label: "启用",
+        kind: "boolean",
+        defaultValue: true,
+        help: "每轮按相关性把已晋升记忆推给模型（不要求提问里有召回意图）。与深度召回、触发召回互不重复：任一通道已发言则不推。",
+      },
+      {
+        key: "recallPush.minScore",
+        label: "最低融合分",
+        kind: "number",
+        defaultValue: 0.45,
+        min: 0,
+        max: 1,
+        help: "0.45 是本机 bge-m3 语料实测的零误报拐点（正例 5/6 推送、反例 0/10；反例最高 0.411、过线正例最低 0.457）。调低增召回但会放行 0.411 一类的噪声，调高更安静。换语料或换嵌入模型后需重新标定。",
+      },
+      {
+        key: "recallPush.maxItems",
+        label: "单轮上限",
+        kind: "number",
+        defaultValue: 3,
+        min: 1,
+        max: 10,
+        help: "单轮最多推几条记忆。",
+      },
       { heading: "长期记忆晋升" },
       {
         key: "promotion.enabled",

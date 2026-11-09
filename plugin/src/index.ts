@@ -64,6 +64,7 @@ import { completeThroughHost } from "./llm.js";
 import { buildStandingIntentTool } from "./standing-intents.js";
 import { maybeCapturePreferences } from "./preference-capture.js";
 import { installMemoryInjection } from "./recall-inject.js";
+import { createRecallPushLane } from "./recall-push.js";
 import { createRecallIntentGate } from "./recall-intent-embed.js";
 import { withMemoryFileLock } from "./memory-file-lock.js";
 import { recallToolsFor, readDeepRecallConfig } from "./deep-recall.js";
@@ -595,6 +596,19 @@ export default Plugin.define({
       // Lane 2 gets its tools from the same `buildMemoryTools` output rather than a second
       // implementation: upstream resolves `toolsAllow` against the host's memory tool
       // registry at run time, and that registry is here.
+      //
+      // Relevance push (`recall-push.ts`, no upstream counterpart): warm-only —
+      // probeService never spawns, so a cold service means this lane stays quiet
+      // instead of putting a llama-server cold start on the prompt path.
+      const recallPush =
+        service && vectorsUsable
+          ? createRecallPushLane({
+              service: serviceConfig,
+              model: modelConfig.embedderId,
+              options,
+              log,
+            })
+          : undefined;
       const injection = await installMemoryInjection({
         ctx,
         db: index,
@@ -602,6 +616,7 @@ export default Plugin.define({
         log,
         options,
         intentEmbedGate: recallIntentGate ?? undefined,
+        recallPush,
         recallTools: () => recallToolsFor(readDeepRecallConfig(options), retrieval),
       });
       memoryInjection = injection;

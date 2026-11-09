@@ -176,7 +176,7 @@ function prepareTriggerScorer(message: string): (entry: SearchHit) => number {
  *
  * `isAutomaticMemoryEntryEligible` and the project-key term are upstream's, verbatim.
  */
-function isPromotedTrustedMemoryEntry(
+export function isPromotedTrustedMemoryEntry(
   entry: SearchHit,
   activeProjectKeys: readonly string[] = [],
 ): boolean {

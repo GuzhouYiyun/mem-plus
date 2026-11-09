@@ -125,6 +125,7 @@ New-Item -ItemType Directory -Force "$env:USERPROFILE\.config\opencode\mem-plus\
 | `web.port` | `4747` | 记忆浏览器端口，被占用时递增 |
 | `wiki.dir` | `~/.config/opencode/mem-plus/wiki` | 文档语料目录，递归读取其中的 markdown |
 | `wiki.enabled` | `true` | `false` 时文档语料不进入索引，`memory_wiki_import` 不再注册 |
+| `recallPush.*` | — | 相关性推送：提问里没有召回意图时也按相关性把已晋升记忆推给模型；任一召回通道（触发召回、深度召回）已发言则不推。`recallPush.enabled` 默认 `true`、`recallPush.minScore` 默认 `0.45`（本机标定的零误报拐点，换语料需重标）、`recallPush.maxItems` 默认 `3` |
 
 未知键被忽略，不报错，键名拼错也没有提示。改完以启动日志为准核对。
 
