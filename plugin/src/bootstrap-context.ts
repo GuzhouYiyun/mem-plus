@@ -2,6 +2,8 @@ import { readFile, stat } from "node:fs/promises";
 import type { Stats } from "node:fs";
 import path from "node:path";
 import { compactMemoryForBudget } from "../../extensions/memory-core/src/memory-budget.js";
+import { isMemoryOriginEligibleForAutomaticInjection } from "../../packages/memory-host-sdk/src/host/types.js";
+import { resolveMemoryPathClassification } from "./memory-path-provenance.js";
 import { readWorkspaceFileCache, writeWorkspaceFileCache } from "./workspace-file-cache.js";
 
 /**
@@ -223,6 +225,78 @@ export async function loadBootstrapContextFiles(
     result.push({ name, path: fullPath, content: truncated });
   }
   return result;
+}
+
+/**
+ * Provenance gate for the memory file injected from the memory home (openclaw
+ * PR #189727, "bootstrap provenance visibility", merged 2026-11-02; chain
+ * `docs/memory-chain.md` §8): a curated root file whose recorded provenance was
+ * ratcheted down to `untrusted` must not ride into the system prompt -- it is
+ * still searchable, but automatic injection is reserved for `owner` / `agent`
+ * content.
+ *
+ * Upstream does this in `resolveIneligibleAutomaticMemoryFiles`
+ * (`src/agents/bootstrap-files.ts`), classifying every candidate and filtering
+ * the ineligible ones, warning once per process per file. mem-plus has exactly
+ * one such candidate (the home `MEMORY.md`; the project instruction files are
+ * not memory sources and never enter this classification), so the same rule is
+ * one call instead of a filter.
+ *
+ * TWO ADAPTATIONS:
+ *   - Upstream's warning ends with "run `openclaw doctor` for the last recorded
+ *     write". mem-plus has no doctor command and no provenance viewer in the
+ *     memory browser, so the warning is the bare exclusion line; the record
+ *     itself lives in the plugin state store (`workspace-files` namespace).
+ *   - Upstream's classifier reports `unavailable` and skips the gate rather
+ *     than failing closed. Here a classification error (a broken state store)
+ *     does the same: inject, because silently dropping all long-term memory is
+ *     the worse failure -- the same reasoning as the missing-session-id warning
+ *     at the call site. A missing file returns `untrusted`, but the caller
+ *     only reaches this helper after `readContextFile` saw content, so the
+ *     window for that is a delete racing the read. The unavailable branch warns
+ *     once per file, because the context hook fires on every model request.
+ *
+ * The once-per-process key follows upstream's
+ * `memory-provenance-exclusion\0<workspace>\0<path>\0<originClass>` shape. The
+ * set needs no bound: the key space is one file path per memory home.
+ */
+const provenanceExclusionWarned = new Set<string>();
+
+export async function isHomeMemoryInjectionAllowed(params: {
+  /** Absolute path of the curated-root file being considered for injection. */
+  absolutePath: string;
+  /** The memory home the file lives in -- the provenance workspace key. */
+  memoryHome: string;
+  log: (message: string, detail?: unknown) => void;
+}): Promise<boolean> {
+  let originClass: string;
+  try {
+    const classification = await resolveMemoryPathClassification({
+      absolutePath: params.absolutePath,
+      source: "memory",
+      workspaceDir: params.memoryHome,
+    });
+    originClass = classification.originClass;
+  } catch (error) {
+    // Once per file, not per request: the context hook fires on every model
+    // call, and a broken state store would otherwise stampede the log.
+    const unavailableKey = `memory-provenance-unavailable\0${params.absolutePath}`;
+    if (!provenanceExclusionWarned.has(unavailableKey)) {
+      provenanceExclusionWarned.add(unavailableKey);
+      params.log("memory provenance classification unavailable; injecting anyway", error);
+    }
+    return true;
+  }
+  if (isMemoryOriginEligibleForAutomaticInjection(originClass)) return true;
+  const relativePath = path.basename(params.absolutePath);
+  const key = `memory-provenance-exclusion\0${params.memoryHome}\0${relativePath}\0${originClass}`;
+  if (!provenanceExclusionWarned.has(key)) {
+    provenanceExclusionWarned.add(key);
+    params.log(
+      `excluding ${relativePath} from automatic memory context: memory provenance is ${originClass}`,
+    );
+  }
+  return false;
 }
 
 /** Render the loaded files as the "# Project Context" system block. */

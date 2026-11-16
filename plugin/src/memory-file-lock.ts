@@ -1,18 +1,28 @@
 // Serialising mem-plus's memory-file appends across processes and sessions.
 //
 // UPSTREAM, and why this is not a copy of it
-//   openclaw's flush/capture writes are serialised two ways: `withMemoryWorkspaceLock`
+//   openclaw serialises memory-file writes two ways: `withMemoryWorkspaceLock`
 //   (`extensions/memory-core/src/memory-workspace-lock.ts`, a plugin-state store lease) and
 //   `withFileLock` (`src/plugin-sdk/file-lock.ts`, a `.lock` sidecar). Both are vendored in
-//   this tree and used by `short-term-promotion-apply.ts:398` -- which is exactly where
-//   upstream fixed `#131604`: the promotion write path is locked, hashed and conflict-checked
-//   before it commits, and the caller is told the write was skipped rather than told `true`.
+//   this tree; `short-term-promotion-apply.ts:398` uses them to lock, hash and conflict-check
+//   the promotion write before it commits, telling the caller the write was skipped rather
+//   than told `true`.
 //
-//   mem-plus's capture and flush writes went through `appendCaptureEntry` with no lock at all
-//   (`extensions/memory-core/src/capture/write.ts`), so the race that upstream fixed in the
-//   promotion path was still live on the two paths that write far more often. That is the
-//   defect being fixed here: the same serialisation, taken from the same upstream module,
-//   applied to the same read-modify-append shape.
+//   UPSTREAM ISSUE HISTORY, checked 2026-11-16: `#131604` was the *flush/sandbox-bridge*
+//   race (a read-modify-write with no serialisation), not the promotion path -- the
+//   promotion lock above pre-existed it. Upstream fixed `#131604` in PR `#188872`
+//   ("preserve concurrent sandbox flush notes", merged 2026-10-31) by serialising the
+//   sandbox-bridge read-modify-write through `withFileMutationQueueKeyResolution`. An
+//   earlier comment here credited `#131604` to the promotion path; that attribution was
+//   wrong and is corrected here.
+//
+//   mem-plus has no sandbox bridge. Its capture and flush writes went through
+//   `appendCaptureEntry` with no lock at all (`extensions/memory-core/src/capture/write.ts`),
+//   which is the same read-modify-write shape upstream serialised in `#188872`. That is
+//   the defect being fixed here: the same serialisation, taken from the same upstream
+//   module, applied to mem-plus's own append paths. Result (checked 2026-11-16): the
+//   equivalent fix is in place on all four append sites, so `#188872` needs no further
+//   port -- this comment is the record.
 //
 // WHAT IS DELIBERATELY NOT COPIED
 //   `withMemoryWorkspaceLock` is not used. It keys off the *memory home*, but the capture

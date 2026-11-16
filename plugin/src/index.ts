@@ -83,6 +83,7 @@ import {
   BOOTSTRAP_FILENAMES,
   buildProjectContextSection,
   fitCuratedToBudget,
+  isHomeMemoryInjectionAllowed,
   loadBootstrapContextFiles,
   readContextFile,
 } from "./bootstrap-context.js";
@@ -1190,12 +1191,23 @@ export default Plugin.define({
             // Through upstream's identity cache (`readContextFile`): a stat per model
             // request, a read only when the file actually changed.
             const rawMemory = await readContextFile(homeMemoryPath);
+            // Provenance gate (openclaw PR #189727; chain §8): when the
+            // ratchet has downgraded the home MEMORY.md to `untrusted`, it
+            // stays out of the prompt -- searchable, but never injected
+            // automatically. Warned once per process inside the helper.
+            const allowed =
+              rawMemory === undefined ||
+              (await isHomeMemoryInjectionAllowed({
+                absolutePath: homeMemoryPath,
+                memoryHome: memoryHomeDir(),
+                log,
+              }));
             // Upstream's #45415 -- a global MEMORY.md past the injection budget was
             // silently cut mid-entry. The whole file used to ride into the prompt
             // unfiltered here; now it is fitted the same block-safe way the
             // workspace files are (see `fitCuratedToBudget`).
             const memoryContent =
-              rawMemory === undefined
+              !allowed || rawMemory === undefined
                 ? ""
                 : fitCuratedToBudget(
                     DEFAULT_MEMORY_FILENAME,
