@@ -79,7 +79,9 @@ const CONFIG_TEMPLATE = `{
     // "url": "",
     "port": 4748,
     "autostart": true,
-    "idleMinutes": 5,
+    // 空闲多少分钟后推理进程退出（0 = 不退出）。每次重启都要重载向量模型，
+    // 端到端约 2.2 秒，而单次嵌入只要几十毫秒 —— 阈值给宽一点，重启就少。
+    "idleMinutes": 30,
     "startTimeoutMs": 30000
   },
 

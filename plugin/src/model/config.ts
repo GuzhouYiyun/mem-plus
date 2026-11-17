@@ -519,7 +519,10 @@ export function readServiceConfig(options: unknown): ServiceConfig {
     host: readString(nested["host"]) ?? "127.0.0.1",
     port: readNumber(nested["port"], DEFAULT_SERVICE_PORT, 1, 65_535),
     autostart: nested["autostart"] !== false,
-    idleMinutes: readNumber(nested["idleMinutes"], 5, 0, 1_440),
+    // 默认 30：每次冷启动都要重载向量模型（llama-server 自己 1.84s，端到端 2.2s），
+    // 而单次嵌入只有 55–70ms —— 空闲阈值太短时，重启开销远大于模型跑的活。
+    // 与 serve/server.mjs 的 readArgs 同源，两处必须一起改。
+    idleMinutes: readNumber(nested["idleMinutes"], 30, 0, 1_440),
     startTimeoutMs: readNumber(nested["startTimeoutMs"], 30_000, 1_000, 300_000),
     runtimeVariant: readRuntimeVariant(nested["runtimeVariant"]) ?? "vulkan",
     autoPrepareRuntime: nested["autoPrepareRuntime"] !== false,

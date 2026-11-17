@@ -299,7 +299,7 @@ export const CONFIG_SECTIONS: readonly ConfigSection[] = [
         key: "service.idleMinutes",
         label: "空闲退出",
         kind: "number",
-        defaultValue: 5,
+        defaultValue: 30,
         min: 0,
         max: 1440,
         help: "空闲多少分钟后推理进程退出。0 表示不退出。",

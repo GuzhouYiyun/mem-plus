@@ -187,7 +187,12 @@ function log(message, detail) {
 function readArgs(argv) {
   const args = {
     port: 4748,
-    idleMinutes: 5,
+    // 30 而非 5：冷启动是这条链上唯一测得出的大头 —— llama-server 载入 bge-m3
+    // 要 1.84s（解析+设备上传，不是磁盘：605MB 暖读仅 193ms），而单次嵌入只有
+    // 55–70ms。5 分钟空闲就退，等于每天把模型重载 4–44 次（2026-11-17 复盘两份日志），
+    // 每次白付 2.2s，还多出一批 GPU 初始化轮次（port-plan 记过双栈抢卡的事故）。
+    // 30 分钟把重启次数压到真正的长间隙；空闲时 GPU 占用实测 0%，代价只是常驻内存。
+    idleMinutes: 30,
     gpu: "auto",
     threads: 0,
     gpuLayers: "auto",
