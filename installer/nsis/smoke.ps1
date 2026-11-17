@@ -1,14 +1,24 @@
-# 装机冒烟 0.3.3（无通道版）：shim 拦 opencode service + 预检 + /D= temp + temp XDG。
+# 装机冒烟：shim 拦 opencode service + 预检 + /D= temp + temp XDG。
 # 验：预检过 → 静默装 exit 0 → 载荷关键件/manifest/node_modules/runtime zip 落位 →
 # 注册表两键指向 temp → shim 拦下 service、无 restart → 静默卸载清干净 → 清两键。
+# 用法：.\smoke.ps1            # 跑 dist 里最新的 exe
+#       .\smoke.ps1 -Version 0.3.8
+param([string]$Version = "")
 $ErrorActionPreference = "Continue"
 
 $Repo     = "C:\Users\21991\repos\mem-plus"
-$Exe      = Join-Path $Repo "installer\nsis\dist\mem-plus-installer-0.3.3.exe"
-$TestDir  = "C:\Users\21991\AppData\Local\Temp\opencode\smoke33\inst"
-$CfgRoot  = "C:\Users\21991\AppData\Local\Temp\opencode\smoke33\xdg"
-$ShimDir  = "C:\Users\21991\AppData\Local\Temp\opencode\smoke33\ocshim"
-$ShimLog  = "C:\Users\21991\AppData\Local\Temp\opencode\smoke33\shim.log"
+$DistDir  = Join-Path $Repo "installer\nsis\dist"
+if (-not $Version) {
+  $Newest = Get-ChildItem (Join-Path $DistDir "mem-plus-installer-*.exe") -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending | Select-Object -First 1
+  if ($Newest) { $Version = ($Newest.BaseName -replace '^mem-plus-installer-', '') }
+}
+$Exe      = Join-Path $DistDir "mem-plus-installer-$Version.exe"
+$SmokeRoot = Join-Path $env:TEMP "opencode\smoke$(($Version -replace '\.', ''))"
+$TestDir  = Join-Path $SmokeRoot "inst"
+$CfgRoot  = Join-Path $SmokeRoot "xdg"
+$ShimDir  = Join-Path $SmokeRoot "ocshim"
+$ShimLog  = Join-Path $SmokeRoot "shim.log"
 $Results  = @()
 
 function Check([string]$name, [bool]$pass, [string]$detail = "") {
@@ -17,7 +27,7 @@ function Check([string]$name, [bool]$pass, [string]$detail = "") {
 }
 
 if (-not (Test-Path $Exe)) { Write-Output "FATAL: exe missing $Exe"; exit 1 }
-Remove-Item "C:\Users\21991\AppData\Local\Temp\opencode\smoke33" -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item $SmokeRoot -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $TestDir, $CfgRoot, $ShimDir | Out-Null
 
 # ---- shim：service 子命令恒失败（装机会重启机主 service 的实害防线），其余转发 ----
@@ -97,5 +107,5 @@ $Failed = @($Results | Where-Object { -not $_.pass })
 Write-Output ""
 Write-Output ("==== {0}/{1} PASS ====" -f ($Results.Count - $Failed.Count), $Results.Count)
 foreach ($f in $Failed) { Write-Output ("FAIL: {0} | {1}" -f $f.name, $f.detail) }
-Remove-Item "C:\Users\21991\AppData\Local\Temp\opencode\smoke33" -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item $SmokeRoot -Recurse -Force -ErrorAction SilentlyContinue
 if ($Failed.Count -gt 0) { exit 1 }
